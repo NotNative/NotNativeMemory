@@ -1,0 +1,7 @@
+# NotNativeMemory - MCP Memory Server
+mcp>=1.0.0
+asyncpg>=0.29.0
+sentence-transformers>=3.0.0,<5.0.0
+transformers>=4.40.0,<5.0.0
+python-dotenv>=1.0.0
+numpy>=1.26.0

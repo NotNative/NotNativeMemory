@@ -1,0 +1,35 @@
+# Secrets & environment
+.env
+*.env
+!.env.example
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+.venv/
+venv/
+
+# Models (downloaded at install)
+models/
+
+# Local install state
+.install-manifest.json
+
+# Claude Code config
+claude/
+
+# Planning docs
+docs/PLANNING.md
+
+# IDE & OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+desktop.ini

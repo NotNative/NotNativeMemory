@@ -1,0 +1,61 @@
+name: notnative-memory
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: MCP-postgres
+    restart: unless-stopped
+    # Env file lives one level up (project root). Compose resolves relative
+    # to this file's directory, so ../.env is correct. Without this, variable
+    # substitution fails when containers are recreated after a Docker update.
+    env_file: ../.env
+    expose:
+      - "5432"
+    environment:
+      POSTGRES_DB: ${MEMORY_DB_NAME:-notnative_memory}
+      POSTGRES_USER: ${MEMORY_DB_USER:-memory}
+      POSTGRES_PASSWORD: ${MEMORY_DB_PASSWORD:?Set MEMORY_DB_PASSWORD in .env}
+    volumes:
+      - ./postgres:/var/lib/postgresql/data
+      # Auto-create schema on first init. All statements use IF NOT EXISTS
+      # so this is safe if the database was previously initialized.
+      - ../config/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${MEMORY_DB_USER:-memory} -d ${MEMORY_DB_NAME:-notnative_memory}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  mcp:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: MCP-server
+    restart: unless-stopped
+    env_file: ../.env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # Internal network connection (service name, internal port).
+      MEMORY_DB_HOST: postgres
+      MEMORY_DB_PORT: "5432"
+      MEMORY_DB_NAME: ${MEMORY_DB_NAME:-notnative_memory}
+      MEMORY_DB_USER: ${MEMORY_DB_USER:-memory}
+      MEMORY_DB_PASSWORD: ${MEMORY_DB_PASSWORD:?Set MEMORY_DB_PASSWORD in .env}
+      MEMORY_MODEL_PATH: models/gte-base-en-v1.5
+      MEMORY_DEFAULT_PROJECT: ${MEMORY_DEFAULT_PROJECT:-}
+    volumes:
+      # Embedding model downloaded during install, mounted read-only.
+      - ../models:/app/models:ro
+    ports:
+      - "${MCP_PORT:-9500}:9500"
+    networks:
+      - internal
+
+networks:
+  internal:
+    driver: bridge
+

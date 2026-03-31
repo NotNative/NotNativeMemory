@@ -1,0 +1,764 @@
+"""
+NotNativeMemory - MCP Memory Server
+
+Persistent, vector-backed memory for Claude Code and LM Studio sessions.
+Stores memories with semantic embeddings in Postgres/pgvector. Memories
+survive context compaction, session boundaries, and model changes.
+
+Supports two transport modes:
+    stdio  - launched as a child process by Claude Code / LM Studio (default)
+    http   - runs as a network service, clients connect remotely
+
+Usage:
+    python server.py              # stdio mode (launched by MCP client)
+    python server.py --http       # HTTP mode on default port 9500
+    python server.py --http 9500  # HTTP mode on custom port
+
+Tools:
+    memory_store   - Save a memory with tags and importance
+    memory_search  - Find relevant memories by semantic similarity
+    memory_forget  - Remove a memory by ID
+    memory_list    - List memories with optional filters
+"""
+
+import os
+import sys
+from typing import Optional
+from uuid import UUID
+
+from dotenv import load_dotenv
+from mcp.server.fastmcp import FastMCP
+
+load_dotenv()
+
+# Default port for HTTP transport mode
+_DEFAULT_HTTP_PORT = 9500
+
+mcp = FastMCP(
+    "NotNativeMemory",
+    json_response=True,
+    stateless_http=True,
+)
+
+
+# Set to True when running in HTTP mode. In HTTP mode, the server's
+# working directory is meaningless (it's wherever the server started).
+# Falls back to "general" instead of os.getcwd().
+_http_mode = False
+
+
+def _detect_project_directory() -> str:
+    """
+    Detect the current project directory.
+
+    stdio mode: Claude Code sets the working directory, so os.getcwd() works.
+    HTTP mode: working directory is meaningless, falls back to env var or "general".
+
+    Returns:
+        Project identifier string.
+    """
+    # Explicit env var takes priority in any mode
+    default = os.environ.get("MEMORY_DEFAULT_PROJECT", "")
+    if default:
+        return default
+
+    # stdio mode: Claude Code's working directory is inherited
+    if not _http_mode:
+        cwd = os.getcwd()
+        if cwd and cwd != "/":
+            return os.path.abspath(cwd)
+
+    # HTTP mode or no working directory: use "general" as a catch-all
+    return "general"
+
+
+@mcp.tool()
+async def memory_store(
+    content: str,
+    tags: Optional[list[str]] = None,
+    importance: str = "normal",
+    project: Optional[str] = None,
+    verbatim: bool = False,
+) -> dict:
+    """
+    Preserve something you've learned that the user will need again —
+    across compactions, sessions, and model changes. This is your hedge
+    against context loss: anything stored here survives when your working
+    memory does not.
+
+    WHEN to use:
+    - The user corrects you or states a preference — store it so you
+      never make them repeat it ("no em dashes", "always use local tz").
+    - A decision is made — store it with the reasoning, not just the
+      outcome ("chose HS256 because single-tenant, simpler key mgmt").
+    - You discover a constraint or gotcha that isn't obvious from the
+      code ("the 122B model loses instructions after two compactions").
+    - The session sets a boundary ("read-only review, do not edit files")
+      — store as critical so it surfaces even after compaction.
+
+    WHEN NOT to use:
+    - Ephemeral task state (what file am I editing right now) — that's
+      your working context, not long-term memory.
+    - Things already in the codebase — read the code instead.
+    - Facts about current state that will change (use memory_fact_add).
+
+    Tags are auto-detected from content (decision, preference, gotcha,
+    correction, constraint), so you don't need to get tagging perfect.
+    Duplicates are auto-merged — storing the same insight twice updates
+    rather than duplicates.
+
+    Args:
+        content: The memory text. Be specific and self-contained —
+            future you has no context about this session.
+        tags: Optional categorization tags. Auto-classification adds
+            more based on content, so these are supplemental.
+        importance: Controls search ranking and eviction priority.
+            critical = surfaces in every relevant search, never evicted.
+            high = prominent in results, very slow to cool.
+            normal = standard memory.
+            low = nice to have, first to be evicted under pressure.
+        project: Where this memory belongs in the scope hierarchy.
+            Auto-detected (local project) if omitted.
+
+            Pass "_global" to store a memory that applies to EVERY
+            project — user preferences, coding style rules, things
+            that aren't tied to one codebase.
+
+            Pass "_domain_<name>" to store a memory that applies to
+            any project declaring that domain — e.g. "_domain_python"
+            for Python patterns, "_domain_powershell" for PS gotchas,
+            "_domain_docker" for container patterns. Local projects
+            pick up these memories by running memory_project_configure
+            with the matching domain name.
+
+            Pass a real path (default) for project-specific memories.
+
+            Prefer broader scopes when the knowledge is portable —
+            gotchas and patterns that apply everywhere shouldn't be
+            trapped in one project.
+        verbatim: Set true when the full text matters — reasoning chains,
+            user explanations, or conversation context that would lose
+            value if you summarized it. Adds a "verbatim" tag.
+    """
+    if not content or not content.strip():
+        return {"error": "Content cannot be empty", "stored": False}
+
+    from lib.embeddings import embed
+    from lib.db import store_memory, get_or_create_project
+
+    store_tags = list(tags or [])
+    if verbatim and "verbatim" not in store_tags:
+        store_tags.append("verbatim")
+
+    project_dir = project or _detect_project_directory()
+    project_id = await get_or_create_project(project_dir)
+
+    embedding = embed(content)
+    memory_id = await store_memory(
+        content=content,
+        embedding=embedding,
+        project_id=project_id,
+        tags=store_tags,
+        importance=importance,
+    )
+
+    return {"id": str(memory_id), "stored": True}
+
+
+@mcp.tool()
+async def memory_search(
+    query: str,
+    limit: int = 10,
+    project: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    min_importance: Optional[str] = None,
+) -> dict:
+    """
+    Recall what you've learned before about a specific topic. This is
+    your primary recovery tool — use it whenever you suspect relevant
+    context exists but isn't in your current window.
+
+    WHEN to use:
+    - You're about to make a decision and want to check if the user
+      has already expressed a preference or made a prior choice.
+    - The user references something from a past session or says
+      "we talked about this" / "remember when" / "like last time."
+    - After context compaction — search for the topic you were just
+      working on to recover lost detail.
+    - Before starting work in an unfamiliar area of the codebase —
+      past sessions may have captured gotchas or constraints.
+    - You feel uncertain about a convention or approach — search
+      before guessing.
+
+    Use memory_context instead when you just need the critical working
+    set without a specific question (e.g. session start, before Bash).
+
+    Scope behavior: when searching from a local project, results
+    automatically include global memories plus any domain memories
+    matching that project's declared domains. Each result reports its
+    scope (local/domain/global) so you can see where it came from.
+
+    Args:
+        query: Natural language — describe what you're looking for as
+            if asking a colleague. "How does auth work in this project"
+            beats "auth."
+        limit: Max results (1-100, default 10).
+        project: Project scope. Auto-detected if omitted.
+            Pass empty string to search across all projects regardless
+            of scope.
+        tags: Filter to specific memory types (e.g. ["decision"]).
+        min_importance: Floor — "high" excludes normal and low memories.
+    """
+    if not query or not query.strip():
+        return {"error": "Query cannot be empty", "results": [], "count": 0}
+
+    from lib.embeddings import embed
+    from lib.db import search_memories, get_or_create_project
+
+    # Determine project scope
+    project_id = None
+    if project != "":
+        project_dir = project or _detect_project_directory()
+        project_id = await get_or_create_project(project_dir)
+
+    query_embedding = embed(query)
+    results = await search_memories(
+        query_embedding=query_embedding,
+        project_id=project_id,
+        tags=tags,
+        min_importance=min_importance,
+        limit=limit,
+    )
+
+    return {"results": results, "count": len(results)}
+
+
+@mcp.tool()
+async def memory_forget(memory_id: str) -> dict:
+    """
+    Delete a memory that is wrong, outdated, or actively harmful to
+    keep. You are the curator — stale memories poison future sessions
+    by resurfacing bad context.
+
+    WHEN to use:
+    - You discover a stored memory contradicts current reality — the
+      decision was reversed, the constraint was lifted, the preference
+      changed. Delete the old one, store the new one.
+    - A memory is causing confusion — it's ambiguous, misleading, or
+      missing enough context to be misinterpreted by a future session.
+    - The user tells you to forget something.
+
+    WHEN NOT to use:
+    - The memory is still true but just old — age alone isn't a reason
+      to forget. The thermal system handles natural decay.
+    - For facts that changed — use memory_fact_add instead, which
+      preserves history by invalidating rather than deleting.
+
+    Args:
+        memory_id: UUID of the memory to remove (from search/list results).
+    """
+    from lib.db import forget_memory
+
+    try:
+        uid = UUID(memory_id)
+    except ValueError:
+        return {"forgotten": False, "error": "Invalid memory ID format"}
+
+    deleted = await forget_memory(uid)
+    return {"forgotten": deleted}
+
+
+@mcp.tool()
+async def memory_list(
+    project: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    limit: int = 20,
+) -> dict:
+    """
+    Browse what's been stored — for curation, not recall. Use this when
+    you need to see the inventory rather than find a specific memory.
+
+    WHEN to use:
+    - The user asks "what do you remember?" or "what's stored?" — this
+      gives them a reviewable list, not a semantic best-guess.
+    - You want to audit a tag category — e.g. list all "decision" or
+      "correction" memories to check for contradictions.
+    - Before a cleanup pass — list low-importance or old memories to
+      decide what to forget.
+    - The user wants to see memories across projects (pass empty string
+      for project).
+
+    Use memory_search instead when you have a specific question — list
+    is for browsing, search is for answering.
+
+    Args:
+        project: Project scope. Auto-detected if omitted.
+            Pass empty string to list across all projects.
+        tags: Filter to specific types (e.g. ["decision", "gotcha"]).
+        limit: Max results (1-100, default 20).
+    """
+    from lib.db import list_memories, get_or_create_project
+
+    project_id = None
+    if project != "":
+        project_dir = project or _detect_project_directory()
+        project_id = await get_or_create_project(project_dir)
+
+    results = await list_memories(
+        project_id=project_id,
+        tags=tags,
+        limit=limit,
+    )
+
+    return {"memories": results, "count": len(results)}
+
+
+@mcp.tool()
+async def memory_fact_add(
+    subject: str,
+    predicate: str,
+    object: str,
+    project: Optional[str] = None,
+    confidence: float = 1.0,
+) -> dict:
+    """
+    Record a fact that is true RIGHT NOW but may change later. Unlike
+    memories (which capture observations and decisions that are always
+    valid in their original context), facts track mutable state — and
+    when the state changes, the old fact is preserved with a timestamp
+    rather than deleted.
+
+    WHEN to use:
+    - Infrastructure state: what model runs on which server, what port
+      a service uses, what version is deployed. These change during
+      upgrades and you need to track both current and historical state.
+    - Configuration choices that evolve: auth algorithm, default branch
+      name, primary database host. When these change, the old value
+      matters for understanding past decisions.
+    - Any assertion where "what was it before?" is a question someone
+      might ask later.
+
+    WHEN NOT to use:
+    - Decisions and preferences — those are memories. "We chose HS256"
+      is a decision (memory_store). "auth uses HS256" is a fact (here).
+    - One-time observations or gotchas — those don't change, use
+      memory_store.
+
+    Conflicting facts auto-resolve: if you add ("auth", "algorithm",
+    "RS256") and ("auth", "algorithm", "HS256") already exists, the
+    old fact gets a valid_to timestamp. No manual cleanup needed.
+
+    Args:
+        subject: The entity — a server name, service, component.
+        predicate: The relationship — what aspect of the subject.
+        object: The current value.
+        project: Project scope. Auto-detected if omitted.
+        confidence: How certain you are (0.0-1.0). Default 1.0.
+    """
+    if not subject or not subject.strip():
+        return {"error": "Subject cannot be empty", "stored": False}
+    if not predicate or not predicate.strip():
+        return {"error": "Predicate cannot be empty", "stored": False}
+    if not object or not object.strip():
+        return {"error": "Object cannot be empty", "stored": False}
+
+    from lib.db import add_fact, get_or_create_project
+
+    project_dir = project or _detect_project_directory()
+    project_id = await get_or_create_project(project_dir)
+
+    result = await add_fact(
+        project_id=project_id,
+        subject=subject.strip(),
+        predicate=predicate.strip(),
+        obj=object.strip(),
+        confidence=max(0.0, min(1.0, confidence)),
+    )
+
+    return {"stored": True, **result}
+
+
+@mcp.tool()
+async def memory_fact_query(
+    subject: str,
+    as_of: Optional[str] = None,
+    project: Optional[str] = None,
+) -> dict:
+    """
+    Look up what is (or was) true about an entity. Returns current
+    facts by default, or historical facts at a specific point in time.
+
+    WHEN to use:
+    - Before making assumptions about infrastructure — "what model is
+      MS-S1 running?" beats guessing from a memory that might be stale.
+    - When debugging a regression — "what was the auth config on March
+      15th?" lets you correlate changes with breakage.
+    - When the user asks "what changed?" or "when did we switch?" —
+      the temporal history shows exactly when facts were superseded.
+    - To verify before acting — if a memory says "we use port 9432"
+      but you're not sure it's current, check the fact graph.
+
+    Use memory_search instead when you're looking for context,
+    reasoning, or decisions — fact_query is for verifiable state.
+
+    Args:
+        subject: The entity to look up.
+        as_of: ISO timestamp for time-travel. Omit for current state.
+            Example: "2026-03-15T00:00:00Z"
+        project: Project scope. Auto-detected if omitted.
+            Pass empty string to search across all projects.
+    """
+    if not subject or not subject.strip():
+        return {"error": "Subject cannot be empty", "facts": [], "count": 0}
+
+    from lib.db import query_facts, get_or_create_project
+    from datetime import datetime, timezone
+
+    project_id = None
+    if project != "":
+        project_dir = project or _detect_project_directory()
+        project_id = await get_or_create_project(project_dir)
+
+    as_of_dt = None
+    if as_of:
+        try:
+            as_of_dt = datetime.fromisoformat(as_of.replace("Z", "+00:00"))
+        except ValueError:
+            return {"error": f"Invalid as_of timestamp: {as_of}", "facts": [], "count": 0}
+
+    facts = await query_facts(
+        project_id=project_id,
+        subject=subject.strip(),
+        as_of=as_of_dt,
+    )
+
+    return {"facts": facts, "count": len(facts)}
+
+
+@mcp.tool()
+async def memory_project_configure(
+    domains: list[str],
+    project: Optional[str] = None,
+) -> dict:
+    """
+    Declare which shared domains a project pulls memories from. Without
+    this, a local project sees only its own memories plus global memories.
+    With domains declared, it also pulls from matching domain-scope
+    projects — enabling cross-project knowledge sharing for language,
+    tool, or platform specifics.
+
+    WHEN to use:
+    - First time the user mentions working in this project with a
+      language or tool that has domain memories (Python, PowerShell,
+      Docker, Postgres, etc.).
+    - The user asks why a pattern they know about isn't showing up —
+      the domain may need to be declared.
+    - The user explicitly asks to share knowledge from X domain with
+      this project.
+
+    HOW the scope hierarchy works:
+    - Store to project="_global" for universal memories (user
+      preferences, coding style, communication rules).
+    - Store to project="_domain_<name>" for category-level memories
+      (e.g. _domain_python for Python patterns and gotchas).
+    - Store to a normal path for project-specific memories (default).
+    - Local projects automatically see globals; they see domains only
+      if they're declared here.
+
+    Args:
+        domains: List of domain names to declare (e.g. ["python",
+            "docker", "postgres"]). Must match the <name> suffix on
+            existing _domain_<name> projects to have effect.
+        project: Project to configure. Auto-detected if omitted.
+            Only local-scope projects can declare domains.
+    """
+    from lib.db import (
+        get_or_create_project, get_project_info, set_project_domains,
+    )
+
+    project_dir = project or _detect_project_directory()
+    project_id = await get_or_create_project(project_dir)
+
+    info = await get_project_info(project_id)
+    if info and info["scope"] != "local":
+        return {
+            "error": f"Cannot set domains on a {info['scope']}-scope project",
+            "project": info["name"],
+            "scope": info["scope"],
+        }
+
+    updated = await set_project_domains(project_id, domains)
+    return {
+        "configured": True,
+        "project": info["name"] if info else project_dir,
+        "domains": updated,
+    }
+
+
+@mcp.tool()
+async def memory_context(
+    project: Optional[str] = None,
+    max_tokens: int = 500,
+) -> dict:
+    """
+    Get your bearings quickly. Returns the most critical and actively
+    relevant memories for the current project — no query needed. This
+    is the "what do I need to know right now?" tool.
+
+    WHEN to use:
+    - Session start — call this first to recover your working set
+      before doing anything else. Cheaper than a broad search.
+    - After context compaction — you just lost detail. This gives
+      you back the essentials: active constraints, critical decisions,
+      hot preferences.
+    - In hooks before lightweight operations (Bash, git) where a full
+      semantic search would be overkill but you still need to respect
+      constraints like "read-only review" or "never push to main."
+
+    WHEN NOT to use:
+    - You have a specific question — use memory_search instead.
+      Context gives you the working set, not targeted answers.
+    - You need to browse or audit — use memory_list.
+
+    Results are ranked by importance first, then thermal activity —
+    critical memories always surface, followed by whatever you've
+    been actively working with.
+
+    Scope behavior: automatically includes global memories and any
+    domain memories matching the current project's declared domains,
+    so cross-project preferences and shared patterns surface without
+    needing to be stored in every project.
+
+    Args:
+        project: Project scope. Auto-detected if omitted.
+        max_tokens: Token budget for the response (default 500,
+            max 2000). Keeps injection lightweight.
+    """
+    from lib.db import get_context_memories, get_or_create_project
+
+    project_dir = project or _detect_project_directory()
+    project_id = await get_or_create_project(project_dir)
+
+    results = await get_context_memories(
+        project_id=project_id,
+        max_tokens=max_tokens,
+    )
+
+    return {"context": results, "count": len(results)}
+
+
+_PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mcp-server.pid")
+
+
+def _write_pid(port: int) -> None:
+    """Write current PID and port to the PID file."""
+    with open(_PID_FILE, "w") as f:
+        f.write(f"{os.getpid()}:{port}")
+
+
+def _read_pid() -> tuple:
+    """Read PID and port from PID file. Returns (pid, port) or (None, None)."""
+    if not os.path.exists(_PID_FILE):
+        return None, None
+    try:
+        with open(_PID_FILE, "r") as f:
+            parts = f.read().strip().split(":")
+            return int(parts[0]), int(parts[1])
+    except (ValueError, IndexError):
+        print(f"Warning: malformed PID file: {_PID_FILE}", file=sys.stderr)
+        return None, None
+
+
+def _is_process_alive(pid: int) -> bool:
+    """Check if a process with the given PID exists."""
+    import subprocess
+    try:
+        if sys.platform == "win32":
+            result = subprocess.run(
+                ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
+                capture_output=True, text=True, timeout=5,
+            )
+            return str(pid) in result.stdout
+        else:
+            os.kill(pid, 0)
+            return True
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+
+
+def _cleanup_pid() -> None:
+    """Remove the PID file."""
+    try:
+        os.remove(_PID_FILE)
+    except OSError as exc:
+        print(f"Warning: could not remove PID file: {exc}", file=sys.stderr)
+
+
+def _parse_port_from_args(skip_flags: tuple = ()) -> int:
+    """Extract a port number from command-line arguments."""
+    for i, arg in enumerate(sys.argv[1:], 1):
+        if arg in skip_flags or arg.startswith("--"):
+            # Check if --http has a port argument after it
+            if arg == "--http" and i + 1 < len(sys.argv):
+                try:
+                    return int(sys.argv[i + 1])
+                except ValueError:
+                    pass
+            continue
+        try:
+            return int(arg)
+        except ValueError:
+            continue
+    return _DEFAULT_HTTP_PORT
+
+
+def _spawn_background(port: int) -> None:
+    """Spawn the server as a detached background process."""
+    import subprocess
+    import time
+
+    script = os.path.abspath(__file__)
+    args = [sys.executable, script, str(port), "--foreground"]
+
+    if sys.platform == "win32":
+        CREATE_NO_WINDOW = 0x08000000
+        CREATE_NEW_PROCESS_GROUP = 0x00000200
+        proc = subprocess.Popen(
+            args,
+            creationflags=CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    else:
+        proc = subprocess.Popen(
+            args,
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+    time.sleep(2)
+    if proc.poll() is not None:
+        print(f"Server failed to start (exit code {proc.returncode})")
+        sys.exit(1)
+
+    return proc
+
+
+def _stop_running_server() -> tuple:
+    """Stop a running server if one exists. Returns (was_running, port)."""
+    pid, port = _read_pid()
+    if pid and _is_process_alive(pid):
+        import signal
+        try:
+            os.kill(pid, signal.SIGTERM)
+            print(f"Stopped server (PID {pid})")
+        except OSError as exc:
+            print(f"Failed to stop PID {pid}: {exc}")
+            sys.exit(1)
+        _cleanup_pid()
+        import time
+        time.sleep(1)
+        return True, port
+    if pid:
+        _cleanup_pid()
+    return False, port
+
+
+def _start_foreground(port: int) -> None:
+    """Run the HTTP server in the foreground (attached to console)."""
+    global _http_mode
+    _http_mode = True
+    mcp.settings.host = "0.0.0.0"
+    mcp.settings.port = port
+    mcp.settings.transport_security.enable_dns_rebinding_protection = False
+    mcp.settings.transport_security.allowed_hosts = ["*"]
+    mcp.settings.transport_security.allowed_origins = ["*"]
+
+    _write_pid(port)
+    print(f"NotNativeMemory MCP server starting on http://0.0.0.0:{port} (foreground)")
+    try:
+        mcp.run(transport="streamable-http")
+    finally:
+        _cleanup_pid()
+
+
+if __name__ == "__main__":
+    if "--help" in sys.argv or "-h" in sys.argv:
+        print("NotNativeMemory - MCP Memory Server")
+        print()
+        print("Usage:")
+        print("  python server.py [PORT]           Start HTTP server (default, port 9500)")
+        print("  python server.py --foreground     HTTP mode, attached to console")
+        print("  python server.py --mcp            stdio mode (for MCP client configs)")
+        print("  python server.py --stop           Stop a running HTTP server")
+        print("  python server.py --restart, -r    Stop and restart the HTTP server")
+        print("  python server.py --status         Show server status")
+        print("  python server.py --help           Show this help")
+        print()
+        print("The default mode is HTTP (background). Use --mcp for stdio transport")
+        print("in Claude Code / LM Studio MCP client configurations.")
+        print()
+        print("Environment:")
+        print("  MEMORY_DB_HOST       Postgres host (default: localhost)")
+        print("  MEMORY_DB_PORT       Postgres port (default: 5433)")
+        print("  MEMORY_DB_NAME       Database name (default: notnative_memory)")
+        print("  MEMORY_DB_USER       Database user (default: memory)")
+        print("  MEMORY_DB_PASSWORD   Database password (required)")
+        print("  MEMORY_MODEL_PATH    Path to embedding model")
+        print("  MEMORY_DEFAULT_PROJECT  Default project scope")
+        print()
+        print("Configuration is loaded from .env in the server directory.")
+        sys.exit(0)
+
+    elif "--status" in sys.argv:
+        pid, port = _read_pid()
+        if pid and _is_process_alive(pid):
+            print(f"NotNativeMemory server is running (PID {pid}, port {port})")
+            print(f"  Endpoint: http://0.0.0.0:{port}/mcp")
+        elif pid:
+            print(f"PID file exists (PID {pid}) but process is not running.")
+            _cleanup_pid()
+            print("  Cleaned up stale PID file.")
+        else:
+            print("NotNativeMemory server is not running.")
+        sys.exit(0)
+
+    elif "--restart" in sys.argv or "-r" in sys.argv:
+        was_running, old_port = _stop_running_server()
+        if not was_running:
+            print("No running server found, starting fresh")
+        restart_port = _parse_port_from_args(("--restart", "-r"))
+        if not restart_port or restart_port == _DEFAULT_HTTP_PORT:
+            restart_port = old_port or _DEFAULT_HTTP_PORT
+        proc = _spawn_background(restart_port)
+        print(f"NotNativeMemory server restarted (PID {proc.pid}, port {restart_port})")
+        print(f"  Endpoint: http://0.0.0.0:{restart_port}/mcp")
+        sys.exit(0)
+
+    elif "--stop" in sys.argv:
+        was_running, _ = _stop_running_server()
+        if not was_running:
+            print("No running server found (no PID file)")
+        sys.exit(0)
+
+    elif "--mcp" in sys.argv:
+        # stdio transport: launched as a child process by Claude Code / LM Studio.
+        mcp.run()
+
+    else:
+        # Default: HTTP transport. --http accepted as alias.
+        port = _parse_port_from_args()
+
+        existing_pid, _ = _read_pid()
+        if existing_pid and _is_process_alive(existing_pid):
+            print(f"Server already running (PID {existing_pid})")
+            sys.exit(1)
+
+        if "--foreground" in sys.argv:
+            _start_foreground(port)
+        else:
+            proc = _spawn_background(port)
+            print(f"NotNativeMemory MCP server started (PID {proc.pid}, port {port})")
+            print(f"  Endpoint: http://0.0.0.0:{port}/mcp")
+            print(f"  Stop:     python server.py --stop")
