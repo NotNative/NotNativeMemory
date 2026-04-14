@@ -1,0 +1,25 @@
+{
+  "_comment": "NotNativeMemory hooks for NotNativeCoder. Merged into ~/.nnc/settings.json by the installer.",
+  "_identifier": "notnative-memory",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "command": "python {{INSTALL_PATH}}/nnc/hooks/user_prompt_inject.py",
+        "timeout_ms": 10000
+      }
+    ],
+    "PreToolUse": [
+      {
+        "command": "python {{INSTALL_PATH}}/nnc/hooks/memory_inject.py",
+        "matcher": "edit_file|write_file|read_file|bash",
+        "timeout_ms": 10000
+      }
+    ],
+    "PreCompact": [
+      {
+        "command": "python {{INSTALL_PATH}}/nnc/hooks/compact_guard.py",
+        "timeout_ms": 10000
+      }
+    ]
+  }
+}

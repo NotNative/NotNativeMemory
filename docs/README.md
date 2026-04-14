@@ -114,19 +114,37 @@ Append the contents of `claude/memory-instructions.md` to your existing CLAUDE.m
 **Any other MCP-compatible platform (LM Studio, Cline, Continue.dev, Cursor, custom agents):**
 Paste [`docs/memory-persona.md`](memory-persona.md) into the system prompt / persona / custom instructions field. It's platform-neutral and covers all eight tools, when to use each, and the scope hierarchy.
 
-## Optional: Claude Code Hooks
+## Optional: Ambient Memory via Hooks
 
-The repo ships with three Claude Code hooks under `claude/hooks/` that make memory ambient — the model doesn't have to remember to search, relevant context just shows up:
+The repo ships hook bundles for two agent platforms that make memory ambient — the model doesn't have to remember to search, relevant context just shows up. Three hooks per platform, each firing at a different moment in the turn:
 
-- **`user_prompt_inject.py`** (UserPromptSubmit) — fires when the user sends a message, searches memory using the prompt text, and injects matches so the model has relevant context *before* it starts reasoning. Catches decisions at the moment they're framed.
-- **`memory_inject.py`** (PreToolUse) — fires before Edit/Write/Bash, searches memory using tool-specific context (file extension, command keywords), and injects action-specific gotchas and preferences.
-- **`compact_guard.py`** (PreCompact) — fires before context compaction, injects critical rules and top memories so operational discipline survives compression.
+- **UserPromptSubmit** — fires when the user sends a message, searches memory using the prompt text, and injects matches *before* the model reasons about the request. Catches decisions at the moment they're framed.
+- **PreToolUse** — fires before file edits or shell commands, searches with tool-specific context (file extension, command keywords), and injects action-specific gotchas.
+- **PreCompact** — fires before context compaction, injects critical rules and top memories so operational discipline survives compression.
 
 Together they cover the three points in a turn where memory matters most: when the user states intent, when the model takes action, and when the window is about to shrink.
 
-The install script wires them up automatically. For manual setup, tuning, or adapting them for another platform, see [`claude/hooks/README.md`](../claude/hooks/README.md).
+### Claude Code
 
-These hooks use Claude Code's hook protocol specifically, but the core logic (query building, MCP search, formatting) is platform-agnostic — adapters for other platforms with equivalent hook systems are straightforward.
+Located at `claude/hooks/`. Claude Code's install script wires them up automatically. For manual setup or tuning, see [`claude/hooks/README.md`](../claude/hooks/README.md).
+
+Tool matcher: `Edit|Write|Bash`.
+
+### NotNativeCoder (NNC)
+
+Located at `nnc/hooks/`. Install manually:
+
+```bash
+python nnc/hooks/merge_hooks.py /absolute/path/to/NotNativeMemory http://localhost:9500/mcp
+```
+
+The installer idempotently writes to `~/.nnc/settings.json` and generates `nnc/hooks/hooks.env`. See [`nnc/hooks/README.md`](../nnc/hooks/README.md) for payload format, tuning, and the exact settings it produces.
+
+Tool matcher: `edit_file|write_file|read_file|bash`.
+
+### Other platforms
+
+The hook logic (query building, MCP search over HTTP, response formatting) is platform-agnostic. Porting to a platform with an equivalent hook system is mostly adjusting the stdin payload field names and the config file shape.
 
 ## Multi-Machine Setup
 
@@ -253,6 +271,14 @@ claude/
         memory_inject.py        - PreToolUse hook (action-specific gotchas)
         compact_guard.py        - PreCompact hook (rules + top memories)
         merge_hooks.py          - Idempotent installer for ~/.claude/settings.json
+        hooks-config.json       - Hook registration snippet template
+nnc/
+    hooks/
+        README.md               - NNC hook setup and payload reference
+        user_prompt_inject.py   - UserPromptSubmit hook (context on every prompt)
+        memory_inject.py        - PreToolUse hook (edit_file/write_file/read_file/bash)
+        compact_guard.py        - PreCompact hook (rules + top memories)
+        merge_hooks.py          - Idempotent installer for ~/.nnc/settings.json
         hooks-config.json       - Hook registration snippet template
 models/
     gte-base-en-v1.5/   - Embedding model (downloaded by install script)

@@ -22,6 +22,9 @@ models/
 # Claude Code per-project state (not our shipped claude/ templates)
 .claude/
 
+# NotNativeCoder per-project state (not our shipped nnc/ templates)
+.nnc/
+
 # Planning docs
 docs/PLANNING.md
 
