@@ -151,6 +151,13 @@ def merge(install_path: str, mcp_url: str = "http://localhost:9500/mcp"):
     if "hooks" not in settings:
         settings["hooks"] = {}
 
+    # Set memoryUrl so NNC's in-process memory client knows where to
+    # connect. Only overwrites if missing or different — lets users
+    # override with their own value without losing it on re-install.
+    if settings.get("memoryUrl") != mcp_url:
+        settings["memoryUrl"] = mcp_url
+        print(f"  Set memoryUrl = {mcp_url}")
+
     changes_made = 0
 
     for event_name, config in _DESIRED_HOOKS.items():

@@ -15,6 +15,56 @@ function Write-Warn($msg) { Write-Host "[!] $msg" -ForegroundColor Yellow }
 function Write-Err($msg) { Write-Host "[x] $msg" -ForegroundColor Red }
 function Write-Info($msg) { Write-Host "    $msg" }
 
+# Detect which supported agent CLIs are on PATH and wire hooks + MCP
+# registration for whichever is present. Returns the list of agents
+# that were configured so the caller can tailor the summary output.
+function Configure-Agents($installPath, $mcpUrl) {
+    $configured = @()
+
+    $claudeInstalled = Get-Command claude -ErrorAction SilentlyContinue
+    if ($claudeInstalled) {
+        Write-Step "Configuring Claude Code hooks..."
+        python claude/hooks/merge_hooks.py "$installPath" "$mcpUrl" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Claude Code hook configuration failed. You can run this manually later:"
+            Write-Info "python claude/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`""
+        } else {
+            $configured += "claude"
+        }
+
+        Write-Step "Registering MCP memory server with Claude Code..."
+        & claude mcp add --transport http memory --scope user "$mcpUrl" 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Info "MCP server registered with Claude Code"
+        } else {
+            Write-Warn "Claude Code MCP registration failed. Run manually:"
+            Write-Info "claude mcp add --transport http memory --scope user `"$mcpUrl`""
+        }
+    }
+
+    $nncInstalled = Get-Command nnc -ErrorAction SilentlyContinue
+    if ($nncInstalled) {
+        Write-Step "Configuring NotNativeCoder hooks..."
+        python nnc/hooks/merge_hooks.py "$installPath" "$mcpUrl" 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "NotNativeCoder hook configuration failed. You can run this manually later:"
+            Write-Info "python nnc/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`""
+        } else {
+            $configured += "nnc"
+            Write-Info "memoryUrl and hooks written to ~/.nnc/settings.json"
+        }
+    }
+
+    if ($configured.Count -eq 0) {
+        Write-Info "No supported agent CLIs detected (claude, nnc)."
+        Write-Info "To configure manually after installing one:"
+        Write-Info "  python claude/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`"  # Claude Code"
+        Write-Info "  python nnc/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`"     # NotNativeCoder"
+    }
+
+    return ,$configured
+}
+
 $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $SCRIPT_DIR
 $INSTALL_PATH = (Get-Location).Path -replace '\\', '/'
@@ -25,7 +75,8 @@ $MANIFEST_FILE = ".install-manifest.json"
 Write-Host ""
 Write-Host "+==========================================+"
 Write-Host "|  NotNativeMemory - MCP Memory Server     |"
-Write-Host "|  Persistent memory for Claude Code / LMS |"
+Write-Host "|  Persistent memory for MCP-compatible    |"
+Write-Host "|  agents (Claude Code, NNC, LM Studio...) |"
 Write-Host "+==========================================+"
 Write-Host ""
 
@@ -136,30 +187,9 @@ if ($installMode -eq "client") {
         Write-Info "Hooks will be configured anyway. Start the remote server before using."
     }
 
-    # Configure hooks and register MCP server (if Claude Code is installed)
-    $claudeInstalled = Get-Command claude -ErrorAction SilentlyContinue
-    if ($claudeInstalled) {
-        Write-Step "Configuring Claude Code hooks..."
-        python claude/hooks/merge_hooks.py "$INSTALL_PATH" "$MCP_URL" 2>&1
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "Hook configuration failed. You can run this manually later:"
-            Write-Info "python claude/hooks/merge_hooks.py `"$INSTALL_PATH`" `"$MCP_URL`""
-        }
-
-        Write-Step "Registering MCP memory server with Claude Code..."
-        & claude mcp add --transport http memory --scope user "$MCP_URL" 2>&1
-        if ($LASTEXITCODE -eq 0) {
-            Write-Info "MCP server registered (tools: memory_store, memory_search, memory_forget, memory_list)"
-        } else {
-            Write-Warn "MCP registration failed. You can run this manually:"
-            Write-Info "claude mcp add --transport http memory --scope user `"$MCP_URL`""
-        }
-    } else {
-        Write-Info "Claude Code not detected - skipping hook and MCP registration"
-        Write-Info "To configure manually after installing Claude Code:"
-        Write-Info "  python claude/hooks/merge_hooks.py `"$INSTALL_PATH`" `"$MCP_URL`""
-        Write-Info "  claude mcp add --transport http memory --scope user `"$MCP_URL`""
-    }
+    # Configure hooks + MCP registration for whichever supported agent
+    # CLI is installed on this machine (Claude Code, NotNativeCoder).
+    $configuredAgents = Configure-Agents $INSTALL_PATH $MCP_URL
 
     # Write manifest
     @{
@@ -517,29 +547,12 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # -----------------------------------------------------------------------
-# 10. Configure Claude Code hooks (if Claude Code is installed)
+# 10. Configure hooks + MCP registration for any installed agent CLIs
 # -----------------------------------------------------------------------
 $MCP_URL = "http://localhost:$MCP_PORT/mcp"
-$claudeInstalled = Get-Command claude -ErrorAction SilentlyContinue
-if ($claudeInstalled) {
-    Write-Step "Configuring Claude Code hooks..."
-    python claude/hooks/merge_hooks.py "$INSTALL_PATH" "$MCP_URL" 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Hook configuration failed. You can run this manually later:"
-        Write-Info "python claude/hooks/merge_hooks.py `"$INSTALL_PATH`" `"$MCP_URL`""
-    }
-
-    Write-Step "Registering MCP memory server with Claude Code..."
-    & claude mcp add --transport http memory --scope user "$MCP_URL" 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Write-Info "MCP server registered (tools: memory_store, memory_search, memory_forget, memory_list)"
-    } else {
-        Write-Warn "MCP registration failed. You can run this manually:"
-        Write-Info "claude mcp add --transport http memory --scope user `"$MCP_URL`""
-    }
-} else {
-    Write-Info "Claude Code not detected - skipping hook and MCP registration"
-    Write-Info "Install hooks on client machines using option 3 (client only)"
+$configuredAgents = Configure-Agents $INSTALL_PATH $MCP_URL
+if ($configuredAgents.Count -eq 0) {
+    Write-Info "Install hooks on client machines using option 3 (client only) once you have Claude Code or NotNativeCoder set up."
 }
 
 # -----------------------------------------------------------------------
@@ -729,7 +742,16 @@ if ($installMode -eq "full") {
 } else {
     Write-Step "Database: ${DB_HOST}:${DB_PORT}/${DB_NAME} (remote)"
 }
-Write-Step "Hooks: configured in ~/.claude/settings.json"
+if ($configuredAgents -and $configuredAgents.Count -gt 0) {
+    $agentLabels = @()
+    foreach ($a in $configuredAgents) {
+        if ($a -eq "claude") { $agentLabels += "Claude Code (~/.claude/settings.json)" }
+        elseif ($a -eq "nnc") { $agentLabels += "NotNativeCoder (~/.nnc/settings.json)" }
+    }
+    Write-Step "Hooks: configured for $($agentLabels -join ', ')"
+} else {
+    Write-Step "Hooks: no supported agent CLI detected (run installer again after setup)"
+}
 Write-Host ""
 if ($installMode -eq "full") {
     Write-Info "Server is running in Docker (auto-restarts on boot)"
