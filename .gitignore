@@ -19,8 +19,8 @@ models/
 # Local install state
 .install-manifest.json
 
-# Claude Code config
-claude/
+# Claude Code per-project state (not our shipped claude/ templates)
+.claude/
 
 # Planning docs
 docs/PLANNING.md

@@ -1,18 +1,20 @@
 # NotNativeMemory
 
-Persistent, vector-backed memory for Claude Code and LM Studio. Stores memories with semantic embeddings so they survive context compaction, session boundaries, and model changes.
+Persistent, vector-backed memory for any MCP-compatible AI agent platform. Stores memories with semantic embeddings so they survive context compaction, session boundaries, and model changes.
 
 ## What This Does
 
-When you work with AI coding assistants (Claude Code, LM Studio), the conversation context has a limited window. Long sessions get compacted or truncated, and important decisions, preferences, and constraints get lost. NotNativeMemory gives the AI a persistent memory it can read and write to, so the things that matter survive.
+When you work with an AI coding assistant, the conversation context has a limited window. Long sessions get compacted or truncated, and important decisions, preferences, and constraints get lost. NotNativeMemory gives the AI a persistent memory it can read and write to, so the things that matter survive.
 
 The AI stores memories as it works (decisions, corrections, preferences) and searches for them when context is thin (session start, after compaction). You never have to manually manage it.
+
+Built and tested with **Claude Code** and **LM Studio**, but works with any platform that speaks [MCP](https://modelcontextprotocol.io) — Cline, Continue.dev, Cursor custom modes, self-hosted agents, etc. For platforms without a CLAUDE.md-style instruction file, paste [`docs/memory-persona.md`](memory-persona.md) into your system prompt so the model knows when and how to use the tools.
 
 ## Prerequisites
 
 - **Python 3.11+**
 - **Docker** (only if running the database locally)
-- **Claude Code** and/or **LM Studio** (the AI tools that will use the memory)
+- An MCP-compatible AI agent (Claude Code, LM Studio, Cline, Continue.dev, etc.)
 
 ## Install
 
@@ -99,15 +101,32 @@ Add to `~/.lmstudio/mcp.json`:
 
 The install script generates a `SETUP_COMPLETE.md` with your actual values filled in.
 
-## Add Memory Instructions to Your Project
+## Add Memory Instructions to Your Agent
 
-The AI needs to know the memory tools exist and when to use them. Two options:
+The AI needs to know the memory tools exist and when to use them. Pick the option that matches your platform:
 
-**New project (no CLAUDE.md yet):**
+**Claude Code — new project (no CLAUDE.md yet):**
 Copy `claude/CLAUDE.md` to your project root.
 
-**Existing project (has its own CLAUDE.md):**
+**Claude Code — existing project (has its own CLAUDE.md):**
 Append the contents of `claude/memory-instructions.md` to your existing CLAUDE.md.
+
+**Any other MCP-compatible platform (LM Studio, Cline, Continue.dev, Cursor, custom agents):**
+Paste [`docs/memory-persona.md`](memory-persona.md) into the system prompt / persona / custom instructions field. It's platform-neutral and covers all eight tools, when to use each, and the scope hierarchy.
+
+## Optional: Claude Code Hooks
+
+The repo ships with three Claude Code hooks under `claude/hooks/` that make memory ambient — the model doesn't have to remember to search, relevant context just shows up:
+
+- **`user_prompt_inject.py`** (UserPromptSubmit) — fires when the user sends a message, searches memory using the prompt text, and injects matches so the model has relevant context *before* it starts reasoning. Catches decisions at the moment they're framed.
+- **`memory_inject.py`** (PreToolUse) — fires before Edit/Write/Bash, searches memory using tool-specific context (file extension, command keywords), and injects action-specific gotchas and preferences.
+- **`compact_guard.py`** (PreCompact) — fires before context compaction, injects critical rules and top memories so operational discipline survives compression.
+
+Together they cover the three points in a turn where memory matters most: when the user states intent, when the model takes action, and when the window is about to shrink.
+
+The install script wires them up automatically. For manual setup, tuning, or adapting them for another platform, see [`claude/hooks/README.md`](../claude/hooks/README.md).
+
+These hooks use Claude Code's hook protocol specifically, but the core logic (query building, MCP search, formatting) is platform-agnostic — adapters for other platforms with equivalent hook systems are straightforward.
 
 ## Multi-Machine Setup
 
@@ -118,7 +137,7 @@ Run the server on one machine, connect from everywhere. No local install needed 
 
 ## Verify It Works
 
-Open Claude Code (or LM Studio) and try:
+Open your MCP-configured agent and try:
 
 1. "Store a test memory: the sky is blue"
 2. "Search your memories for sky"
@@ -209,7 +228,7 @@ docker compose -f docker/docker-compose.yml down -v
 ## File Structure
 
 ```
-server.py               - MCP server (this is what Claude Code / LM Studio runs)
+server.py               - MCP server (run by any MCP-compatible agent)
 mine.py                 - CLI for bulk-importing conversation transcripts
 lib/
     db.py               - Database operations, migration runner, scope resolution
@@ -220,11 +239,21 @@ config/
     migrations/         - Incremental schema changes, applied on first tool call
 docker/
     docker-compose.yml  - Postgres + pgvector + MCP server containers
+docs/
+    README.md           - This file
+    memory-persona.md   - Platform-neutral system prompt for any MCP agent
 claude/
-    CLAUDE.md           - Memory instructions for new projects
-    memory-instructions.md - Memory instructions to append to existing projects
+    CLAUDE.md           - Memory instructions for new Claude Code projects
+    memory-instructions.md - Short version to append to an existing CLAUDE.md
     claude-code-config.json - Claude Code MCP config template
     lmstudio-config.json    - LM Studio MCP config template
+    hooks/
+        README.md               - Hook setup and adaptation guide
+        user_prompt_inject.py   - UserPromptSubmit hook (context on every prompt)
+        memory_inject.py        - PreToolUse hook (action-specific gotchas)
+        compact_guard.py        - PreCompact hook (rules + top memories)
+        merge_hooks.py          - Idempotent installer for ~/.claude/settings.json
+        hooks-config.json       - Hook registration snippet template
 models/
     gte-base-en-v1.5/   - Embedding model (downloaded by install script)
 ```

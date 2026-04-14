@@ -1,0 +1,42 @@
+{
+  "_comment": "NotNativeMemory hooks for Claude Code. Merged into ~/.claude/settings.json by the installer.",
+  "_identifier": "notnative-memory",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python {{INSTALL_PATH}}/claude/hooks/user_prompt_inject.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Edit|Write|Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python {{INSTALL_PATH}}/claude/hooks/memory_inject.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python {{INSTALL_PATH}}/claude/hooks/compact_guard.py",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

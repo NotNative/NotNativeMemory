@@ -92,7 +92,7 @@ async def memory_store(
     - A decision is made — store it with the reasoning, not just the
       outcome ("chose HS256 because single-tenant, simpler key mgmt").
     - You discover a constraint or gotcha that isn't obvious from the
-      code ("the 122B model loses instructions after two compactions").
+      code ("this model loses instructions after two compactions").
     - The session sets a boundary ("read-only review, do not edit files")
       — store as critical so it surfaces even after compaction.
 
@@ -390,7 +390,7 @@ async def memory_fact_query(
 
     WHEN to use:
     - Before making assumptions about infrastructure — "what model is
-      MS-S1 running?" beats guessing from a memory that might be stale.
+      the inference host running?" beats guessing from a memory that might be stale.
     - When debugging a regression — "what was the auth config on March
       15th?" lets you correlate changes with breakage.
     - When the user asks "what changed?" or "when did we switch?" —
