@@ -12,8 +12,8 @@ Built and tested with **Claude Code** and **LM Studio**, but works with any plat
 
 ## Prerequisites
 
-- **Python 3.11+**
-- **Docker** (only if running the database locally)
+- **Docker** — required for full install, recommended for server-only install, not needed for client-only install
+- **Python 3.11+** — required on any machine that runs the server as a host process (server-only without Docker) or the hook scripts (any mode with hooks enabled)
 - An MCP-compatible AI agent (Claude Code, LM Studio, Cline, Continue.dev, etc.)
 
 ## Install
@@ -30,38 +30,79 @@ powershell -ExecutionPolicy Bypass -File install_windows.ps1
 bash install_linux.sh
 ```
 
-The install script will:
+The installer asks which of three modes you want:
 
-1. Ask if your database is local (Docker) or remote (existing Postgres on your network)
-2. Set up the database (or connect to your remote one)
-3. Install Python dependencies
-4. Download the embedding model (~130MB, runs on CPU)
-5. Run a self-test to verify everything works
-6. Print the configuration to add to your AI tools
+1. **Full** — Postgres + MCP server both run as Docker containers on this machine. No Python required on the host. Auto-starts on boot.
+2. **Server only** — MCP server runs here, Postgres is on another machine. You choose whether the server runs as a Docker container (recommended, auto-restarts) or as a host Python process. The installer falls back to Python automatically if Docker isn't available.
+3. **Client only** — no server on this machine, just hooks + MCP config pointing at a remote server.
 
-## Start the Server
+Depending on the mode, the installer also:
+
+- Starts the Docker stack (full / server-docker) or installs Python deps (server-python).
+- Writes `.env` with your DB credentials.
+- Downloads the embedding model (~130MB, CPU-only).
+- Applies the schema to your remote DB if server mode.
+- Runs a self-test against the live server.
+- Detects `claude` and/or `nnc` on your PATH and auto-wires the hook bundle and MCP registration for whichever is present.
+- Emits `SETUP_COMPLETE.md` with the commands and paths for your specific install.
+
+## Managing the Server
+
+### Full install (Docker, local Postgres)
 
 ```bash
-python server.py --http        # Start as network service (recommended)
-python server.py --stop        # Stop the server
-python server.py --http --foreground  # Stay attached (debugging)
+docker compose -f docker/docker-compose.yml --profile full up -d      # start
+docker compose -f docker/docker-compose.yml --profile full down       # stop
+docker compose -f docker/docker-compose.yml logs mcp                   # view logs
 ```
 
-HTTP mode is recommended. The server runs on port 9500 and any machine on your network can connect to it. No local install needed on client machines.
+Auto-restarts on boot (`restart: unless-stopped`). Reachable on port 9500.
+
+### Server only, Docker backend (remote Postgres)
+
+```bash
+docker compose -f docker/docker-compose.yml --profile server up -d mcp    # start
+docker compose -f docker/docker-compose.yml --profile server down         # stop
+docker compose -f docker/docker-compose.yml logs mcp                       # view logs
+```
+
+Same auto-restart behavior. The `server` Compose profile runs just the `mcp` container; Postgres connection details come from `.env`.
+
+### Server only, Python backend (remote Postgres)
+
+```bash
+python server.py              # HTTP mode (default), backgrounded
+python server.py --foreground # stay attached (debugging)
+python server.py --stop       # stop a running HTTP server
+python server.py --status     # check status
+python server.py --mcp        # stdio mode (for MCP clients that launch the server themselves)
+```
+
+No reboot-survival unless you wire up a service manager (systemd, launchd, Task Scheduler).
+
+### Client only
+
+No server on this machine — the hooks talk to the remote MCP URL configured at install time.
 
 ## Configure Your AI Tools
 
-### Option A: HTTP Mode (recommended - works from any machine)
+**In most cases you don't need to.** The installer detects `claude` and `nnc` on your PATH and wires both the hook bundle (under `~/.claude/` and/or `~/.nnc/`) and the MCP server registration automatically. Skip ahead to [Add Memory Instructions to Your Agent](#add-memory-instructions-to-your-agent) if you used the installer.
 
-Start the server on the host machine, then on any client:
+If you installed an agent CLI after running the installer, rerun it — it's idempotent, and the detection step will pick up the new CLI without reconfiguring existing ones.
 
-**Claude Code:**
+### Manual MCP registration (reference)
+
+**Claude Code — HTTP transport (server running remotely or locally on port 9500):**
 ```bash
 claude mcp add --transport http memory --scope user http://YOUR_SERVER:9500/mcp
 ```
 
-**LM Studio:**
-Add to `~/.lmstudio/mcp.json`:
+**Claude Code — stdio transport (launch the server per session on this machine, Python backend only):**
+```bash
+claude mcp add --transport stdio memory --scope user -- python server.py --mcp
+```
+
+**LM Studio and other HTTP-capable clients** — add to `~/.lmstudio/mcp.json` (or equivalent):
 ```json
 {
   "memory": {
@@ -71,35 +112,7 @@ Add to `~/.lmstudio/mcp.json`:
 }
 ```
 
-### Option B: stdio Mode (this machine only)
-
-Claude Code launches the server automatically per session. No need to start it manually.
-
-**Claude Code:**
-```bash
-claude mcp add --transport stdio memory --scope user -- python server.py
-```
-
-**LM Studio:**
-Add to `~/.lmstudio/mcp.json`:
-```json
-{
-  "memory": {
-    "command": "python",
-    "args": ["/path/to/NotNativeMemory/server.py"],
-    "env": {
-      "MEMORY_DB_HOST": "localhost",
-      "MEMORY_DB_PORT": "5433",
-      "MEMORY_DB_NAME": "notnative_memory",
-      "MEMORY_DB_USER": "memory",
-      "MEMORY_DB_PASSWORD": "your-password-here",
-      "MEMORY_MODEL_PATH": "/path/to/NotNativeMemory/models/gte-base-en-v1.5"
-    }
-  }
-}
-```
-
-The install script generates a `SETUP_COMPLETE.md` with your actual values filled in.
+The installer writes `SETUP_COMPLETE.md` with the exact commands for your specific install (hostname, port, paths filled in).
 
 ## Add Memory Instructions to Your Agent
 
@@ -229,19 +242,19 @@ Each user/assistant exchange becomes a memory, auto-classified and deduplicated 
 
 ## Uninstall
 
+The uninstaller reads `.install-manifest.json` and only removes what was installed, so it's safe whatever mode you picked.
+
 ```bash
-# Stop and remove the Docker container (local DB only)
-docker compose -f docker/docker-compose.yml down -v
-
-# Remove MCP config from Claude Code settings
-# Edit ~/.claude/settings.json and remove the "memory" block
-
-# Remove MCP config from LM Studio
-# Edit ~/.lmstudio/mcp.json and remove the "memory" block
-
-# Delete the project folder
-# rm -rf /path/to/NotNativeMemory
+bash uninstall_linux.sh             # stop containers, remove hooks + MCP registration
+bash uninstall_linux.sh --full      # also delete the Postgres data directory (full install only)
 ```
+
+```powershell
+powershell -ExecutionPolicy Bypass -File uninstall_windows.ps1
+powershell -ExecutionPolicy Bypass -File uninstall_windows.ps1 -Full
+```
+
+The `.env` file and project directory are preserved — remove them manually if you want. LM Studio / other MCP clients aren't auto-cleaned; edit their config files (`~/.lmstudio/mcp.json`, etc.) to drop the `memory` block.
 
 ## File Structure
 

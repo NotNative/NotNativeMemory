@@ -83,11 +83,15 @@ has_component() {
 # 2. Stop MCP server (if running)
 # -----------------------------------------------------------------------
 if has_component "server"; then
-    step "Stopping MCP server..."
-    if [ -f ".mcp-server.pid" ]; then
-        python3 server.py --stop 2>&1 || warn "Server may not have been running"
+    if has_component "docker"; then
+        info "MCP server runs in Docker (will be stopped with containers)"
     else
-        info "No running server found"
+        step "Stopping MCP server..."
+        if [ -f ".mcp-server.pid" ]; then
+            python3 server.py --stop 2>&1 || warn "Server may not have been running"
+        else
+            info "No running server found"
+        fi
     fi
 fi
 
@@ -157,27 +161,40 @@ else:
 fi
 
 # -----------------------------------------------------------------------
-# 4. Stop and remove Docker container
+# 4. Stop and remove Docker containers
 # -----------------------------------------------------------------------
-if has_component "database"; then
-    step "Stopping Docker container..."
-    docker compose -f docker/docker-compose.yml down 2>&1 || warn "Could not stop container (Docker may not be running)"
+if has_component "docker"; then
+    step "Stopping Docker containers..."
+    # `--profile '*'` matches both the full and server profiles, so a single
+    # `down` covers either install shape.
+    docker compose -f docker/docker-compose.yml --profile '*' down 2>&1 || warn "Could not stop containers (Docker may not be running)"
 
+    # Remove the built MCP image (harmless if missing / in use)
+    docker rmi notnative-memory-mcp 2>&1 >/dev/null || true
+fi
+
+# Database volume handling is separate: only the full install owns the
+# data directory. server+docker just points at a remote DB.
+if has_component "database"; then
     if [ "$FULL_MODE" = true ]; then
-        warn "Full mode: removing Docker volume (ALL MEMORIES WILL BE DELETED)"
+        warn "Full mode: removing database data (ALL MEMORIES WILL BE DELETED)"
         read -rp "  Are you sure? This cannot be undone. [y/N]: " PURGE_CONFIRM
         case "$PURGE_CONFIRM" in
             y|Y|yes|Yes)
-                docker volume rm docker_memory_data 2>&1 || warn "Could not remove volume"
-                info "Volume removed"
+                if [ -d "docker/postgres" ]; then
+                    rm -rf docker/postgres
+                    info "Database data removed"
+                else
+                    info "No database data directory found"
+                fi
                 ;;
             *)
-                info "Volume preserved"
+                info "Database data preserved"
                 ;;
         esac
     else
-        info "Docker volume preserved (memories are safe)"
-        info "Use --full flag to also delete the database volume"
+        info "Database data preserved in docker/postgres/ (memories are safe)"
+        info "Use --full flag to also delete the database data"
     fi
 fi
 
@@ -209,6 +226,6 @@ info "  - This directory ($SCRIPT_DIR)"
 info "  - .env file (contains database credentials)"
 info "  - Python packages installed via pip"
 if [ "$FULL_MODE" = false ] && has_component "database"; then
-    info "  - Docker volume (run with --full to delete)"
+    info "  - Database data in docker/postgres/ (run with --full to delete)"
 fi
 echo ""

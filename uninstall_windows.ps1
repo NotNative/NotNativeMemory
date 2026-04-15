@@ -172,7 +172,9 @@ if ($components -contains "hooks") {
 if ($components -contains "database" -or $components -contains "docker") {
     Write-Step "Stopping Docker containers..."
     try {
-        & docker compose --env-file .env -f docker/docker-compose.yml down 2>&1 | Out-Null
+        # `--profile '*'` matches both full and server profiles so a single
+        # `down` covers either install shape.
+        & docker compose --env-file .env -f docker/docker-compose.yml --profile '*' down 2>&1 | Out-Null
         Write-Info "Containers stopped"
     } catch {
         Write-Warn "Could not stop containers (Docker may not be running)"

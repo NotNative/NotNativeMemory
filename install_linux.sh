@@ -107,7 +107,8 @@ echo -e "  ${CYAN}1${NC} - Full install (database + server, all in Docker)"
 echo "      Everything runs here. No Python required."
 echo ""
 echo -e "  ${CYAN}2${NC} - Server only (server + hooks, database is remote)"
-echo "      MCP server runs here, Postgres is on another machine. Requires Python."
+echo "      MCP server runs here, Postgres is on another machine."
+echo "      Docker container (auto-restarts) or host Python process."
 echo ""
 echo -e "  ${CYAN}3${NC} - Client only (hooks only, server is remote)"
 echo "      Just configure Claude Code to use a remote MCP server."
@@ -222,7 +223,69 @@ fi
 # =======================================================================
 
 # -----------------------------------------------------------------------
-# 2. Check Python (required for server-only; optional for full install)
+# 1b. Server backend sub-choice (server mode only)
+# -----------------------------------------------------------------------
+# Full mode is always Docker. For server mode we offer either a Docker
+# container (auto-restarts, consistent with full mode) or a host Python
+# process. If Docker isn't available, silently fall through to Python.
+SERVER_BACKEND=""  # docker | python; only meaningful in server mode
+if [ "$INSTALL_MODE" = "server" ]; then
+    DOCKER_AVAILABLE=false
+    if command -v docker &> /dev/null && docker info &> /dev/null; then
+        DOCKER_AVAILABLE=true
+    fi
+
+    if [ "$DOCKER_AVAILABLE" = true ]; then
+        step "Server Backend"
+        echo ""
+        echo "  How should the MCP server run on this machine?"
+        echo ""
+        echo -e "  ${CYAN}d${NC} - Docker container (recommended)"
+        echo "      Auto-restarts on reboot. No Python needed on host."
+        echo ""
+        echo -e "  ${CYAN}p${NC} - Host Python process"
+        echo "      Run server.py directly. Requires Python 3.11+."
+        echo ""
+
+        DEFAULT_BACKEND="d"
+        if [ -n "$EXISTING_MODE" ] && [ "$EXISTING_MODE" = "server" ]; then
+            EXISTING_BACKEND=$(python3 -c "import json; d=json.load(open('$MANIFEST_FILE')); print(d.get('server_backend',''))" 2>/dev/null || true)
+            case "$EXISTING_BACKEND" in
+                docker) DEFAULT_BACKEND="d" ;;
+                python) DEFAULT_BACKEND="p" ;;
+            esac
+            info "Previous backend: $EXISTING_BACKEND"
+        fi
+
+        read -rp "  Choice [d/p] (default: $DEFAULT_BACKEND): " BACKEND_CHOICE
+        BACKEND_CHOICE="${BACKEND_CHOICE:-$DEFAULT_BACKEND}"
+        case "$BACKEND_CHOICE" in
+            d|D) SERVER_BACKEND="docker" ;;
+            p|P) SERVER_BACKEND="python" ;;
+            *)
+                err "Invalid choice. Run the installer again."
+                exit 1
+                ;;
+        esac
+    else
+        info "Docker not available; using host Python process for the server."
+        SERVER_BACKEND="python"
+    fi
+fi
+
+# USE_DOCKER drives the install path from here on. Full mode is always
+# Docker; server mode depends on the sub-choice above.
+if [ "$INSTALL_MODE" = "full" ] || [ "$SERVER_BACKEND" = "docker" ]; then
+    USE_DOCKER=true
+    COMPOSE_PROFILE="server"
+    [ "$INSTALL_MODE" = "full" ] && COMPOSE_PROFILE="full"
+else
+    USE_DOCKER=false
+    COMPOSE_PROFILE=""
+fi
+
+# -----------------------------------------------------------------------
+# 2. Check Python (required when the server runs as a host process)
 # -----------------------------------------------------------------------
 PYTHON_AVAILABLE=false
 if command -v python3 &> /dev/null; then
@@ -237,10 +300,10 @@ if command -v python3 &> /dev/null; then
 fi
 
 if [ "$PYTHON_AVAILABLE" = false ]; then
-    if [ "$INSTALL_MODE" = "full" ]; then
-        info "Python not found (not required for full Docker install)"
+    if [ "$USE_DOCKER" = true ]; then
+        info "Python not found (not required for Docker backend)"
     else
-        err "Python 3.11+ required for server-only install."
+        err "Python 3.11+ required for the host Python server backend."
         exit 1
     fi
 fi
@@ -287,7 +350,7 @@ if [ "$INSTALL_MODE" = "full" ]; then
     MEMORY_DB_PORT="$DB_PORT" \
     MEMORY_DB_NAME="$DB_NAME" \
     MEMORY_DB_USER="$DB_USER" \
-    docker compose -f docker/docker-compose.yml up -d postgres 2>&1
+    docker compose -f docker/docker-compose.yml --profile full up -d postgres 2>&1
 
     # Wait for healthy
     step "Waiting for Postgres to be ready..."
@@ -346,11 +409,24 @@ fi
 # -----------------------------------------------------------------------
 # 4. Write .env
 # -----------------------------------------------------------------------
+# The values in .env are what the running server (container or host
+# python) will use to connect. For full mode the server is a container
+# on the internal Docker network, so it reaches Postgres by service
+# name. For remote-DB modes (server+docker, server+python) it uses the
+# host/port the user entered.
+if [ "$INSTALL_MODE" = "full" ]; then
+    ENV_DB_HOST="postgres"
+    ENV_DB_PORT="5432"
+else
+    ENV_DB_HOST="$DB_HOST"
+    ENV_DB_PORT="$DB_PORT"
+fi
+
 step "Writing .env file..."
 cat > .env << EOF
 # NotNativeMemory - Generated by install script
-MEMORY_DB_HOST=$DB_HOST
-MEMORY_DB_PORT=$DB_PORT
+MEMORY_DB_HOST=$ENV_DB_HOST
+MEMORY_DB_PORT=$ENV_DB_PORT
 MEMORY_DB_NAME=$DB_NAME
 MEMORY_DB_USER=$DB_USER
 MEMORY_DB_PASSWORD=$DB_PASSWORD
@@ -359,20 +435,20 @@ MEMORY_DEFAULT_PROJECT=
 EOF
 info "Saved to .env"
 
-if [ "$INSTALL_MODE" = "full" ]; then
+if [ "$USE_DOCKER" = true ]; then
     # -----------------------------------------------------------------------
-    # 5. Build Docker image (full mode)
+    # 5. Build Docker image
     # All Python deps live inside the container - no host pip install needed.
     # -----------------------------------------------------------------------
     step "Building MCP server Docker image..."
-    docker compose -f docker/docker-compose.yml build mcp 2>&1
+    docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" build mcp 2>&1
     if [ $? -ne 0 ]; then
         err "Docker image build failed."
         exit 1
     fi
 
     # -----------------------------------------------------------------------
-    # 6. Download embedding model via container (full mode)
+    # 6. Download embedding model via container
     # The container has sentence-transformers installed. Mount models/
     # read-write temporarily so the download persists on the host.
     # -----------------------------------------------------------------------
@@ -382,11 +458,7 @@ if [ "$INSTALL_MODE" = "full" ]; then
             info "Model already exists, skipping download"
         else
             mkdir -p models
-            MEMORY_DB_PASSWORD="$DB_PASSWORD" \
-            MEMORY_DB_PORT="$DB_PORT" \
-            MEMORY_DB_NAME="$DB_NAME" \
-            MEMORY_DB_USER="$DB_USER" \
-            docker compose -f docker/docker-compose.yml run --rm \
+            docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm \
                 -v "$(pwd)/models:/app/models" \
                 mcp python -c "
 from sentence_transformers import SentenceTransformer
@@ -407,14 +479,68 @@ print('Model saved to models/gte-base-en-v1.5')
     fi
 
     # -----------------------------------------------------------------------
-    # 7. Start containers and wait for ready (full mode)
+    # 6b. Remote schema apply (server+docker only)
+    # Full mode's Postgres container applies config/schema.sql via its
+    # init-script mount, so we only need to do this when the DB is remote.
+    # The server's migration bootstrap runs on first tool call, but the
+    # base schema must exist first.
+    # -----------------------------------------------------------------------
+    if [ "$INSTALL_MODE" = "server" ]; then
+        step "Testing remote database connection from container..."
+        docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python -c "
+import asyncio, asyncpg, os, sys
+async def test():
+    try:
+        conn = await asyncpg.connect(
+            host=os.environ['MEMORY_DB_HOST'],
+            port=int(os.environ['MEMORY_DB_PORT']),
+            database=os.environ['MEMORY_DB_NAME'],
+            user=os.environ['MEMORY_DB_USER'],
+            password=os.environ['MEMORY_DB_PASSWORD'],
+            timeout=10,
+        )
+        await conn.close()
+        print('OK')
+    except Exception as e:
+        print(f'FAIL: {e}', file=sys.stderr)
+        sys.exit(1)
+asyncio.run(test())
+"
+        if [ $? -ne 0 ]; then
+            err "Cannot connect to remote database from container. Check your settings."
+            exit 1
+        fi
+        info "Connection successful"
+
+        step "Applying schema to remote database..."
+        docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python -c "
+import asyncio, asyncpg, os
+async def run_schema():
+    conn = await asyncpg.connect(
+        host=os.environ['MEMORY_DB_HOST'],
+        port=int(os.environ['MEMORY_DB_PORT']),
+        database=os.environ['MEMORY_DB_NAME'],
+        user=os.environ['MEMORY_DB_USER'],
+        password=os.environ['MEMORY_DB_PASSWORD'],
+    )
+    with open('config/schema.sql', 'r') as f:
+        sql = f.read()
+    await conn.execute(sql)
+    await conn.close()
+    print('Schema applied')
+asyncio.run(run_schema())
+"
+        if [ $? -ne 0 ]; then
+            err "Schema apply failed."
+            exit 1
+        fi
+    fi
+
+    # -----------------------------------------------------------------------
+    # 7. Start containers and wait for ready
     # -----------------------------------------------------------------------
     step "Starting MCP server container..."
-    MEMORY_DB_PASSWORD="$DB_PASSWORD" \
-    MEMORY_DB_PORT="$DB_PORT" \
-    MEMORY_DB_NAME="$DB_NAME" \
-    MEMORY_DB_USER="$DB_USER" \
-    docker compose -f docker/docker-compose.yml up -d mcp 2>&1
+    docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" up -d mcp 2>&1
 
     # Wait for MCP server to be ready (model loading takes 10-30s on first start)
     step "Waiting for MCP server to be ready..."
@@ -440,13 +566,13 @@ print('Model saved to models/gte-base-en-v1.5')
 
 else
     # -----------------------------------------------------------------------
-    # 5. Install Python dependencies (server-only mode - runs on host)
+    # 5. Install Python dependencies (host python server)
     # -----------------------------------------------------------------------
     step "Installing Python dependencies..."
     pip install -r requirements.txt --quiet 2>&1
 
     # -----------------------------------------------------------------------
-    # 6. Test database connection and run schema (server-only mode)
+    # 6. Test database connection and run schema (host python server)
     # -----------------------------------------------------------------------
     step "Testing database connection..."
     python3 -c "
@@ -506,7 +632,7 @@ asyncio.run(run_schema())
     fi
 
     # -----------------------------------------------------------------------
-    # 7. Download embedding model (server-only mode - on host)
+    # 7. Download embedding model (host python server)
     # -----------------------------------------------------------------------
     if [ "${SKIP_MODEL:-}" != "1" ]; then
         step "Downloading embedding model (gte-base-en-v1.5, ~130MB)..."
@@ -536,7 +662,7 @@ fi
 # 9. Self-test
 # -----------------------------------------------------------------------
 step "Running self-test..."
-if [ "$INSTALL_MODE" = "full" ]; then
+if [ "$USE_DOCKER" = true ]; then
     # Run selftest inside the MCP container where deps and model are available
     docker compose -f docker/docker-compose.yml exec mcp python selftest.py
 else
@@ -561,8 +687,13 @@ fi
 # -----------------------------------------------------------------------
 if [ "$INSTALL_MODE" = "full" ]; then
     COMPONENTS='["hooks", "server", "docker", "embedding_model", "database"]'
+    SERVER_BACKEND_OUT="docker"
+elif [ "$SERVER_BACKEND" = "docker" ]; then
+    COMPONENTS='["hooks", "server", "docker", "embedding_model"]'
+    SERVER_BACKEND_OUT="docker"
 else
     COMPONENTS='["hooks", "server", "python_deps", "embedding_model"]'
+    SERVER_BACKEND_OUT="python"
 fi
 
 python3 -c "
@@ -570,6 +701,7 @@ import json
 manifest = {
     'installed': '$(date +%Y-%m-%d)',
     'install_mode': '$INSTALL_MODE',
+    'server_backend': '$SERVER_BACKEND_OUT',
     'install_path': '$INSTALL_PATH',
     'components': $COMPONENTS,
     'mcp_url': '$MCP_URL',
@@ -587,7 +719,27 @@ with open('$MANIFEST_FILE', 'w') as f:
 # -----------------------------------------------------------------------
 # 12. Write setup guide and print summary
 # -----------------------------------------------------------------------
-if [ "$INSTALL_MODE" = "full" ]; then
+if [ "$USE_DOCKER" = true ]; then
+    if [ "$INSTALL_MODE" = "full" ]; then
+        SERVER_MGMT_BLURB="The server runs as a Docker container alongside Postgres:
+
+\`\`\`
+docker compose -f docker/docker-compose.yml --profile full up -d    # start
+docker compose -f docker/docker-compose.yml --profile full down     # stop
+docker compose -f docker/docker-compose.yml logs mcp                 # view logs
+\`\`\`"
+        DB_LINE="Database: postgres (Docker internal)"
+    else
+        SERVER_MGMT_BLURB="The server runs as a Docker container against your remote Postgres:
+
+\`\`\`
+docker compose -f docker/docker-compose.yml --profile server up -d mcp   # start
+docker compose -f docker/docker-compose.yml --profile server down        # stop
+docker compose -f docker/docker-compose.yml logs mcp                      # view logs
+\`\`\`"
+        DB_LINE="Database: ${DB_HOST}:${DB_PORT}/${DB_NAME} (remote)"
+    fi
+
 cat > SETUP_COMPLETE.md << EOF
 # NotNativeMemory - Setup Complete
 
@@ -595,13 +747,7 @@ Your MCP memory server is installed and tested.
 
 ## Starting the Server
 
-The server runs as a Docker container alongside Postgres:
-
-\`\`\`
-docker compose -f docker/docker-compose.yml up -d      # start
-docker compose -f docker/docker-compose.yml down        # stop
-docker compose -f docker/docker-compose.yml logs mcp    # view logs
-\`\`\`
+$SERVER_MGMT_BLURB
 
 The server auto-starts on boot (\`restart: unless-stopped\`).
 
@@ -652,10 +798,10 @@ You should see the stored memory come back with a similarity score.
 
 ## Installation Details
 
-- Install mode: $INSTALL_MODE
+- Install mode: $INSTALL_MODE ($SERVER_BACKEND_OUT backend)
 - Install path: $INSTALL_PATH
 - MCP endpoint: http://${HOSTNAME_VAL}:${MCP_PORT}/mcp
-- Database: postgres (Docker internal) / localhost:${DB_PORT} (host)
+- $DB_LINE
 - Manifest: $INSTALL_PATH/$MANIFEST_FILE
 EOF
 else
@@ -726,7 +872,7 @@ You should see the stored memory come back with a similarity score.
 
 ## Installation Details
 
-- Install mode: $INSTALL_MODE
+- Install mode: $INSTALL_MODE (python backend)
 - Install path: $INSTALL_PATH
 - MCP endpoint: http://${HOSTNAME_VAL}:${MCP_PORT}/mcp
 - Database: ${DB_HOST}:${DB_PORT}/${DB_NAME}
@@ -739,10 +885,10 @@ echo "+==========================================+"
 echo "|  Setup Complete!                         |"
 echo "+==========================================+"
 echo ""
-step "Mode: $INSTALL_MODE"
+step "Mode: $INSTALL_MODE ($SERVER_BACKEND_OUT backend)"
 step "MCP endpoint: http://${HOSTNAME_VAL}:${MCP_PORT}/mcp"
 if [ "$INSTALL_MODE" = "full" ]; then
-    step "Database: localhost:${DB_PORT}/${DB_NAME} (Docker)"
+    step "Database: Docker internal (pgvector)"
 else
     step "Database: ${DB_HOST}:${DB_PORT}/${DB_NAME} (remote)"
 fi
@@ -761,9 +907,9 @@ else
     step "Hooks: no supported agent CLI detected (run installer again after setup)"
 fi
 echo ""
-if [ "$INSTALL_MODE" = "full" ]; then
+if [ "$USE_DOCKER" = true ]; then
     info "Server is running in Docker (auto-restarts on boot)"
-    info "Manage:  docker compose -f docker/docker-compose.yml [up -d|down|logs mcp]"
+    info "Manage:  docker compose -f docker/docker-compose.yml --profile $COMPOSE_PROFILE [up -d|down|logs mcp]"
 else
     info "Start the server:  python3 server.py"
 fi
