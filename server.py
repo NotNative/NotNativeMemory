@@ -549,15 +549,29 @@ async def memory_context(
 
 _PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mcp-server.pid")
 
+# When running as PID 1 we're the container's init process - the container
+# runtime (not us) owns lifecycle. Writing a PID file there is actively
+# harmful: after any restart, the new process sees the old file, finds
+# "PID 1" still alive (it's itself), and aborts with "Server already
+# running", crash-looping the container. /.dockerenv catches rootless or
+# unusual setups where we somehow aren't PID 1 but are still in a container.
+_IN_CONTAINER = os.getpid() == 1 or os.path.exists("/.dockerenv")
+
 
 def _write_pid(port: int) -> None:
     """Write current PID and port to the PID file."""
+    if _IN_CONTAINER:
+        return
     with open(_PID_FILE, "w") as f:
         f.write(f"{os.getpid()}:{port}")
 
 
 def _read_pid() -> tuple:
     """Read PID and port from PID file. Returns (pid, port) or (None, None)."""
+    # In a container the PID file is meaningless (we're PID 1, file may be a
+    # leftover from a pre-fix build's writable layer). Ignore it unconditionally.
+    if _IN_CONTAINER:
+        return None, None
     if not os.path.exists(_PID_FILE):
         return None, None
     try:
