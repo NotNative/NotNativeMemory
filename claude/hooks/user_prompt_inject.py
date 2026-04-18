@@ -70,8 +70,16 @@ LOG_PATH = os.environ.get(
 MAX_QUERY_CHARS = 500
 
 
-def _search_memories(query: str) -> list:
-    """Query the MCP memory server via HTTP. Returns list of memory dicts."""
+def _search_memories(query: str, project: str) -> list:
+    """Query the MCP memory server via HTTP. Returns list of memory dicts.
+
+    The `project` arg must be the Claude Code session's cwd (the
+    project directory where this hook is firing). The server uses it to
+    resolve the local project row and expand to (local + globals +
+    declared domains) — anything outside that set gets filtered out
+    server-side. Passing "" instead opts out of scope filtering, which
+    is how cross-project memories used to bleed in.
+    """
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": 1,
@@ -81,7 +89,7 @@ def _search_memories(query: str) -> list:
             "arguments": {
                 "query": query,
                 "limit": SEARCH_LIMIT,
-                "project": "",  # search all projects (pulls globals + domains)
+                "project": project,
             },
         },
     }).encode("utf-8")
@@ -183,7 +191,15 @@ def main():
     # Cap the query length
     query = prompt[:MAX_QUERY_CHARS]
 
-    results = _search_memories(query)
+    # Scope the search to the current project. Claude Code ships a
+    # `cwd` field in the hook stdin; fall back to process cwd if the
+    # field is ever missing. Passing the path (not "") lets the server
+    # expand it to the declared visible set — local + globals + any
+    # domains this project has declared — so cross-project "local"
+    # memories stay contained.
+    project_cwd = hook_input.get("cwd") or os.getcwd()
+
+    results = _search_memories(query, project_cwd)
     relevant = _filter_relevant(results)
 
     top_similarity = max(

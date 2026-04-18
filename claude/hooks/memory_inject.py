@@ -226,8 +226,15 @@ def _build_query(tool_name: str, tool_input: dict) -> str:
     return " ".join(parts)
 
 
-def _search_memories(query: str) -> list:
-    """Query the MCP memory server via HTTP. Returns list of memory dicts."""
+def _search_memories(query: str, project: str) -> list:
+    """Query the MCP memory server via HTTP. Returns list of memory dicts.
+
+    See `user_prompt_inject.py::_search_memories` for the scope
+    rationale — the same rules apply here: pass the session's cwd so
+    the server filters to local + globals + declared domains, instead
+    of the empty-string "search everything" behavior that used to leak
+    cross-project local memories into every turn.
+    """
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": 1,
@@ -237,7 +244,7 @@ def _search_memories(query: str) -> list:
             "arguments": {
                 "query": query,
                 "limit": SEARCH_LIMIT,
-                "project": "",  # search all projects
+                "project": project,
             },
         },
     }).encode("utf-8")
@@ -352,8 +359,16 @@ def main():
         _log_execution(tool_name, "", 0, 0, 0.0)
         sys.exit(0)
 
+    # Scope the search to the current project. Claude Code ships a
+    # `cwd` field in the hook stdin; fall back to process cwd if the
+    # field is ever missing. Passing the path (not "") lets the server
+    # expand it to the declared visible set — local + globals + any
+    # domains this project has declared — so cross-project "local"
+    # memories stay contained.
+    project_cwd = hook_input.get("cwd") or os.getcwd()
+
     # Search memories
-    results = _search_memories(query)
+    results = _search_memories(query, project_cwd)
 
     # Filter by similarity threshold (with high-importance bypass)
     relevant = _filter_relevant(results)

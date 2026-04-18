@@ -50,7 +50,14 @@ _CRITICAL_RULES = """[Compact Guard] Critical rules preserved across context com
 
 
 def _search_critical_memories(project_dir: str) -> list:
-    """Fetch high/critical importance memories for the current project."""
+    """Fetch high/critical importance memories for the current project.
+
+    `project_dir` comes from the hook stdin's `cwd`; passing it to the
+    server scopes the search to this project's visible set (local +
+    globals + declared domains). Earlier versions passed "" which
+    opted out of scope filtering and pulled high-importance memories
+    from every other project on the server.
+    """
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": 1,
@@ -60,7 +67,7 @@ def _search_critical_memories(project_dir: str) -> list:
             "arguments": {
                 "query": "current task constraints decisions preferences",
                 "limit": MAX_MEMORIES,
-                "project": "",  # search all projects
+                "project": project_dir,
                 "min_importance": "high",
             },
         },

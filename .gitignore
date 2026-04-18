@@ -25,8 +25,13 @@ models/
 # NotNativeCoder per-project state (not our shipped nnc/ templates)
 .nnc/
 
-# Planning docs
+# Planning docs — local-only scratch; never committed.
+# Covers the legacy single-file (docs/PLANNING.md), the prefix-style
+# multi-file layout (docs/planning-*.md), and the folder-style layout
+# (docs/planning/...) so the convention survives layout changes.
 docs/PLANNING.md
+docs/planning-*
+docs/planning/
 
 # IDE & OS
 .vscode/
