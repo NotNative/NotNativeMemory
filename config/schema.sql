@@ -115,3 +115,60 @@ CREATE INDEX IF NOT EXISTS idx_facts_predicate
 
 CREATE INDEX IF NOT EXISTS idx_facts_valid
     ON facts (valid_from, valid_to);
+
+-- Users table: identity for the Bearer-token auth layer. The first
+-- row registered on a fresh MCP gets is_admin=TRUE; subsequent
+-- registrations require an invite from an admin.
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,          -- hashlib.scrypt digest
+    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username
+    ON users (username);
+
+-- auth_tokens: hashed Bearer tokens. Raw token value is shown exactly
+-- once at creation; the DB only ever sees the hash. Revocation is
+-- immediate (revoked_at timestamp; the active-lookup index filters).
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT UNIQUE NOT NULL,      -- hashlib.scrypt digest
+    label TEXT,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_user
+    ON auth_tokens (user_id);
+
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_active
+    ON auth_tokens (token_hash)
+    WHERE revoked_at IS NULL;
+
+-- Ownership columns. Nullable so pre-auth rows remain accessible;
+-- per-user isolation in the tool layer enforces scoping.
+ALTER TABLE projects
+    ADD COLUMN IF NOT EXISTS owner_user_id UUID
+        REFERENCES users(id) ON DELETE CASCADE;
+
+ALTER TABLE memories
+    ADD COLUMN IF NOT EXISTS owner_user_id UUID
+        REFERENCES users(id) ON DELETE CASCADE;
+
+ALTER TABLE facts
+    ADD COLUMN IF NOT EXISTS owner_user_id UUID
+        REFERENCES users(id) ON DELETE CASCADE;
+
+CREATE INDEX IF NOT EXISTS idx_projects_owner
+    ON projects (owner_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_memories_owner
+    ON memories (owner_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_facts_owner
+    ON facts (owner_user_id);
