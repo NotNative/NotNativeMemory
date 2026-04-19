@@ -12,8 +12,8 @@ HTTP 4xx status.
 Whatever your MCP URL is, minus `/mcp`. Examples:
 
 ```
-http://atlas:9500         # production
-http://localhost:9500     # local server
+http://memory.example.com:9500   # remote deployment
+http://localhost:9500            # local server
 ```
 
 ## Authentication model
@@ -33,7 +33,8 @@ Set `MEMORY_AUTH_LOCALHOST_BYPASS=1` in the server's environment to
 let loopback callers act as admin without a token. Intended for the
 single-user personal-scope case where the server binds to 127.0.0.1
 only. When the server binds to a non-loopback interface (the default
-on atlas), leave the env var unset so every call must present a token.
+for any shared deployment), leave the env var unset so every call
+must present a token.
 
 ## Endpoints
 
@@ -45,9 +46,9 @@ Bearer token.
 
 ```bash
 # First user (no auth required)
-curl -X POST http://atlas:9500/auth/register \
+curl -X POST http://memory.example.com:9500/auth/register \
   -H 'Content-Type: application/json' \
-  -d '{"username":"shanz","password":"at-least-8-chars"}'
+  -d '{"username":"alice","password":"at-least-8-chars"}'
 ```
 
 Response (201):
@@ -55,7 +56,7 @@ Response (201):
 {
   "user": {
     "id": "...",
-    "username": "shanz",
+    "username": "alice",
     "is_admin": true,
     "created_at": "2026-04-19T..."
   },
@@ -66,7 +67,7 @@ Response (201):
 
 ```bash
 # Admin adds another user
-curl -X POST http://atlas:9500/auth/register \
+curl -X POST http://memory.example.com:9500/auth/register \
   -H 'Authorization: Bearer nnm_ADMIN_TOKEN' \
   -H 'Content-Type: application/json' \
   -d '{"username":"alice","password":"..."}'
@@ -85,15 +86,15 @@ Exchange password for a new Bearer token. The raw token is returned
 once in `token.token`. Save it; the server will not show it again.
 
 ```bash
-curl -X POST http://atlas:9500/auth/login \
+curl -X POST http://memory.example.com:9500/auth/login \
   -H 'Content-Type: application/json' \
-  -d '{"username":"shanz","password":"...","label":"laptop"}'
+  -d '{"username":"alice","password":"...","label":"laptop"}'
 ```
 
 Response (200):
 ```json
 {
-  "user": {"id":"...","username":"shanz","is_admin":true},
+  "user": {"id":"...","username":"alice","is_admin":true},
   "token": {
     "id": "...",
     "user_id": "...",
@@ -120,7 +121,7 @@ the hash.
 
 ```bash
 curl -H "Authorization: Bearer nnm_..." \
-  http://atlas:9500/auth/tokens
+  http://memory.example.com:9500/auth/tokens
 ```
 
 Response (200):
@@ -153,7 +154,7 @@ curl -X POST \
   -H "Authorization: Bearer nnm_..." \
   -H 'Content-Type: application/json' \
   -d '{"label":"workstation"}' \
-  http://atlas:9500/auth/tokens
+  http://memory.example.com:9500/auth/tokens
 ```
 
 Response (201): same shape as `login`'s `token` object.
@@ -166,7 +167,7 @@ you; revoking someone else's token returns 404 with no side effects.
 ```bash
 curl -X DELETE \
   -H "Authorization: Bearer nnm_..." \
-  http://atlas:9500/auth/tokens/TOKEN-UUID
+  http://memory.example.com:9500/auth/tokens/TOKEN-UUID
 ```
 
 Response (200):
@@ -184,14 +185,14 @@ Echo the authenticated identity. Handy for testing tokens and for
 confirming the localhost bypass is active.
 
 ```bash
-curl -H "Authorization: Bearer nnm_..." http://atlas:9500/auth/me
+curl -H "Authorization: Bearer nnm_..." http://memory.example.com:9500/auth/me
 ```
 
 Response (200):
 ```json
 {
   "user_id": "...",
-  "username": "shanz",
+  "username": "alice",
   "is_admin": true,
   "localhost_bypass": false
 }
@@ -215,7 +216,7 @@ Does not check the database. Useful for liveness probes.
 claude mcp remove memory
 claude mcp add --transport http memory --scope user \
   --header "Authorization: Bearer nnm_YOUR_TOKEN" \
-  http://atlas:9500/mcp
+  http://memory.example.com:9500/mcp
 ```
 
 ### LM Studio
@@ -226,7 +227,7 @@ claude mcp add --transport http memory --scope user \
 {
   "memory": {
     "type": "http",
-    "url": "http://atlas:9500/mcp",
+    "url": "http://memory.example.com:9500/mcp",
     "headers": {
       "Authorization": "Bearer nnm_YOUR_TOKEN"
     }
@@ -237,7 +238,7 @@ claude mcp add --transport http memory --scope user \
 ### Hooks
 
 `claude/hooks/hooks.env` and `nnc/hooks/hooks.env` only carry
-`MEMORY_MCP_URL` today. When atlas requires auth, extend
+`MEMORY_MCP_URL` today. When the server requires auth, extend
 `merge_hooks.py::_write_hooks_env` to also write
 `MEMORY_MCP_TOKEN=nnm_...` and update the three hook scripts to set
 `Authorization: Bearer <token>` on their `urllib.request.Request`

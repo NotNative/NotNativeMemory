@@ -44,7 +44,7 @@ def run():
         ("\\\\server\\share", True),
         ("C:/Users/foo", True),
         ("C:\\Users\\foo", True),
-        ("D:/ProjectRepo/NotNativeMemory", True),
+        ("D:/Projects/example-project", True),
 
         # Rejected scopes
         ("", False),
