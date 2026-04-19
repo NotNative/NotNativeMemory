@@ -86,6 +86,9 @@ async def memory_store(
     against context loss: anything stored here survives when your working
     memory does not.
 
+    Memories get read back by any model that uses this MCP, from Opus
+    to Qwen3 30B. Write for the widest audience.
+
     WHEN to use:
     - The user corrects you or states a preference — store it so you
       never make them repeat it ("no em dashes", "always use local tz").
@@ -101,6 +104,22 @@ async def memory_store(
       your working context, not long-term memory.
     - Things already in the codebase — read the code instead.
     - Facts about current state that will change (use memory_fact_add).
+
+    HOW to write (the memory content itself):
+    - Short sentences. Target 15 to 25 words. No deeply nested clauses.
+    - Imperative voice for rules: "Do X," not "X should be done" or
+      "you might consider doing X."
+    - Plain technical English. Common jargon (API, regex, CI, Bearer
+      token, linter) is fine. Avoid literary words when a plain one
+      carries the same meaning: "tangential" becomes "not directly
+      about what was asked"; "substantive" becomes "real."
+    - For rule-shaped memories, include a **Why:** line (the reason)
+      and a **How to apply:** line (when it kicks in). These are
+      structural anchors that any reader can latch onto.
+    - Don't reference other memories by name or reason about how they
+      compose. Each memory stands alone.
+    - Write for a reader who has technical background but has not seen
+      this project or this conversation before.
 
     Tags are auto-detected from content (decision, preference, gotcha,
     correction, constraint), so you don't need to get tagging perfect.
@@ -327,6 +346,9 @@ async def memory_fact_add(
     valid in their original context), facts track mutable state — and
     when the state changes, the old fact is preserved with a timestamp
     rather than deleted.
+
+    Facts get read back by any model that uses this MCP, from Opus to
+    Qwen3 30B. Keep subject, predicate, and object short and concrete.
 
     WHEN to use:
     - Infrastructure state: what model runs on which server, what port
