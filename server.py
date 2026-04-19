@@ -226,6 +226,7 @@ async def memory_store(
 
     from lib.embeddings import embed
     from lib.db import store_memory, get_or_create_project
+    from lib.auth_context import current_user_id
 
     store_tags = list(tags or [])
     if verbatim and "verbatim" not in store_tags:
@@ -236,7 +237,8 @@ async def memory_store(
     if scope_err:
         return {"error": scope_err, "stored": False, "project": project_dir}
 
-    project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    project_id = await get_or_create_project(project_dir, owner_user_id=owner)
 
     embedding = embed(content)
     memory_id = await store_memory(
@@ -245,6 +247,7 @@ async def memory_store(
         project_id=project_id,
         tags=store_tags,
         importance=importance,
+        owner_user_id=owner,
     )
 
     return {"id": str(memory_id), "stored": True}
@@ -451,13 +454,15 @@ async def memory_fact_add(
         return {"error": "Object cannot be empty", "stored": False}
 
     from lib.db import add_fact, get_or_create_project
+    from lib.auth_context import current_user_id
 
     project_dir = project or _detect_project_directory()
     scope_err = _validate_writable_scope(project_dir)
     if scope_err:
         return {"error": scope_err, "stored": False, "project": project_dir}
 
-    project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    project_id = await get_or_create_project(project_dir, owner_user_id=owner)
 
     result = await add_fact(
         project_id=project_id,
@@ -465,6 +470,7 @@ async def memory_fact_add(
         predicate=predicate.strip(),
         obj=object.strip(),
         confidence=max(0.0, min(1.0, confidence)),
+        owner_user_id=owner,
     )
 
     return {"stored": True, **result}

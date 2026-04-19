@@ -32,6 +32,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from lib.auth_context import set_current_user_id
+
 
 # Paths that never require a token. Extend as needed; keep the list
 # short — every entry is a hole in the auth perimeter.
@@ -117,6 +119,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         request.state.user_id = resolved["user_id"]
         request.state.username = resolved["username"]
         request.state.is_admin = resolved["is_admin"]
+        set_current_user_id(resolved["user_id"])
 
         return await call_next(request)
 
@@ -131,3 +134,4 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             request.state.user_id = resolved["user_id"]
             request.state.username = resolved["username"]
             request.state.is_admin = resolved["is_admin"]
+            set_current_user_id(resolved["user_id"])

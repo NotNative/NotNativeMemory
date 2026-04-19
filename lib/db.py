@@ -278,7 +278,9 @@ def _resolve_scope(directory: str) -> tuple:
 
 
 async def get_or_create_project(
-    directory: str, name: Optional[str] = None,
+    directory: str,
+    name: Optional[str] = None,
+    owner_user_id: Optional[UUID] = None,
 ) -> UUID:
     """
     Get existing project by directory, or create a new one.
@@ -292,6 +294,10 @@ async def get_or_create_project(
         directory: Project identifier. Usually an absolute path for local
             projects, or a reserved name for global/domain scopes.
         name: Override the auto-detected display name.
+        owner_user_id: User who owns this project (for new rows). When
+            None, the row is "unowned" (nullable FK, legacy stdio
+            behavior). Existing rows keep whatever owner they have —
+            lookup never overwrites.
 
     Returns:
         Project UUID.
@@ -310,11 +316,11 @@ async def get_or_create_project(
         return row["id"]
 
     row = await pool.fetchrow(
-        "INSERT INTO projects (directory, name, scope) "
-        "VALUES ($1, $2, $3) "
+        "INSERT INTO projects (directory, name, scope, owner_user_id) "
+        "VALUES ($1, $2, $3, $4) "
         "ON CONFLICT (directory) DO UPDATE SET name = $2 "
         "RETURNING id",
-        directory, final_name, scope,
+        directory, final_name, scope, owner_user_id,
     )
     return row["id"]
 
@@ -604,6 +610,7 @@ async def store_memory(
     project_id: UUID,
     tags: Optional[List[str]] = None,
     importance: str = "normal",
+    owner_user_id: Optional[UUID] = None,
 ) -> UUID:
     """
     Store a new memory with deduplication, displacement cooling, and cap
@@ -648,11 +655,12 @@ async def store_memory(
     # Insert new memory
     row = await pool.fetchrow(
         """INSERT INTO memories
-               (project_id, content, embedding, tags, importance, temperature)
-           VALUES ($1, $2, $3::vector, $4, $5, $6)
+               (project_id, content, embedding, tags, importance,
+                temperature, owner_user_id)
+           VALUES ($1, $2, $3::vector, $4, $5, $6, $7)
            RETURNING id""",
         project_id, content.strip(), str(embedding),
-        clean_tags, importance, TEMP_INITIAL,
+        clean_tags, importance, TEMP_INITIAL, owner_user_id,
     )
 
     # Displacement cooling: storing new knowledge pressures existing memories
@@ -986,6 +994,7 @@ async def add_fact(
     obj: str,
     confidence: float = 1.0,
     source_memory_id: Optional[UUID] = None,
+    owner_user_id: Optional[UUID] = None,
 ) -> Dict[str, Any]:
     """
     Store a fact triple. If a conflicting fact exists (same subject +
@@ -1010,11 +1019,11 @@ async def add_fact(
     row = await pool.fetchrow(
         """INSERT INTO facts
                (project_id, subject, predicate, object, confidence,
-                source_memory_id)
-           VALUES ($1, $2, $3, $4, $5, $6)
+                source_memory_id, owner_user_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id, valid_from""",
         project_id, subject, predicate, obj, confidence,
-        source_memory_id,
+        source_memory_id, owner_user_id,
     )
 
     return {
