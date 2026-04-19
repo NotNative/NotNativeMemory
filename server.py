@@ -68,8 +68,64 @@ def _detect_project_directory() -> str:
         if cwd and cwd != "/":
             return os.path.abspath(cwd)
 
-    # HTTP mode or no working directory: use "general" as a catch-all
+    # HTTP mode or no working directory: use "general" as a catch-all.
+    # This is the value the write-path validator rejects — it forces
+    # callers to set project explicitly instead of silently pooling
+    # writes into an unintended bucket.
     return "general"
+
+
+# Reserved scope names exposed as write targets.
+_GLOBAL_SCOPE = "_global"
+_DOMAIN_PREFIX = "_domain_"
+
+
+def _validate_writable_scope(project: str) -> Optional[str]:
+    """
+    Return an error message if `project` is not a valid write target,
+    or None if the value is acceptable. Read paths stay permissive and
+    do not call this: historical scopes like "general" still need to
+    be searchable even though we no longer accept writes to them.
+
+    Accepted:
+        "_global"                     (global scope)
+        "_domain_<name>"              (domain scope, non-empty name)
+        absolute path (Unix/Windows)  (local scope)
+    Rejected:
+        empty, "general", bare names, relative paths.
+    """
+    if not project or not project.strip():
+        return "project is required for writes (pass an explicit value)"
+
+    value = project.strip()
+
+    if value == _GLOBAL_SCOPE:
+        return None
+
+    if value.startswith(_DOMAIN_PREFIX):
+        domain_name = value[len(_DOMAIN_PREFIX):]
+        if not domain_name:
+            return (
+                f"invalid domain scope: {value!r} "
+                f"(expected {_DOMAIN_PREFIX}<name> with non-empty name)"
+            )
+        return None
+
+    # Absolute path heuristic covers Unix (/foo, //server/share) and
+    # Windows (C:\..., C:/...). Relative paths ("scratch", "general")
+    # and bare identifiers are rejected — the silent fall to "general"
+    # was the single biggest source of mis-scoped writes observed
+    # through 2026-04-18.
+    if value.startswith("/") or value.startswith("\\"):
+        return None
+    if len(value) >= 3 and value[1] == ":" and value[2] in ("/", "\\"):
+        return None
+
+    return (
+        f"project {value!r} is not a valid write target. "
+        f"Use {_GLOBAL_SCOPE!r}, "
+        f"{_DOMAIN_PREFIX}<name>, or an absolute path."
+    )
 
 
 @mcp.tool()
@@ -170,6 +226,10 @@ async def memory_store(
         store_tags.append("verbatim")
 
     project_dir = project or _detect_project_directory()
+    scope_err = _validate_writable_scope(project_dir)
+    if scope_err:
+        return {"error": scope_err, "stored": False, "project": project_dir}
+
     project_id = await get_or_create_project(project_dir)
 
     embedding = embed(content)
@@ -387,6 +447,10 @@ async def memory_fact_add(
     from lib.db import add_fact, get_or_create_project
 
     project_dir = project or _detect_project_directory()
+    scope_err = _validate_writable_scope(project_dir)
+    if scope_err:
+        return {"error": scope_err, "stored": False, "project": project_dir}
+
     project_id = await get_or_create_project(project_dir)
 
     result = await add_fact(
