@@ -12,7 +12,7 @@ memories scoped to the current project, so task-specific constraints
 persist through compaction.
 
 NNC payload for PreCompact:
-    {"hook_event_name": "PreCompact", "reason": "..."}
+    {"hook_event_name": "PreCompact", "reason": "...", "cwd": "..."}
 
 Exit codes:
     0 - success (context injected)
@@ -53,8 +53,15 @@ _CRITICAL_RULES = """[Compact Guard] Critical rules preserved across context com
 - If you stated an intent in this turn, complete it in the same response — don't stop after announcing."""
 
 
-def _search_critical_memories() -> list:
-    """Fetch high/critical importance memories."""
+def _search_critical_memories(project_dir: str) -> list:
+    """Fetch high/critical importance memories for the current project.
+
+    `project_dir` comes from the hook stdin's `cwd`; passing it to the
+    server scopes the search to this project's visible set (local +
+    globals + declared domains). Passing "" opts out of scope filtering
+    and would pull high-importance memories from every other project on
+    the server, which was the old cross-project leak.
+    """
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": 1,
@@ -64,7 +71,7 @@ def _search_critical_memories() -> list:
             "arguments": {
                 "query": "current task constraints decisions preferences",
                 "limit": MAX_MEMORIES,
-                "project": "",
+                "project": project_dir,
                 "min_importance": "high",
             },
         },
@@ -114,27 +121,26 @@ def _format_memories(memories: list) -> str:
 
 def main():
     try:
-        _hook_input = json.loads(sys.stdin.read())
+        hook_input = json.loads(sys.stdin.read())
     except json.JSONDecodeError:
         sys.exit(1)
 
-    # NNC provides a `reason` field on PreCompact payloads. We don't
-    # need to branch on it — the rules and critical memories are
-    # useful whatever triggered the compaction.
+    project_dir = hook_input.get("cwd", "")
 
     context_parts = [_CRITICAL_RULES]
 
-    memories = _search_critical_memories()
+    memories = _search_critical_memories(project_dir)
     if memories:
         context_parts.append(_format_memories(memories))
 
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreCompact",
-            "additionalContext": "\n".join(context_parts),
-        }
-    }
-    print(json.dumps(output))
+    # PreCompact has no schema-approved `hookSpecificOutput` shape in
+    # current harness versions (only PreToolUse / UserPromptSubmit /
+    # PostToolUse do). Emitting the JSON envelope causes a schema
+    # validation failure and the context never lands. Plain stdout is
+    # the universal hook-output channel that the harness folds into the
+    # compaction prompt.
+    sys.stdout.write("\n".join(context_parts))
+    sys.stdout.write("\n")
     sys.exit(0)
 
 

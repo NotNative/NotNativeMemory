@@ -132,13 +132,14 @@ def main():
     if memories:
         context_parts.append(_format_memories(memories))
 
-    output = {
-        "hookSpecificOutput": {
-            "hookEventName": "PreCompact",
-            "additionalContext": "\n".join(context_parts),
-        }
-    }
-    print(json.dumps(output))
+    # PreCompact has no schema-approved `hookSpecificOutput` shape in
+    # current Claude Code versions (only PreToolUse / UserPromptSubmit /
+    # PostToolUse do). Emitting the JSON envelope causes a schema
+    # validation failure and the context never lands. Plain stdout is
+    # the universal hook-output channel that the harness folds into the
+    # compaction prompt.
+    sys.stdout.write("\n".join(context_parts))
+    sys.stdout.write("\n")
     sys.exit(0)
 
 
