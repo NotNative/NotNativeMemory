@@ -84,6 +84,17 @@ No reboot-survival unless you wire up a service manager (systemd, launchd, Task 
 
 No server on this machine — the hooks talk to the remote MCP URL configured at install time.
 
+## Authentication
+
+The server supports Bearer-token auth. The first `POST /auth/register`
+on a fresh server becomes admin and adopts pre-auth memories;
+subsequent registrations require an admin's token. A localhost
+bypass (`MEMORY_AUTH_LOCALHOST_BYPASS=1`) preserves the zero-friction
+single-user case on loopback-only deployments.
+
+Full API reference including curl examples for login, token
+management, and client setup: [`docs/api-auth.md`](api-auth.md).
+
 ## Configure Your AI Tools
 
 **In most cases you don't need to.** The installer detects `claude` and `nnc` on your PATH and wires both the hook bundle (under `~/.claude/` and/or `~/.nnc/`) and the MCP server registration automatically. Skip ahead to [Add Memory Instructions to Your Agent](#add-memory-instructions-to-your-agent) if you used the installer.
@@ -272,6 +283,7 @@ docker/
     docker-compose.yml  - Postgres + pgvector + MCP server containers
 docs/
     README.md           - This file
+    api-auth.md         - Bearer-token auth API reference
     memory-persona.md   - Platform-neutral system prompt for any MCP agent
 claude/
     CLAUDE.md           - Memory instructions for new Claude Code projects
