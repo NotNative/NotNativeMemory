@@ -40,6 +40,12 @@ mcp = FastMCP(
     stateless_http=True,
 )
 
+# Register the /auth/* and /health routes on the FastMCP instance.
+# Runs at import time so the routes are present by the time anyone
+# calls streamable_http_app() in either stdio-warmup or HTTP mode.
+from lib.auth_routes import register_routes as _register_auth_routes
+_register_auth_routes(mcp)
+
 
 # Set to True when running in HTTP mode. In HTTP mode, the server's
 # working directory is meaningless (it's wherever the server started).
@@ -775,10 +781,21 @@ def _start_foreground(port: int) -> None:
     mcp.settings.transport_security.allowed_hosts = ["*"]
     mcp.settings.transport_security.allowed_origins = ["*"]
 
+    # Build the ASGI app ourselves so we can layer middleware before
+    # uvicorn starts. FastMCP's `mcp.run(transport="streamable-http")`
+    # calls streamable_http_app() internally — we do the same but keep
+    # the returned Starlette app around so BearerAuthMiddleware can
+    # ride every incoming request.
+    import uvicorn
+    from lib.auth_middleware import BearerAuthMiddleware
+
+    app = mcp.streamable_http_app()
+    app.add_middleware(BearerAuthMiddleware)
+
     _write_pid(port)
     print(f"NotNativeMemory MCP server starting on http://0.0.0.0:{port} (foreground)")
     try:
-        mcp.run(transport="streamable-http")
+        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
     finally:
         _cleanup_pid()
 
