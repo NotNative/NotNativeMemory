@@ -77,6 +77,110 @@ async def list_admin_ids() -> List[UUID]:
     return [row["id"] for row in rows]
 
 
+async def list_users_overview(
+    offset: int = 0, limit: int = 50, search: Optional[str] = None,
+) -> tuple:
+    """
+    Admin-only listing of users with scalar-subquery counts for the
+    admin dashboard. Returns (users, total). Each user dict carries:
+
+        id, username, is_admin, created_at,
+        memory_count, fact_count, project_count, active_token_count
+
+    `search` does a case-insensitive prefix match on username when
+    provided; None or empty returns everyone.
+
+    Counts are scalar subqueries rather than a big JOIN + GROUP BY
+    because the result set is small (operators have dozens of users,
+    not millions) and the plan is equivalent in that regime.
+    """
+    pool = await get_pool()
+
+    where = "true"
+    args: list = []
+    if search:
+        where = "u.username ILIKE $1"
+        args.append(search + "%")
+
+    total_row = await pool.fetchrow(
+        f"SELECT COUNT(*)::bigint AS n FROM users u WHERE {where}",
+        *args,
+    )
+    total = int(total_row["n"] or 0)
+
+    limit_idx = len(args) + 1
+    offset_idx = len(args) + 2
+    rows = await pool.fetch(
+        f"""
+        SELECT
+            u.id, u.username, u.is_admin, u.created_at,
+            (SELECT COUNT(*) FROM memories    m WHERE m.owner_user_id = u.id) AS memory_count,
+            (SELECT COUNT(*) FROM facts       f WHERE f.owner_user_id = u.id) AS fact_count,
+            (SELECT COUNT(*) FROM projects    p WHERE p.owner_user_id = u.id) AS project_count,
+            (SELECT COUNT(*) FROM auth_tokens t WHERE t.user_id = u.id AND t.revoked_at IS NULL) AS active_token_count
+        FROM users u
+        WHERE {where}
+        ORDER BY u.created_at DESC
+        LIMIT ${limit_idx} OFFSET ${offset_idx}
+        """,
+        *args, limit, offset,
+    )
+
+    users = [
+        {
+            "id": str(r["id"]),
+            "username": r["username"],
+            "is_admin": bool(r["is_admin"]),
+            "created_at": r["created_at"].isoformat(),
+            "memory_count": int(r["memory_count"] or 0),
+            "fact_count": int(r["fact_count"] or 0),
+            "project_count": int(r["project_count"] or 0),
+            "active_token_count": int(r["active_token_count"] or 0),
+        }
+        for r in rows
+    ]
+    return users, total
+
+
+async def delete_user(user_id: UUID) -> bool:
+    """
+    Hard-delete a user. Cascades via FK to memories, facts, projects,
+    auth_tokens. Audit_events carries ON DELETE SET NULL on actor_user_id
+    so the historical trail survives with NULL actor. Returns True when
+    a row was removed; False when the UUID does not match any user.
+    """
+    pool = await get_pool()
+    result = await pool.execute("DELETE FROM users WHERE id = $1", user_id)
+    return result.endswith(" 1")
+
+
+async def set_password(user_id: UUID, new_password: str) -> None:
+    """
+    Overwrite a user's password with a fresh scrypt hash. Per-field
+    length caps apply (same as create_user). Caller should pair this
+    with bump_token_generation so the old sessions die — the session-
+    revocation is NOT automatic because not every caller wants it
+    (a self-service password change might want to keep the current
+    session valid; an admin-triggered reset always wants to kill the
+    other sessions).
+    """
+    if not new_password or len(new_password) < 8:
+        raise ValueError("password must be at least 8 characters")
+    try:
+        enforce_field_len(new_password, MAX_PASSWORD_BYTES, "password")
+    except PayloadTooLarge as exc:
+        raise ValueError(str(exc))
+
+    hashed = auth.hash_secret(new_password)
+    pool = await get_pool()
+    result = await pool.execute(
+        "UPDATE users SET password_hash = $2 WHERE id = $1",
+        user_id, hashed,
+    )
+    if not result.endswith(" 1"):
+        raise ValueError(f"no such user: {user_id}")
+
+
 async def create_user(username: str, password: str) -> Dict[str, Any]:
     """
     Create a user. Raises asyncpg.UniqueViolationError if the username

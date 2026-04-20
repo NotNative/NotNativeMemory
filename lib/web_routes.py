@@ -408,6 +408,116 @@ def register_routes(mcp) -> None:
         # confirm they remember the password they just typed.
         return RedirectResponse("/login", status_code=303)
 
+    # -- Admin: users ------------------------------------------------------
+
+    @mcp.custom_route("/admin/users", methods=["GET"])
+    async def admin_users_page(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+
+        params = request.query_params
+
+        def _int(name: str, default: int) -> int:
+            try:
+                return int(params.get(name, ""))
+            except (TypeError, ValueError):
+                return default
+
+        search = (params.get("search") or "").strip() or None
+        limit = max(1, min(_int("limit", 50), 200))
+        offset = max(0, _int("offset", 0))
+
+        users, total = await auth_db.list_users_overview(
+            offset=offset, limit=limit, search=search,
+        )
+
+        prev_offset = max(0, offset - limit) if offset > 0 else None
+        next_offset = offset + limit if offset + limit < total else None
+        base_qs = []
+        if search:
+            base_qs.append(f"search={search}")
+        base_qs.append(f"limit={limit}")
+        qs_without_offset = "&".join(base_qs)
+
+        return _render_with_csrf(
+            request, "admin_users.html",
+            users=users, count=len(users), total=total,
+            offset=offset, limit=limit, search=search,
+            prev_offset=prev_offset, next_offset=next_offset,
+            qs_without_offset=qs_without_offset,
+        )
+
+    @mcp.custom_route("/admin/users/{user_id}/force-logout", methods=["POST"])
+    async def admin_users_force_logout(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        try:
+            target = UUID(request.path_params["user_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid user id", status_code=400)
+
+        try:
+            new_gen = await auth_db.bump_token_generation(target)
+        except ValueError:
+            return HTMLResponse("user not found", status_code=404)
+
+        acting = request.state.user_id
+        if isinstance(acting, str):
+            acting = UUID(acting)
+        await audit.log_event(
+            "admin.force_logout",
+            actor_user_id=acting,
+            target_id=target,
+            detail={**audit.request_detail(request), "new_generation": new_gen},
+        )
+        return HTMLResponse("", status_code=200)
+
+    @mcp.custom_route("/admin/users/{user_id}/offboard", methods=["POST"])
+    async def admin_users_offboard(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        try:
+            target = UUID(request.path_params["user_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid user id", status_code=400)
+
+        acting = request.state.user_id
+        if isinstance(acting, str):
+            acting = UUID(acting)
+
+        # Refuse to off-board yourself: it's almost always a mistake,
+        # and a reset-admin + logout flow is the correct recovery.
+        if target == acting:
+            return HTMLResponse(
+                "cannot off-board yourself; use --reset-admin instead",
+                status_code=400,
+            )
+
+        removed = await auth_db.delete_user(target)
+        if not removed:
+            return HTMLResponse("user not found", status_code=404)
+
+        await audit.log_event(
+            "admin.offboard",
+            actor_user_id=acting,
+            target_id=target,
+            detail=audit.request_detail(request),
+        )
+        return HTMLResponse("", status_code=200)
+
     # -- Admin: audit log --------------------------------------------------
 
     @mcp.custom_route("/admin/audit", methods=["GET"])

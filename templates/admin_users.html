@@ -1,0 +1,112 @@
+{% extends "base.html" %}
+{% block title %}Users — NotNativeMemory{% endblock %}
+{% block content %}
+<h1>Users</h1>
+
+<p style="color:var(--muted-fg);font-size:0.9em;">
+  All users on this server, with counts of memories, facts, projects,
+  and active (non-revoked) Bearer tokens. Force-logout bumps the user's
+  token_generation so every outstanding session is invalidated. Off-board
+  hard-deletes the user and cascades their memories, facts, projects,
+  and tokens.
+</p>
+
+<form class="filters" method="get" action="/admin/users">
+  <div class="filter-row">
+    <input name="search" value="{{ search or '' }}"
+           placeholder="username prefix (case-insensitive)"
+           style="flex:1 1 260px;">
+    <input type="hidden" name="limit" value="{{ limit }}">
+    <button type="submit">Apply</button>
+    <a href="/admin/users" class="clear-link">clear</a>
+  </div>
+</form>
+
+<p>
+  {% if total == 0 %}
+    No users match.
+  {% else %}
+    Showing {{ offset + 1 }}-{{ offset + count }} of {{ total }}.
+  {% endif %}
+</p>
+
+{% if users %}
+<table class="users-table">
+  <thead>
+    <tr>
+      <th>Username</th>
+      <th>Role</th>
+      <th>Memories</th>
+      <th>Facts</th>
+      <th>Projects</th>
+      <th>Tokens</th>
+      <th>Created</th>
+      <th>Actions</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for u in users %}
+      <tr id="user-{{ u.id }}">
+        <td>{{ u.username }}</td>
+        <td>
+          {% if u.is_admin %}<span class="badge imp-high">admin</span>
+          {% else %}<span class="badge imp-low">user</span>{% endif %}
+        </td>
+        <td class="num">{{ u.memory_count }}</td>
+        <td class="num">{{ u.fact_count }}</td>
+        <td class="num">{{ u.project_count }}</td>
+        <td class="num">{{ u.active_token_count }}</td>
+        <td class="ts">{{ u.created_at[:10] }}</td>
+        <td class="actions">
+          <button class="secondary"
+                  hx-post="/admin/users/{{ u.id }}/force-logout"
+                  hx-target="#user-{{ u.id }}"
+                  hx-swap="none"
+                  hx-confirm="Force-logout {{ u.username }}? Their sessions will die on next request.">
+            Force logout
+          </button>
+          <button class="secondary danger-btn"
+                  hx-post="/admin/users/{{ u.id }}/offboard"
+                  hx-target="#user-{{ u.id }}"
+                  hx-swap="outerHTML"
+                  hx-confirm="Off-board {{ u.username }}? This DELETES the user AND all their memories / facts / projects / tokens. Cannot be undone.">
+            Off-board
+          </button>
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if total > limit %}
+<div class="paging">
+  {% if prev_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ prev_offset }}">&larr; Prev</a>
+  {% else %}
+    <span class="disabled">&larr; Prev</span>
+  {% endif %}
+  {% if next_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ next_offset }}">Next &rarr;</a>
+  {% else %}
+    <span class="disabled">Next &rarr;</span>
+  {% endif %}
+</div>
+{% endif %}
+
+<style>
+  .users-table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+  .users-table th, .users-table td { text-align: left; padding: 0.4em 0.6em;
+                                      border-bottom: 1px solid var(--border);
+                                      vertical-align: middle; }
+  .users-table th { color: var(--muted-fg); font-weight: 600; }
+  .users-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+  .users-table .ts { white-space: nowrap; color: var(--muted-fg); font-size: 0.9em; }
+  .users-table .actions { display: flex; gap: 0.4em; }
+  .users-table .actions button { padding: 0.3em 0.7em; font-size: 0.9em; }
+  .paging { margin: 1em 0; display: flex; gap: 1em; align-items: center; color: var(--muted-fg); }
+  .paging a { color: var(--link); text-decoration: none; padding: 0.3em 0.8em;
+              border: 1px solid var(--border-strong); border-radius: 3px; }
+  .paging .disabled { color: var(--faint-fg); pointer-events: none; border-color: var(--border); }
+</style>
+{% endblock %}
