@@ -222,26 +222,51 @@ CREATE INDEX IF NOT EXISTS idx_audit_events_event_at
 CREATE INDEX IF NOT EXISTS idx_audit_events_at
     ON audit_events (at DESC);
 
--- Row-Level Security policies. Inert until operators create a
--- non-superuser DB role AND ENABLE ROW LEVEL SECURITY on each table;
--- see lib/rls.py and config/migrations/008_rls_foundations.sql.
+-- Row-Level Security policies with admin-sentinel bypass. Inert
+-- until operators create a non-superuser DB role AND ENABLE ROW
+-- LEVEL SECURITY on each table; see lib/rls.py, migration 008, and
+-- migration 013.
 
 DROP POLICY IF EXISTS memories_owner_rls ON memories;
 CREATE POLICY memories_owner_rls ON memories
-    USING (owner_user_id = current_setting('app.current_user', true)::uuid)
-    WITH CHECK (owner_user_id = current_setting('app.current_user', true)::uuid);
+    USING (
+        current_setting('app.current_user', true) = 'admin'
+        OR owner_user_id::text = current_setting('app.current_user', true)
+    )
+    WITH CHECK (
+        current_setting('app.current_user', true) = 'admin'
+        OR owner_user_id::text = current_setting('app.current_user', true)
+    );
 
 DROP POLICY IF EXISTS facts_owner_rls ON facts;
 CREATE POLICY facts_owner_rls ON facts
-    USING (owner_user_id = current_setting('app.current_user', true)::uuid)
-    WITH CHECK (owner_user_id = current_setting('app.current_user', true)::uuid);
+    USING (
+        current_setting('app.current_user', true) = 'admin'
+        OR owner_user_id::text = current_setting('app.current_user', true)
+    )
+    WITH CHECK (
+        current_setting('app.current_user', true) = 'admin'
+        OR owner_user_id::text = current_setting('app.current_user', true)
+    );
 
 DROP POLICY IF EXISTS projects_owner_rls ON projects;
 CREATE POLICY projects_owner_rls ON projects
-    USING (owner_user_id = current_setting('app.current_user', true)::uuid)
-    WITH CHECK (owner_user_id = current_setting('app.current_user', true)::uuid);
+    USING (
+        current_setting('app.current_user', true) = 'admin'
+        OR owner_user_id::text = current_setting('app.current_user', true)
+    )
+    WITH CHECK (
+        current_setting('app.current_user', true) = 'admin'
+        OR owner_user_id::text = current_setting('app.current_user', true)
+    );
 
 DROP POLICY IF EXISTS auth_tokens_owner_rls ON auth_tokens;
 CREATE POLICY auth_tokens_owner_rls ON auth_tokens
-    USING (user_id = current_setting('app.current_user', true)::uuid)
-    WITH CHECK (user_id = current_setting('app.current_user', true)::uuid);
+    USING (
+        current_setting('app.current_user', true) = 'admin'
+        OR user_id::text = current_setting('app.current_user', true)
+    )
+    WITH CHECK (
+        current_setting('app.current_user', true) = 'admin'
+        OR user_id::text = current_setting('app.current_user', true)
+    );

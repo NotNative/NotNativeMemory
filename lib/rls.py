@@ -51,6 +51,14 @@ from typing import AsyncIterator
 from uuid import UUID
 
 
+# Sentinel value for `app.current_user` that grants admin-wide access
+# under the RLS policy in migration 013. Set by admin_conn below; the
+# policy short-circuits the owner_user_id match when this value is
+# active. Only set from admin-guarded routes (_require_admin gating);
+# the policy itself is still a last line of defense, not the first.
+ADMIN_SENTINEL = "admin"
+
+
 @contextlib.asynccontextmanager
 async def app_conn(pool, user_id: UUID) -> AsyncIterator:
     """
@@ -84,4 +92,34 @@ async def app_conn(pool, user_id: UUID) -> AsyncIterator:
             except Exception:
                 # Connection is being torn down; the reset does not
                 # matter because the connection won't be reused.
+                pass
+
+
+@contextlib.asynccontextmanager
+async def admin_conn(pool) -> AsyncIterator:
+    """
+    Acquire a pooled connection with `app.current_user` set to the
+    admin sentinel. Under the migration 013 policy, this grants
+    cross-user visibility — used by /admin/* routes and by the
+    `list_users_overview` dashboard helper that needs to see every
+    user's counts.
+
+    Trust model: memory_app's SQL privilege lets it SET any GUC,
+    so this "escalation" is not a DB-level enforcement. It is the
+    application asserting "this query is running on behalf of an
+    authenticated admin." The route-level _require_admin gate is
+    what actually authorizes the escalation; the policy bypass
+    just lets the query execute correctly once authorized.
+    """
+    async with pool.acquire() as conn:
+        await conn.execute(
+            "SELECT set_config('app.current_user', $1::text, false)",
+            ADMIN_SENTINEL,
+        )
+        try:
+            yield conn
+        finally:
+            try:
+                await conn.execute("SELECT set_config('app.current_user', '', false)")
+            except Exception:
                 pass

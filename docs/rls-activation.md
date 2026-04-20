@@ -33,8 +33,16 @@ superuser, so shipping RLS as "on by default" would be a no-op.
 1. Superuser access to the Postgres instance NNM uses (the default
    `memory` user in the Docker setup qualifies).
 2. NNM code at or past the commit that lands the dual-role config
-   (`MEMORY_APP_DB_USER` / `MEMORY_APP_DB_PASSWORD` env vars).
-3. A maintenance window. Activation changes auth for every query;
+   (`MEMORY_APP_DB_USER` / `MEMORY_APP_DB_PASSWORD` env vars) — 5C.2.
+3. NNM code at or past the commit that migrates `lib/db.py` call
+   sites to use `rls.app_conn` and `rls.admin_conn` (5C.3, "Pass 2").
+   **Until this lands, do NOT run step 3 of this runbook.** Without
+   the call-site migration, the app role will hit an RLS policy
+   that denies every row, and user-scoped routes will see empty
+   results. The scaffold is shipped (migration 008 + 013, admin
+   sentinel policy, helpers in `lib/rls.py`) but the query paths
+   still use the raw pool today — follow-up work.
+4. A maintenance window. Activation changes auth for every query;
    short downtime is expected on the switch.
 
 ## Steps
