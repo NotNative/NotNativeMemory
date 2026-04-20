@@ -84,6 +84,44 @@ No reboot-survival unless you wire up a service manager (systemd, launchd, Task 
 
 No server on this machine — the hooks talk to the remote MCP URL configured at install time.
 
+## Web GUI
+
+The server ships a browser UI for curating your own memories, facts,
+and API tokens. It runs on the same port as the MCP (default 9500)
+and uses the same auth layer; sign in once and you see only your own
+data.
+
+Open the server URL in a browser and log in:
+
+```
+http://localhost:9500/            # auto-redirects to /login
+http://localhost:9500/memories    # browse, filter, edit, bulk delete
+http://localhost:9500/facts       # triple store browser
+http://localhost:9500/tokens      # mint and revoke API tokens
+```
+
+What's there:
+
+- **Memory list** with full-text search, filters (scope, tag,
+  importance, project), sort (created, accessed, temperature,
+  importance), and pagination. Every change updates the URL so
+  views are bookmarkable.
+- **Memory detail** lets you edit content (re-embeds on save),
+  tags, importance, and scope (rescope works by looking up or
+  creating the target project for your user).
+- **Bulk select + delete** with an all-visible toggle.
+- **Facts browser** with the same filter conventions. History is
+  hidden by default; check "Include superseded facts" to see the
+  temporal chain.
+- **Token management**: list your tokens (label, created, last
+  used, revoked state), mint new ones with a label, revoke.
+  New tokens are shown exactly once at creation; copy before
+  reloading the page.
+
+Auth is Bearer tokens under the hood. The browser stores the token
+in an HttpOnly session cookie; all state-changing requests are
+CSRF-protected with a double-submit cookie.
+
 ## Authentication
 
 The server supports Bearer-token auth with open self-registration.
