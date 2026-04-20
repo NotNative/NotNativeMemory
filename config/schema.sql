@@ -198,6 +198,24 @@ BEGIN
     END IF;
 END $$;
 
+-- Audit events: append-only trail of security-relevant actions.
+-- Writers live in lib/audit.py::log_event.
+CREATE TABLE IF NOT EXISTS audit_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    target_id UUID,
+    detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+    at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_actor_at
+    ON audit_events (actor_user_id, at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_event_at
+    ON audit_events (event_type, at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_at
+    ON audit_events (at DESC);
+
 -- Row-Level Security policies. Inert until operators create a
 -- non-superuser DB role AND ENABLE ROW LEVEL SECURITY on each table;
 -- see lib/rls.py and config/migrations/008_rls_foundations.sql.

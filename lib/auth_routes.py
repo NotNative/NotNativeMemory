@@ -31,7 +31,7 @@ import asyncpg
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from lib import auth_db, password_policy, rate_limit
+from lib import audit, auth_db, password_policy, rate_limit
 
 
 def _too_many_requests(retry_after: float, detail: str) -> JSONResponse:
@@ -84,6 +84,10 @@ def register_routes(mcp) -> None:
         ip = rate_limit.client_ip(request)
         allowed, retry = rate_limit.check_register(ip)
         if not allowed:
+            await audit.log_event(
+                "register.rate_limited",
+                detail=audit.request_detail(request),
+            )
             return _too_many_requests(retry, "too many registration attempts")
         # Count every attempt so a hostile script cannot spray registrations
         # for free by hitting only the parsing / validation error paths.
@@ -114,6 +118,11 @@ def register_routes(mcp) -> None:
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400)
 
+        await audit.log_event(
+            "user.register",
+            actor_user_id=UUID(user["id"]),
+            detail=audit.request_detail(request),
+        )
         return JSONResponse({"user": user}, status_code=201)
 
     @mcp.custom_route("/auth/login", methods=["POST"])
@@ -129,6 +138,10 @@ def register_routes(mcp) -> None:
         ip = rate_limit.client_ip(request)
         allowed, retry = rate_limit.check_login(ip, username)
         if not allowed:
+            await audit.log_event(
+                "login.rate_limited",
+                detail={**audit.request_detail(request), "username_tried": username[:64]},
+            )
             return _too_many_requests(retry, "too many login attempts")
 
         record = await auth_db.get_user_by_username(username)
@@ -140,10 +153,21 @@ def register_routes(mcp) -> None:
         stored = record["password_hash"] if record else None
         if not auth.verify_or_dummy(password, stored):
             rate_limit.record_login_failure(ip, username)
+            await audit.log_event(
+                "login.fail",
+                actor_user_id=record["id"] if record else None,
+                detail={**audit.request_detail(request), "username_tried": username[:64]},
+            )
             return JSONResponse({"error": "invalid credentials"}, status_code=401)
 
         rate_limit.clear_login(ip, username)
         token = await auth_db.create_token(record["id"], label=label)
+        await audit.log_event(
+            "login.success",
+            actor_user_id=record["id"],
+            target_id=UUID(token["id"]),
+            detail={**audit.request_detail(request), "label": label or ""},
+        )
         return JSONResponse({
             "user": {
                 "id": str(record["id"]),
@@ -167,6 +191,12 @@ def register_routes(mcp) -> None:
         payload = await _parse_json(request) or {}
         label = payload.get("label") or None
         token = await auth_db.create_token(uid, label=label)
+        await audit.log_event(
+            "token.mint",
+            actor_user_id=uid,
+            target_id=UUID(token["id"]),
+            detail={**audit.request_detail(request), "label": label or ""},
+        )
         return JSONResponse({"token": token}, status_code=201)
 
     @mcp.custom_route("/auth/tokens/{token_id}", methods=["DELETE"])
@@ -187,6 +217,12 @@ def register_routes(mcp) -> None:
                 {"error": "token not found or already revoked"},
                 status_code=404,
             )
+        await audit.log_event(
+            "token.revoke",
+            actor_user_id=uid,
+            target_id=token_id,
+            detail=audit.request_detail(request),
+        )
         return JSONResponse({"revoked": True})
 
     @mcp.custom_route("/auth/me", methods=["GET"])

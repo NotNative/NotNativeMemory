@@ -21,7 +21,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.templating import Jinja2Templates
 
-from lib import auth, auth_db, password_policy, rate_limit
+from lib import audit, auth, auth_db, password_policy, rate_limit
 from lib.csrf import check_csrf, get_or_mint_csrf, set_csrf_cookie
 
 
@@ -145,6 +145,10 @@ def register_routes(mcp) -> None:
         ip = rate_limit.client_ip(request)
         allowed, retry = rate_limit.check_login(ip, username)
         if not allowed:
+            await audit.log_event(
+                "login.rate_limited",
+                detail={**audit.request_detail(request), "username_tried": username[:64]},
+            )
             wait = max(1, int(retry + 0.999))
             resp = _render_with_csrf(
                 request, "login.html",
@@ -162,6 +166,11 @@ def register_routes(mcp) -> None:
         stored = record["password_hash"] if record else None
         if not auth.verify_or_dummy(password, stored):
             rate_limit.record_login_failure(ip, username)
+            await audit.log_event(
+                "login.fail",
+                actor_user_id=record["id"] if record else None,
+                detail={**audit.request_detail(request), "username_tried": username[:64]},
+            )
             return _render_with_csrf(
                 request, "login.html",
                 status_code=401,
@@ -170,6 +179,12 @@ def register_routes(mcp) -> None:
 
         rate_limit.clear_login(ip, username)
         token = await auth_db.create_token(record["id"], label="web-session")
+        await audit.log_event(
+            "login.success",
+            actor_user_id=record["id"],
+            target_id=UUID(token["id"]),
+            detail={**audit.request_detail(request), "label": "web-session"},
+        )
         resp = RedirectResponse("/memories", status_code=303)
         _set_session_cookie(resp, token["token"])
         return resp
@@ -232,7 +247,7 @@ def register_routes(mcp) -> None:
             )
 
         try:
-            await auth_db.create_user(username, password)
+            new_user = await auth_db.create_user(username, password)
         except asyncpg.UniqueViolationError:
             return _render_with_csrf(
                 request, "register.html",
@@ -245,6 +260,12 @@ def register_routes(mcp) -> None:
                 status_code=400,
                 error=str(exc),
             )
+
+        await audit.log_event(
+            "user.register",
+            actor_user_id=UUID(new_user["id"]),
+            detail=audit.request_detail(request),
+        )
 
         # Redirect to login rather than auto-login: forces the user to
         # confirm they remember the password they just typed.
@@ -262,16 +283,20 @@ def register_routes(mcp) -> None:
         # it to a token row, mark revoked. If any step fails, we still
         # clear the cookie so the user is functionally logged out.
         cookie = request.cookies.get(SESSION_COOKIE_NAME)
+        audit_actor: UUID | None = None
+        audit_target: UUID | None = None
         if cookie:
             resolved = await auth_db.resolve_token(cookie)
             if resolved:
                 try:
-                    await auth_db.revoke_token(
+                    uid = (
                         UUID(resolved["user_id"])
                         if isinstance(resolved["user_id"], str)
-                        else resolved["user_id"],
-                        UUID(resolved["token_id"]),
+                        else resolved["user_id"]
                     )
+                    tid = UUID(resolved["token_id"])
+                    audit_actor, audit_target = uid, tid
+                    await auth_db.revoke_token(uid, tid)
                 except (ValueError, TypeError) as exc:
                     # Token resolved but UUID conversion failed. Log at
                     # debug so we notice if tokens start landing here,
@@ -280,6 +305,13 @@ def register_routes(mcp) -> None:
                     _log.debug(
                         "logout: could not revoke token cleanly (%s)", exc,
                     )
+
+        await audit.log_event(
+            "logout",
+            actor_user_id=audit_actor,
+            target_id=audit_target,
+            detail=audit.request_detail(request),
+        )
 
         resp = RedirectResponse("/login", status_code=303)
         _clear_session_cookie(resp)
@@ -513,6 +545,12 @@ def register_routes(mcp) -> None:
         label = (form.get("label") or "").strip() or None
 
         minted = await auth_db.create_token(uid, label=label)
+        await audit.log_event(
+            "token.mint",
+            actor_user_id=uid,
+            target_id=UUID(minted["id"]),
+            detail={**audit.request_detail(request), "label": label or ""},
+        )
         # Re-render the page with the raw value exposed as new_token.
         # The token is NOT stored server-side in this flow after this
         # render; if the user navigates away or reloads, the banner
@@ -547,6 +585,12 @@ def register_routes(mcp) -> None:
         ok = await auth_db.revoke_token(uid, token_uuid)
         if not ok:
             return HTMLResponse("not found", status_code=404)
+        await audit.log_event(
+            "token.revoke",
+            actor_user_id=uid,
+            target_id=token_uuid,
+            detail=audit.request_detail(request),
+        )
 
         # HTMX swap target is the row itself. Return empty body so the
         # row vanishes, matching how memory delete works. Alternative
