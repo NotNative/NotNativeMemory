@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Facts — NotNativeMemory{% endblock %}
+{% block content %}
+<h1>Facts</h1>
+<p style="color:var(--muted-fg);font-size:0.9em;">
+  Facts are temporal assertions: <em>subject predicate object</em>. When
+  the value changes, the old row gets a <code>valid_to</code> timestamp
+  rather than being deleted, so you can look up what used to be true.
+</p>
+
+<form class="filters" method="get" action="/facts"
+      hx-get="/facts" hx-target="#fact-panel" hx-push-url="true"
+      hx-trigger="submit, change delay:400ms from:input[name=q]">
+  <div class="filter-row">
+    <input name="q" value="{{ filters.q or '' }}"
+           placeholder="Search subject or object..." autocomplete="off"
+           style="flex: 2 1 220px; min-width: 180px;">
+    <input name="subject" value="{{ filters.subject or '' }}"
+           placeholder="subject" style="flex: 1 1 160px;">
+    <input name="predicate" value="{{ filters.predicate or '' }}"
+           placeholder="predicate (exact)" style="flex: 1 1 160px;">
+    <select name="scope" style="flex: 0 1 120px;">
+      <option value="">scope: any</option>
+      <option value="local" {% if filters.scope == 'local' %}selected{% endif %}>local</option>
+      <option value="global" {% if filters.scope == 'global' %}selected{% endif %}>global</option>
+      <option value="domain" {% if filters.scope == 'domain' %}selected{% endif %}>domain</option>
+    </select>
+  </div>
+  <div class="filter-row">
+    <label style="display:flex;gap:0.4em;align-items:center;margin:0;">
+      <input type="checkbox" name="include_history" value="1"
+             {% if filters.include_history %}checked{% endif %}>
+      Include superseded facts (history)
+    </label>
+    <input type="hidden" name="limit" value="{{ limit }}">
+    <button type="submit">Apply</button>
+    <a href="/facts" class="clear-link">clear</a>
+  </div>
+</form>
+
+<div id="fact-panel">
+  {% include "_facts_list.html" %}
+</div>
+{% endblock %}

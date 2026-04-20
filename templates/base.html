@@ -1,0 +1,210 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}NotNativeMemory{% endblock %}</title>
+  <script>
+    // Apply saved theme before paint to avoid a flash of light content.
+    (function () {
+      try {
+        var t = localStorage.getItem("nnm-theme");
+        if (!t) {
+          t = window.matchMedia("(prefers-color-scheme: dark)").matches
+              ? "dark" : "light";
+        }
+        document.documentElement.setAttribute("data-theme", t);
+      } catch (e) { /* localStorage blocked — default light */ }
+    })();
+  </script>
+  <script src="https://unpkg.com/htmx.org@2.0.3"
+          integrity="sha384-0895/pl2MU10Hqc6jd4RvrthNlDiE9U1tWmX7WRESftEDRosgxNsQG/Ze9YMRzHq"
+          crossorigin="anonymous"></script>
+  <style>
+    :root {
+      color-scheme: light;
+      --bg: #fff;
+      --fg: #222;
+      --muted-fg: #666;
+      --faint-fg: #999;
+      --border: #ddd;
+      --border-strong: #ccc;
+      --input-bg: #fff;
+      --input-border: #ccc;
+      --link: #06c;
+      --link-hover: #048;
+      --nav-sep: #bbb;
+      --card-bg: #fafafa;
+      --badge-bg: #eee;
+      --btn-bg: #06c;
+      --btn-bg-hover: #048;
+      --btn-fg: #fff;
+      --btn-secondary-bg: #eee;
+      --btn-secondary-fg: #222;
+      --btn-secondary-border: #ccc;
+      --btn-secondary-bg-hover: #ddd;
+      --error-bg: #fee;
+      --error-fg: #c00;
+      --flash-bg: #efe;
+      --flash-fg: #060;
+      --imp-critical-bg: #fdd;
+      --imp-critical-fg: #900;
+      --imp-high-bg: #ffe8c7;
+      --imp-high-fg: #850;
+      --danger-bg: #fee;
+      --danger-border: #d88;
+      --danger-fg: #900;
+      --danger-hover-bg: #fdd;
+      --danger-hover-border: #c66;
+      --paging-hover-bg: #f0f7ff;
+      --code-bg: #fff;
+    }
+    [data-theme="dark"] {
+      color-scheme: dark;
+      --bg: #15171a;
+      --fg: #e6e6e6;
+      --muted-fg: #9aa0a6;
+      --faint-fg: #6e7479;
+      --border: #2e3338;
+      --border-strong: #3a4047;
+      --input-bg: #1b1e23;
+      --input-border: #3a4047;
+      --link: #6aa9ff;
+      --link-hover: #9cc2ff;
+      --nav-sep: #444;
+      --card-bg: #1d2025;
+      --badge-bg: #2a2e35;
+      --btn-bg: #3a72c7;
+      --btn-bg-hover: #4d85db;
+      --btn-fg: #fff;
+      --btn-secondary-bg: #2a2e35;
+      --btn-secondary-fg: #e6e6e6;
+      --btn-secondary-border: #3a4047;
+      --btn-secondary-bg-hover: #353a42;
+      --error-bg: #3a1f1f;
+      --error-fg: #ff8a8a;
+      --flash-bg: #1d3320;
+      --flash-fg: #8fdfa0;
+      --imp-critical-bg: #4a1e1e;
+      --imp-critical-fg: #ff9a9a;
+      --imp-high-bg: #3d2f14;
+      --imp-high-fg: #f2c97a;
+      --danger-bg: #3a1f1f;
+      --danger-border: #6b3a3a;
+      --danger-fg: #ff8a8a;
+      --danger-hover-bg: #4a2626;
+      --danger-hover-border: #8a4a4a;
+      --paging-hover-bg: #1e2a3a;
+      --code-bg: #0f1114;
+    }
+    * { box-sizing: border-box; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 960px;
+           margin: 2em auto; padding: 0 1em;
+           color: var(--fg); background: var(--bg); line-height: 1.5; }
+    a { color: var(--link); }
+    a:hover { color: var(--link-hover); }
+    input, select, textarea { background: var(--input-bg); color: var(--fg);
+           border: 1px solid var(--input-border); border-radius: 3px; }
+    code { background: var(--badge-bg); padding: 0.05em 0.3em;
+           border-radius: 3px; font-family: ui-monospace, monospace; }
+    nav { border-bottom: 1px solid var(--border); padding-bottom: 0.5em;
+          margin-bottom: 1em; display: flex; gap: 1em; align-items: center;
+          flex-wrap: wrap; }
+    nav a { color: var(--link); text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    nav .sep { color: var(--nav-sep); }
+    nav .spacer { flex: 1; }
+    .memory { border: 1px solid var(--border); padding: 0.75em; margin: 0.5em 0;
+              border-radius: 4px; background: var(--card-bg); }
+    .memory .content { white-space: pre-wrap; margin-bottom: 0.5em; }
+    .memory .meta { font-size: 0.85em; color: var(--muted-fg); display: flex;
+                    gap: 0.75em; flex-wrap: wrap; }
+    .memory .meta .badge { background: var(--badge-bg); padding: 0.1em 0.4em;
+                           border-radius: 3px; }
+    .memory .meta .imp-critical { background: var(--imp-critical-bg);
+                                  color: var(--imp-critical-fg); }
+    .memory .meta .imp-high { background: var(--imp-high-bg);
+                              color: var(--imp-high-fg); }
+    .memory .meta .imp-low { color: var(--faint-fg); }
+    .memory button { float: right; background: var(--bg); color: var(--fg);
+                     border: 1px solid var(--border-strong);
+                     padding: 0.3em 0.7em; cursor: pointer; border-radius: 3px; }
+    .memory button:hover { background: var(--danger-hover-bg);
+                           border-color: var(--danger-hover-border);
+                           color: var(--danger-fg); }
+    .error { color: var(--error-fg); padding: 0.5em;
+             background: var(--error-bg); border-radius: 3px; }
+    .flash { color: var(--flash-fg); padding: 0.5em;
+             background: var(--flash-bg); border-radius: 3px; }
+    form.inline { display: inline; }
+    form.stacked { max-width: 400px; }
+    form.stacked label { display: block; margin: 0.5em 0; }
+    form.stacked input { width: 100%; font-size: 1em; padding: 0.4em; }
+    button { font-size: 1em; padding: 0.5em 1em; cursor: pointer;
+             background: var(--btn-bg); color: var(--btn-fg);
+             border: none; border-radius: 3px; }
+    button:hover { background: var(--btn-bg-hover); }
+    button.secondary { background: var(--btn-secondary-bg);
+                       color: var(--btn-secondary-fg);
+                       border: 1px solid var(--btn-secondary-border); }
+    button.secondary:hover { background: var(--btn-secondary-bg-hover); }
+    .danger-btn { background: var(--danger-bg) !important;
+                  border: 1px solid var(--danger-border) !important;
+                  color: var(--danger-fg) !important; }
+    .danger-btn:hover { background: var(--danger-hover-bg) !important;
+                        border-color: var(--danger-hover-border) !important; }
+    .theme-toggle { background: transparent; color: var(--link);
+                    border: 1px solid var(--border); padding: 0.25em 0.6em;
+                    cursor: pointer; font-size: 0.9em; border-radius: 3px; }
+    .theme-toggle:hover { background: var(--btn-secondary-bg); }
+    h1 { margin-top: 0.3em; }
+  </style>
+</head>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
+  <nav>
+    <strong>NotNativeMemory</strong>
+    {% if username %}
+      <span class="sep">|</span>
+      <span>{{ username }}</span>
+      <span class="sep">|</span>
+      <a href="/memories">Memories</a>
+      <span class="sep">|</span>
+      <a href="/facts">Facts</a>
+      <span class="sep">|</span>
+      <a href="/tokens">Tokens</a>
+      <span class="sep">|</span>
+      <form class="inline" method="post" action="/logout">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+        <button class="secondary" type="submit">Log out</button>
+      </form>
+    {% else %}
+      <span class="sep">|</span>
+      <a href="/login">Login</a>
+      <span class="sep">|</span>
+      <a href="/register">Register</a>
+    {% endif %}
+    <span class="spacer"></span>
+    <button type="button" class="theme-toggle" id="theme-toggle"
+            aria-label="Toggle color theme"></button>
+  </nav>
+  <script>
+    (function () {
+      var btn = document.getElementById("theme-toggle");
+      if (!btn) return;
+      var root = document.documentElement;
+      var render = function () {
+        btn.textContent = root.getAttribute("data-theme") === "dark"
+          ? "Light mode" : "Dark mode";
+      };
+      render();
+      btn.addEventListener("click", function () {
+        var next = root.getAttribute("data-theme") === "dark" ? "light" : "dark";
+        root.setAttribute("data-theme", next);
+        try { localStorage.setItem("nnm-theme", next); } catch (e) {}
+        render();
+      });
+    })();
+  </script>
+  {% block content %}{% endblock %}
+</body>
+</html>

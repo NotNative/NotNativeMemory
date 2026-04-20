@@ -1,0 +1,25 @@
+<div class="memory" id="memory-{{ m.id }}">
+  <input type="checkbox" name="ids" value="{{ m.id }}" form="bulk-form"
+         style="float:left;margin-right:0.5em;margin-top:0.2em;">
+  <button
+    hx-delete="/memories/{{ m.id }}"
+    hx-target="#memory-{{ m.id }}"
+    hx-swap="outerHTML"
+    hx-confirm="Delete this memory? This cannot be undone.">Delete</button>
+  <div class="content">
+    <a href="/memories/{{ m.id }}" style="color:inherit;text-decoration:none;">
+      {{ m.content }}
+    </a>
+  </div>
+  <div class="meta">
+    <span class="badge imp-{{ m.importance }}">{{ m.importance }}</span>
+    {% if m.scope %}<span class="badge">{{ m.scope }}</span>{% endif %}
+    {% if m.project and m.project != m.scope %}
+      <span class="badge">{{ m.project }}</span>
+    {% endif %}
+    {% if m.tags %}
+      <span>tags: {{ m.tags | join(", ") }}</span>
+    {% endif %}
+    <span title="{{ m.created_at }}">temp {{ m.temperature }}</span>
+  </div>
+</div>

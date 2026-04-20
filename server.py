@@ -40,6 +40,14 @@ mcp = FastMCP(
     stateless_http=True,
 )
 
+# Register the /auth/* and /health routes on the FastMCP instance.
+# Runs at import time so the routes are present by the time anyone
+# calls streamable_http_app() in either stdio-warmup or HTTP mode.
+from lib.auth_routes import register_routes as _register_auth_routes
+from lib.web_routes import register_routes as _register_web_routes
+_register_auth_routes(mcp)
+_register_web_routes(mcp)
+
 
 # Set to True when running in HTTP mode. In HTTP mode, the server's
 # working directory is meaningless (it's wherever the server started).
@@ -51,25 +59,107 @@ def _detect_project_directory() -> str:
     """
     Detect the current project directory.
 
-    stdio mode: Claude Code sets the working directory, so os.getcwd() works.
-    HTTP mode: working directory is meaningless, falls back to env var or "general".
-
-    Returns:
-        Project identifier string.
+    stdio mode: Claude Code sets the working directory, so os.getcwd()
+    is the right call. HTTP mode: working directory is meaningless,
+    falls back to an env var or returns the "general" sentinel that
+    the write-path validator rejects so callers can't silently pool
+    writes into an unintended bucket.
     """
-    # Explicit env var takes priority in any mode
     default = os.environ.get("MEMORY_DEFAULT_PROJECT", "")
     if default:
         return default
 
-    # stdio mode: Claude Code's working directory is inherited
     if not _http_mode:
         cwd = os.getcwd()
         if cwd and cwd != "/":
             return os.path.abspath(cwd)
 
-    # HTTP mode or no working directory: use "general" as a catch-all
     return "general"
+
+
+# Reserved scope names exposed as write targets.
+_GLOBAL_SCOPE = "_global"
+_DOMAIN_PREFIX = "_domain_"
+
+
+def _normalize_project(project: Optional[str]) -> str:
+    """
+    Normalize `project` into a canonical form used by both store and
+    read paths, so `memory_store` and `memory_search` always agree on
+    the DB key. Applied at every tool entry point.
+
+    Rules:
+      - None or "" -> fall through to _detect_project_directory()
+      - `_global` / `_domain_<name>` -> returned verbatim
+      - Absolute path -> os.path.normpath() (collapses slashes, dots)
+      - Anything else -> returned as-is (validator will reject)
+    """
+    if project is None or not project.strip():
+        project = _detect_project_directory()
+
+    value = project.strip()
+
+    if value == _GLOBAL_SCOPE or value.startswith(_DOMAIN_PREFIX):
+        return value
+
+    # Only normalize paths. Rel paths get caught by the validator next.
+    looks_absolute = (
+        value.startswith("/")
+        or value.startswith("\\")
+        or (len(value) >= 3 and value[1] == ":" and value[2] in ("/", "\\"))
+    )
+    if looks_absolute:
+        return os.path.normpath(value)
+
+    return value
+
+
+def _validate_writable_scope(project: str) -> Optional[str]:
+    """
+    Return an error message if `project` is not a valid write target,
+    or None if the value is acceptable. Read paths stay permissive and
+    do not call this: historical scopes like "general" still need to
+    be searchable even though we no longer accept writes to them.
+
+    Accepted:
+        "_global"                     (global scope)
+        "_domain_<name>"              (domain scope, non-empty name)
+        absolute path (Unix/Windows)  (local scope)
+    Rejected:
+        empty, "general", bare names, relative paths.
+    """
+    if not project or not project.strip():
+        return "project is required for writes (pass an explicit value)"
+
+    value = project.strip()
+
+    if value == _GLOBAL_SCOPE:
+        return None
+
+    if value.startswith(_DOMAIN_PREFIX):
+        domain_name = value[len(_DOMAIN_PREFIX):]
+        if not domain_name:
+            return (
+                f"invalid domain scope: {value!r} "
+                f"(expected {_DOMAIN_PREFIX}<name> with non-empty name)"
+            )
+        return None
+
+    # Absolute path heuristic covers Unix (/foo, //server/share) and
+    # Windows (C:\..., C:/...). Relative paths ("scratch", "general")
+    # and bare identifiers are rejected — the silent fall to "general"
+    # was the single biggest source of mis-scoped writes observed
+    # through 2026-04-18.
+    if value.startswith("/") or value.startswith("\\"):
+        return None
+    if len(value) >= 3 and value[1] == ":" and value[2] in ("/", "\\"):
+        return None
+
+    return (
+        f"project {value!r} is not a valid write target. "
+        f"Use {_GLOBAL_SCOPE!r}, "
+        f"{_DOMAIN_PREFIX}<name>, or an absolute path."
+    )
 
 
 @mcp.tool()
@@ -86,6 +176,9 @@ async def memory_store(
     against context loss: anything stored here survives when your working
     memory does not.
 
+    Memories get read back by any model that uses this MCP, from Opus
+    to Qwen3 30B. Write for the widest audience.
+
     WHEN to use:
     - The user corrects you or states a preference — store it so you
       never make them repeat it ("no em dashes", "always use local tz").
@@ -101,6 +194,22 @@ async def memory_store(
       your working context, not long-term memory.
     - Things already in the codebase — read the code instead.
     - Facts about current state that will change (use memory_fact_add).
+
+    HOW to write (the memory content itself):
+    - Short sentences. Target 15 to 25 words. No deeply nested clauses.
+    - Imperative voice for rules: "Do X," not "X should be done" or
+      "you might consider doing X."
+    - Plain technical English. Common jargon (API, regex, CI, Bearer
+      token, linter) is fine. Avoid literary words when a plain one
+      carries the same meaning: "tangential" becomes "not directly
+      about what was asked"; "substantive" becomes "real."
+    - For rule-shaped memories, include a **Why:** line (the reason)
+      and a **How to apply:** line (when it kicks in). These are
+      structural anchors that any reader can latch onto.
+    - Don't reference other memories by name or reason about how they
+      compose. Each memory stands alone.
+    - Write for a reader who has technical background but has not seen
+      this project or this conversation before.
 
     Tags are auto-detected from content (decision, preference, gotcha,
     correction, constraint), so you don't need to get tagging perfect.
@@ -145,19 +254,43 @@ async def memory_store(
 
     from lib.embeddings import embed
     from lib.db import store_memory, get_or_create_project
+    from lib.auth_context import current_user_id
+    from lib.limits import (
+        MAX_MEMORY_CONTENT_BYTES,
+        MAX_TAG_BYTES,
+        PayloadTooLarge,
+        enforce_field_len,
+    )
+
+    # Bound per-field sizes before we pay for embedding and DB work.
+    try:
+        enforce_field_len(content, MAX_MEMORY_CONTENT_BYTES, "content")
+        for t in (tags or []):
+            enforce_field_len(t, MAX_TAG_BYTES, "tag")
+    except PayloadTooLarge as exc:
+        return {"error": str(exc), "stored": False}
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "stored": False}
 
     store_tags = list(tags or [])
     if verbatim and "verbatim" not in store_tags:
         store_tags.append("verbatim")
 
-    project_dir = project or _detect_project_directory()
-    project_id = await get_or_create_project(project_dir)
+    project_dir = _normalize_project(project)
+    scope_err = _validate_writable_scope(project_dir)
+    if scope_err:
+        return {"error": scope_err, "stored": False, "project": project_dir}
+
+    project_id = await get_or_create_project(project_dir, owner)
 
     embedding = embed(content)
     memory_id = await store_memory(
         content=content,
         embedding=embedding,
         project_id=project_id,
+        owner_user_id=owner,
         tags=store_tags,
         importance=importance,
     )
@@ -214,17 +347,20 @@ async def memory_search(
 
     from lib.embeddings import embed
     from lib.db import search_memories, get_or_create_project
+    from lib.auth_context import current_user_id
 
-    # Determine project scope
-    project_id = None
-    if project != "":
-        project_dir = project or _detect_project_directory()
-        project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "results": [], "count": 0}
+
+    project_dir = _normalize_project(project)
+    project_id = await get_or_create_project(project_dir, owner)
 
     query_embedding = embed(query)
     results = await search_memories(
         query_embedding=query_embedding,
         project_id=project_id,
+        owner_user_id=owner,
         tags=tags,
         min_importance=min_importance,
         limit=limit,
@@ -258,13 +394,18 @@ async def memory_forget(memory_id: str) -> dict:
         memory_id: UUID of the memory to remove (from search/list results).
     """
     from lib.db import forget_memory
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"forgotten": False, "error": "authentication required"}
 
     try:
         uid = UUID(memory_id)
     except ValueError:
         return {"forgotten": False, "error": "Invalid memory ID format"}
 
-    deleted = await forget_memory(uid)
+    deleted = await forget_memory(uid, owner)
     return {"forgotten": deleted}
 
 
@@ -298,13 +439,17 @@ async def memory_list(
         limit: Max results (1-100, default 20).
     """
     from lib.db import list_memories, get_or_create_project
+    from lib.auth_context import current_user_id
 
-    project_id = None
-    if project != "":
-        project_dir = project or _detect_project_directory()
-        project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    if owner is None:
+        return {"memories": [], "count": 0, "error": "authentication required"}
+
+    project_dir = _normalize_project(project)
+    project_id = await get_or_create_project(project_dir, owner)
 
     results = await list_memories(
+        owner_user_id=owner,
         project_id=project_id,
         tags=tags,
         limit=limit,
@@ -327,6 +472,9 @@ async def memory_fact_add(
     valid in their original context), facts track mutable state — and
     when the state changes, the old fact is preserved with a timestamp
     rather than deleted.
+
+    Facts get read back by any model that uses this MCP, from Opus to
+    Qwen3 30B. Keep subject, predicate, and object short and concrete.
 
     WHEN to use:
     - Infrastructure state: what model runs on which server, what port
@@ -363,15 +511,37 @@ async def memory_fact_add(
         return {"error": "Object cannot be empty", "stored": False}
 
     from lib.db import add_fact, get_or_create_project
+    from lib.auth_context import current_user_id
+    from lib.limits import (
+        MAX_FACT_FIELD_BYTES,
+        PayloadTooLarge,
+        enforce_field_len,
+    )
 
-    project_dir = project or _detect_project_directory()
-    project_id = await get_or_create_project(project_dir)
+    try:
+        enforce_field_len(subject, MAX_FACT_FIELD_BYTES, "subject")
+        enforce_field_len(predicate, MAX_FACT_FIELD_BYTES, "predicate")
+        enforce_field_len(object, MAX_FACT_FIELD_BYTES, "object")
+    except PayloadTooLarge as exc:
+        return {"error": str(exc), "stored": False}
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "stored": False}
+
+    project_dir = _normalize_project(project)
+    scope_err = _validate_writable_scope(project_dir)
+    if scope_err:
+        return {"error": scope_err, "stored": False, "project": project_dir}
+
+    project_id = await get_or_create_project(project_dir, owner)
 
     result = await add_fact(
         project_id=project_id,
         subject=subject.strip(),
         predicate=predicate.strip(),
         obj=object.strip(),
+        owner_user_id=owner,
         confidence=max(0.0, min(1.0, confidence)),
     )
 
@@ -412,12 +582,17 @@ async def memory_fact_query(
         return {"error": "Subject cannot be empty", "facts": [], "count": 0}
 
     from lib.db import query_facts, get_or_create_project
-    from datetime import datetime, timezone
+    from lib.auth_context import current_user_id
+    from datetime import datetime
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "facts": [], "count": 0}
 
     project_id = None
-    if project != "":
-        project_dir = project or _detect_project_directory()
-        project_id = await get_or_create_project(project_dir)
+    if project is not None and project.strip():
+        project_dir = _normalize_project(project)
+        project_id = await get_or_create_project(project_dir, owner)
 
     as_of_dt = None
     if as_of:
@@ -427,8 +602,9 @@ async def memory_fact_query(
             return {"error": f"Invalid as_of timestamp: {as_of}", "facts": [], "count": 0}
 
     facts = await query_facts(
-        project_id=project_id,
+        owner_user_id=owner,
         subject=subject.strip(),
+        project_id=project_id,
         as_of=as_of_dt,
     )
 
@@ -475,11 +651,16 @@ async def memory_project_configure(
     from lib.db import (
         get_or_create_project, get_project_info, set_project_domains,
     )
+    from lib.auth_context import current_user_id
 
-    project_dir = project or _detect_project_directory()
-    project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    if owner is None:
+        return {"configured": False, "error": "authentication required"}
 
-    info = await get_project_info(project_id)
+    project_dir = _normalize_project(project)
+    project_id = await get_or_create_project(project_dir, owner)
+
+    info = await get_project_info(project_id, owner)
     if info and info["scope"] != "local":
         return {
             "error": f"Cannot set domains on a {info['scope']}-scope project",
@@ -487,7 +668,7 @@ async def memory_project_configure(
             "scope": info["scope"],
         }
 
-    updated = await set_project_domains(project_id, domains)
+    updated = await set_project_domains(project_id, owner, domains)
     return {
         "configured": True,
         "project": info["name"] if info else project_dir,
@@ -535,12 +716,18 @@ async def memory_context(
             max 2000). Keeps injection lightweight.
     """
     from lib.db import get_context_memories, get_or_create_project
+    from lib.auth_context import current_user_id
 
-    project_dir = project or _detect_project_directory()
-    project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    if owner is None:
+        return {"context": [], "count": 0, "error": "authentication required"}
+
+    project_dir = _normalize_project(project)
+    project_id = await get_or_create_project(project_dir, owner)
 
     results = await get_context_memories(
         project_id=project_id,
+        owner_user_id=owner,
         max_tokens=max_tokens,
     )
 
@@ -679,22 +866,126 @@ def _stop_running_server() -> tuple:
     return False, port
 
 
+_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def _resolve_bind_host() -> str:
+    """
+    MEMORY_BIND_HOST defaults to 0.0.0.0 so existing installs that do
+    not set it keep binding as they did before this change. New
+    installs ship with the env var set explicitly (see install scripts)
+    so the value is always visible to the operator.
+    """
+    return os.environ.get("MEMORY_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0"
+
+
+def _warn_insecure_bind(host: str) -> None:
+    """
+    Print a loud warning when the server is about to bind to a
+    non-loopback interface without MEMORY_COOKIE_SECURE=1. The flag
+    is our proxy for "operator has put this behind TLS" — without
+    it, session cookies fly over plaintext and a network observer
+    reads them.
+
+    This is a warning, not a hard fail: some operators run behind a
+    trusted TLS-terminating proxy and toggle COOKIE_SECURE separately.
+    The message is verbose on purpose so it is impossible to miss.
+    """
+    if host in _LOOPBACK_HOSTS:
+        return
+    cookie_secure = os.environ.get("MEMORY_COOKIE_SECURE", "") in ("1", "true", "yes")
+    if cookie_secure:
+        return
+    print("=" * 72, file=sys.stderr)
+    print("  WARNING: binding to a non-loopback interface without TLS.", file=sys.stderr)
+    print(f"  Bind host: {host}", file=sys.stderr)
+    print("  Session cookies will travel in plaintext; anyone on the", file=sys.stderr)
+    print("  network path can read them and impersonate logged-in users.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  Fix: either restrict to loopback by setting", file=sys.stderr)
+    print("    MEMORY_BIND_HOST=127.0.0.1", file=sys.stderr)
+    print("  OR run behind a TLS-terminating reverse proxy and set", file=sys.stderr)
+    print("    MEMORY_COOKIE_SECURE=1", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+
+
 def _start_foreground(port: int) -> None:
     """Run the HTTP server in the foreground (attached to console)."""
     global _http_mode
     _http_mode = True
-    mcp.settings.host = "0.0.0.0"
+    bind_host = _resolve_bind_host()
+    _warn_insecure_bind(bind_host)
+    mcp.settings.host = bind_host
     mcp.settings.port = port
     mcp.settings.transport_security.enable_dns_rebinding_protection = False
     mcp.settings.transport_security.allowed_hosts = ["*"]
     mcp.settings.transport_security.allowed_origins = ["*"]
 
+    # Build the ASGI app ourselves so we can layer middleware before
+    # uvicorn starts. FastMCP's `mcp.run(transport="streamable-http")`
+    # calls streamable_http_app() internally — we do the same but keep
+    # the returned Starlette app around so BearerAuthMiddleware can
+    # ride every incoming request.
+    import uvicorn
+    from lib.auth_middleware import BearerAuthMiddleware
+    from lib.limits import BodySizeLimitMiddleware
+    from lib.security_headers import SecurityHeadersMiddleware
+
+    app = mcp.streamable_http_app()
+    # Starlette composes middleware last-added-outermost. Order of
+    # the `add_middleware` calls below, inner-to-outer:
+    #
+    #   BearerAuthMiddleware    — resolves identity for downstream.
+    #   BodySizeLimitMiddleware — rejects oversize bodies BEFORE auth
+    #                             spends scrypt cycles on them.
+    #   SecurityHeadersMiddleware — outermost, so its headers land on
+    #                             every response including the 413
+    #                             from BodySizeLimit and the 401 from
+    #                             BearerAuth.
+    app.add_middleware(BearerAuthMiddleware)
+    app.add_middleware(BodySizeLimitMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
+
     _write_pid(port)
-    print(f"NotNativeMemory MCP server starting on http://0.0.0.0:{port} (foreground)")
+    print(f"NotNativeMemory MCP server starting on http://{bind_host}:{port} (foreground)")
     try:
-        mcp.run(transport="streamable-http")
+        uvicorn.run(app, host=bind_host, port=port, log_level="info")
     finally:
         _cleanup_pid()
+
+
+async def _cli_create_user(username: str) -> int:
+    """
+    Create a user from the command line. Prompts for the password on
+    stdin (hidden input). Useful for solo-mode installs and for
+    bootstrapping the first account on a multi-user deployment before
+    opening HTTP registration.
+    """
+    import getpass
+    from lib import auth_db
+    import asyncpg
+
+    password = getpass.getpass(f"Password for {username!r}: ")
+    confirm = getpass.getpass("Confirm password: ")
+    if password != confirm:
+        print("Passwords do not match.", file=sys.stderr)
+        return 1
+
+    try:
+        user = await auth_db.create_user(username, password)
+    except asyncpg.UniqueViolationError:
+        print(f"Username {username!r} is already taken.", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    print(f"Created user {user['username']} ({user['id']}).")
+    print("Next step: login to get a Bearer token.")
+    print(f"  curl -X POST http://localhost:{_DEFAULT_HTTP_PORT}/auth/login "
+          f"-H 'Content-Type: application/json' "
+          f"-d '{{\"username\":\"{user['username']}\",\"password\":\"...\"}}'")
+    return 0
 
 
 if __name__ == "__main__":
@@ -702,13 +993,14 @@ if __name__ == "__main__":
         print("NotNativeMemory - MCP Memory Server")
         print()
         print("Usage:")
-        print("  python server.py [PORT]           Start HTTP server (default, port 9500)")
-        print("  python server.py --foreground     HTTP mode, attached to console")
-        print("  python server.py --mcp            stdio mode (for MCP client configs)")
-        print("  python server.py --stop           Stop a running HTTP server")
-        print("  python server.py --restart, -r    Stop and restart the HTTP server")
-        print("  python server.py --status         Show server status")
-        print("  python server.py --help           Show this help")
+        print("  python server.py [PORT]                Start HTTP server (default, port 9500)")
+        print("  python server.py --foreground          HTTP mode, attached to console")
+        print("  python server.py --mcp                 stdio mode (for MCP client configs)")
+        print("  python server.py --stop                Stop a running HTTP server")
+        print("  python server.py --restart, -r         Stop and restart the HTTP server")
+        print("  python server.py --status              Show server status")
+        print("  python server.py --create-user NAME    Create a user (prompts for password)")
+        print("  python server.py --help                Show this help")
         print()
         print("The default mode is HTTP (background). Use --mcp for stdio transport")
         print("in Claude Code / LM Studio MCP client configurations.")
@@ -725,11 +1017,19 @@ if __name__ == "__main__":
         print("Configuration is loaded from .env in the server directory.")
         sys.exit(0)
 
+    elif "--create-user" in sys.argv:
+        idx = sys.argv.index("--create-user")
+        if idx + 1 >= len(sys.argv):
+            print("Usage: python server.py --create-user <username>", file=sys.stderr)
+            sys.exit(2)
+        import asyncio
+        sys.exit(asyncio.run(_cli_create_user(sys.argv[idx + 1])))
+
     elif "--status" in sys.argv:
         pid, port = _read_pid()
         if pid and _is_process_alive(pid):
             print(f"NotNativeMemory server is running (PID {pid}, port {port})")
-            print(f"  Endpoint: http://0.0.0.0:{port}/mcp")
+            print(f"  Endpoint: http://{_resolve_bind_host()}:{port}/mcp")
         elif pid:
             print(f"PID file exists (PID {pid}) but process is not running.")
             _cleanup_pid()
@@ -747,7 +1047,7 @@ if __name__ == "__main__":
             restart_port = old_port or _DEFAULT_HTTP_PORT
         proc = _spawn_background(restart_port)
         print(f"NotNativeMemory server restarted (PID {proc.pid}, port {restart_port})")
-        print(f"  Endpoint: http://0.0.0.0:{restart_port}/mcp")
+        print(f"  Endpoint: http://{_resolve_bind_host()}:{restart_port}/mcp")
         sys.exit(0)
 
     elif "--stop" in sys.argv:
@@ -774,5 +1074,5 @@ if __name__ == "__main__":
         else:
             proc = _spawn_background(port)
             print(f"NotNativeMemory MCP server started (PID {proc.pid}, port {port})")
-            print(f"  Endpoint: http://0.0.0.0:{port}/mcp")
+            print(f"  Endpoint: http://{_resolve_bind_host()}:{port}/mcp")
             print(f"  Stop:     python server.py --stop")

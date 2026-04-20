@@ -41,3 +41,4 @@ docs/planning/
 .DS_Store
 Thumbs.db
 desktop.ini
+.mcp-server.pid

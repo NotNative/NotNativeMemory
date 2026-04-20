@@ -12,13 +12,16 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- domains[] lists which domain-scoped projects this project pulls from.
 CREATE TABLE IF NOT EXISTS projects (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    directory TEXT UNIQUE NOT NULL,
+    directory TEXT NOT NULL,
     name TEXT NOT NULL,
     scope TEXT NOT NULL DEFAULT 'local'
         CHECK (scope IN ('local', 'domain', 'global')),
     domains TEXT[] NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT now()
 );
+-- Uniqueness is per-user: each user has their own _global, _domain_*,
+-- and local project rows. Composite is added after users/ownership
+-- tables exist lower in this file.
 
 CREATE INDEX IF NOT EXISTS idx_projects_scope
     ON projects (scope);
@@ -115,3 +118,127 @@ CREATE INDEX IF NOT EXISTS idx_facts_predicate
 
 CREATE INDEX IF NOT EXISTS idx_facts_valid
     ON facts (valid_from, valid_to);
+
+-- Users table: identity for the Bearer-token auth layer.
+-- Registration is open (any caller can create an account). There is
+-- no admin concept - every user sees only their own memories.
+CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    username TEXT UNIQUE NOT NULL,
+    password_hash TEXT NOT NULL,          -- hashlib.scrypt digest
+    -- Monotonic session-revocation counter. Tokens snapshot this at
+    -- mint time and auth rejects any token whose snapshot differs from
+    -- the current value. Bumping invalidates every outstanding token.
+    token_generation INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_users_username
+    ON users (username);
+
+-- auth_tokens: hashed Bearer tokens. Raw token value is shown exactly
+-- once at creation; the DB only ever sees the hash. Revocation is
+-- immediate (revoked_at timestamp; the active-lookup index filters).
+CREATE TABLE IF NOT EXISTS auth_tokens (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    token_hash TEXT UNIQUE NOT NULL,      -- hashlib.scrypt digest
+    -- Plaintext random string used for O(1) lookup on the auth path.
+    -- Secrecy not required; entropy just keeps rows from colliding.
+    lookup_key TEXT,
+    label TEXT,
+    -- Snapshot of users.token_generation at mint time. Auth rejects
+    -- the token when this drifts from the user's current generation.
+    issued_generation INT NOT NULL DEFAULT 0,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    last_used_at TIMESTAMPTZ,
+    revoked_at TIMESTAMPTZ
+);
+
+CREATE INDEX IF NOT EXISTS idx_auth_tokens_user
+    ON auth_tokens (user_id);
+
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_auth_tokens_lookup_key
+    ON auth_tokens (lookup_key)
+    WHERE lookup_key IS NOT NULL;
+
+-- Ownership columns: every row belongs to exactly one user. NOT NULL
+-- enforces "no anonymous rows"; per-user reads trust the non-null
+-- invariant to skip a nullable branch in the query builder.
+ALTER TABLE projects
+    ADD COLUMN IF NOT EXISTS owner_user_id UUID NOT NULL
+        REFERENCES users(id) ON DELETE CASCADE;
+
+ALTER TABLE memories
+    ADD COLUMN IF NOT EXISTS owner_user_id UUID NOT NULL
+        REFERENCES users(id) ON DELETE CASCADE;
+
+ALTER TABLE facts
+    ADD COLUMN IF NOT EXISTS owner_user_id UUID NOT NULL
+        REFERENCES users(id) ON DELETE CASCADE;
+
+CREATE INDEX IF NOT EXISTS idx_projects_owner
+    ON projects (owner_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_memories_owner
+    ON memories (owner_user_id);
+
+CREATE INDEX IF NOT EXISTS idx_facts_owner
+    ON facts (owner_user_id);
+
+-- Per-user uniqueness on project directory. Two users can both have
+-- a `_global` row, a `D:/Projects/foo` row, etc. Within a single
+-- user, (directory, owner_user_id) is still unique.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'projects_directory_owner_key'
+    ) THEN
+        ALTER TABLE projects
+            ADD CONSTRAINT projects_directory_owner_key
+            UNIQUE (directory, owner_user_id);
+    END IF;
+END $$;
+
+-- Audit events: append-only trail of security-relevant actions.
+-- Writers live in lib/audit.py::log_event.
+CREATE TABLE IF NOT EXISTS audit_events (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_user_id UUID REFERENCES users(id) ON DELETE SET NULL,
+    event_type TEXT NOT NULL,
+    target_id UUID,
+    detail JSONB NOT NULL DEFAULT '{}'::jsonb,
+    at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE INDEX IF NOT EXISTS idx_audit_events_actor_at
+    ON audit_events (actor_user_id, at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_event_at
+    ON audit_events (event_type, at DESC);
+CREATE INDEX IF NOT EXISTS idx_audit_events_at
+    ON audit_events (at DESC);
+
+-- Row-Level Security policies. Inert until operators create a
+-- non-superuser DB role AND ENABLE ROW LEVEL SECURITY on each table;
+-- see lib/rls.py and config/migrations/008_rls_foundations.sql.
+
+DROP POLICY IF EXISTS memories_owner_rls ON memories;
+CREATE POLICY memories_owner_rls ON memories
+    USING (owner_user_id = current_setting('app.current_user', true)::uuid)
+    WITH CHECK (owner_user_id = current_setting('app.current_user', true)::uuid);
+
+DROP POLICY IF EXISTS facts_owner_rls ON facts;
+CREATE POLICY facts_owner_rls ON facts
+    USING (owner_user_id = current_setting('app.current_user', true)::uuid)
+    WITH CHECK (owner_user_id = current_setting('app.current_user', true)::uuid);
+
+DROP POLICY IF EXISTS projects_owner_rls ON projects;
+CREATE POLICY projects_owner_rls ON projects
+    USING (owner_user_id = current_setting('app.current_user', true)::uuid)
+    WITH CHECK (owner_user_id = current_setting('app.current_user', true)::uuid);
+
+DROP POLICY IF EXISTS auth_tokens_owner_rls ON auth_tokens;
+CREATE POLICY auth_tokens_owner_rls ON auth_tokens
+    USING (user_id = current_setting('app.current_user', true)::uuid)
+    WITH CHECK (user_id = current_setting('app.current_user', true)::uuid);

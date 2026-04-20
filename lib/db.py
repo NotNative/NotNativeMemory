@@ -278,19 +278,26 @@ def _resolve_scope(directory: str) -> tuple:
 
 
 async def get_or_create_project(
-    directory: str, name: Optional[str] = None,
+    directory: str,
+    owner_user_id: UUID,
+    name: Optional[str] = None,
 ) -> UUID:
     """
-    Get existing project by directory, or create a new one.
+    Get existing project by (directory, owner_user_id), or create one.
 
     Reserved names auto-set the project's scope:
       "_global"        -> scope='global'
       "_domain_<name>" -> scope='domain'
       real paths       -> scope='local' (default)
 
+    Each user has their own _global, _domain_*, and local project rows.
+    Lookup and insert both scope on owner_user_id so two users can hold
+    distinct rows with the same `directory` value without colliding.
+
     Args:
-        directory: Project identifier. Usually an absolute path for local
-            projects, or a reserved name for global/domain scopes.
+        directory: Project identifier. Usually an absolute path for
+            local projects, or a reserved name for global/domain scopes.
+        owner_user_id: User the project belongs to. Required.
         name: Override the auto-detected display name.
 
     Returns:
@@ -298,34 +305,43 @@ async def get_or_create_project(
     """
     if not directory:
         raise ValueError("Project directory is required")
+    if owner_user_id is None:
+        raise ValueError("owner_user_id is required")
 
     scope, auto_name = _resolve_scope(directory)
     final_name = name or auto_name
 
     pool = await get_pool()
     row = await pool.fetchrow(
-        "SELECT id FROM projects WHERE directory = $1", directory,
+        "SELECT id FROM projects WHERE directory = $1 AND owner_user_id = $2",
+        directory, owner_user_id,
     )
     if row:
         return row["id"]
 
     row = await pool.fetchrow(
-        "INSERT INTO projects (directory, name, scope) "
-        "VALUES ($1, $2, $3) "
-        "ON CONFLICT (directory) DO UPDATE SET name = $2 "
+        "INSERT INTO projects (directory, name, scope, owner_user_id) "
+        "VALUES ($1, $2, $3, $4) "
+        "ON CONFLICT (directory, owner_user_id) DO UPDATE SET name = $2 "
         "RETURNING id",
-        directory, final_name, scope,
+        directory, final_name, scope, owner_user_id,
     )
     return row["id"]
 
 
-async def get_project_info(project_id: UUID) -> Optional[Dict[str, Any]]:
-    """Return a project's directory, name, scope, and domains."""
+async def get_project_info(
+    project_id: UUID, owner_user_id: UUID,
+) -> Optional[Dict[str, Any]]:
+    """Return a project's directory, name, scope, and domains.
+
+    Requires owner_user_id so lookups can't peek at other users'
+    project metadata.
+    """
     pool = await get_pool()
     row = await pool.fetchrow(
         "SELECT id, directory, name, scope, domains, created_at "
-        "FROM projects WHERE id = $1",
-        project_id,
+        "FROM projects WHERE id = $1 AND owner_user_id = $2",
+        project_id, owner_user_id,
     )
     if not row:
         return None
@@ -340,23 +356,25 @@ async def get_project_info(project_id: UUID) -> Optional[Dict[str, Any]]:
 
 
 async def set_project_domains(
-    project_id: UUID, domains: List[str],
+    project_id: UUID, owner_user_id: UUID, domains: List[str],
 ) -> List[str]:
     """
     Set the list of domain names this project pulls from.
 
-    Only meaningful for local-scope projects — globals apply universally
-    and domains don't pull from other domains.
+    Only meaningful for local-scope projects; globals apply
+    per-user-universally and domains don't pull from other domains.
 
     Args:
         project_id: The local project to configure.
-        domains: List of domain names (e.g. ["python", "docker"]) matching
-            the names of existing _domain_<name> projects.
+        owner_user_id: Caller identity. Required. Guards against
+            configuring someone else's project.
+        domains: List of domain names (e.g. ["python", "docker"])
+            matching the names of existing _domain_<name> projects
+            owned by this user.
 
     Returns:
         The updated domains list.
     """
-    # Deduplicate, strip, drop empties
     clean = []
     seen = set()
     for d in domains:
@@ -367,33 +385,39 @@ async def set_project_domains(
 
     pool = await get_pool()
     row = await pool.fetchrow(
-        "UPDATE projects SET domains = $1 WHERE id = $2 "
+        "UPDATE projects SET domains = $1 "
+        "WHERE id = $2 AND owner_user_id = $3 "
         "RETURNING domains",
-        clean, project_id,
+        clean, project_id, owner_user_id,
     )
     if not row:
         raise ValueError(f"Project {project_id} not found")
     return list(row["domains"])
 
 
-async def get_visible_project_ids(primary_id: UUID) -> List[UUID]:
+async def get_visible_project_ids(
+    primary_id: UUID, owner_user_id: UUID,
+) -> List[UUID]:
     """
     Return the set of project IDs whose memories should be visible when
     searching from a given primary project.
 
     Composition:
       - Always includes the primary project itself.
-      - Always includes every global-scope project.
-      - If primary is local-scope with domains[], includes any
-        domain-scope project whose name is in that list.
-      - If primary is itself global or domain, returns just itself
-        (global/domain projects don't pull from each other).
+      - Always includes every global-scope project OWNED BY the same user.
+      - If primary is local-scope with domains[], includes any domain-scope
+        project owned by the same user whose name is in that list.
+      - If primary is itself global or domain, returns just itself.
+
+    The owner filter is load-bearing: user A's search from their local
+    project must not pull user B's `_global` memories even though both
+    users may have a row called `_global`.
     """
     pool = await get_pool()
 
     primary = await pool.fetchrow(
-        "SELECT scope, domains FROM projects WHERE id = $1",
-        primary_id,
+        "SELECT scope, domains FROM projects WHERE id = $1 AND owner_user_id = $2",
+        primary_id, owner_user_id,
     )
     if not primary:
         return [primary_id]
@@ -402,15 +426,16 @@ async def get_visible_project_ids(primary_id: UUID) -> List[UUID]:
     if primary["scope"] in ("global", "domain"):
         return [primary_id]
 
-    # Local: include self + all globals + matching domains
+    # Local: include self + user's globals + user's matching domains
     domains = list(primary["domains"])
 
     rows = await pool.fetch(
         """SELECT id FROM projects
-           WHERE id = $1
-              OR scope = 'global'
-              OR (scope = 'domain' AND name = ANY($2))""",
-        primary_id, domains,
+           WHERE owner_user_id = $3
+             AND (id = $1
+                  OR scope = 'global'
+                  OR (scope = 'domain' AND name = ANY($2)))""",
+        primary_id, domains, owner_user_id,
     )
     return [r["id"] for r in rows]
 
@@ -602,6 +627,7 @@ async def store_memory(
     content: str,
     embedding: List[float],
     project_id: UUID,
+    owner_user_id: UUID,
     tags: Optional[List[str]] = None,
     importance: str = "normal",
 ) -> UUID:
@@ -648,11 +674,12 @@ async def store_memory(
     # Insert new memory
     row = await pool.fetchrow(
         """INSERT INTO memories
-               (project_id, content, embedding, tags, importance, temperature)
-           VALUES ($1, $2, $3::vector, $4, $5, $6)
+               (project_id, content, embedding, tags, importance,
+                temperature, owner_user_id)
+           VALUES ($1, $2, $3::vector, $4, $5, $6, $7)
            RETURNING id""",
         project_id, content.strip(), str(embedding),
-        clean_tags, importance, TEMP_INITIAL,
+        clean_tags, importance, TEMP_INITIAL, owner_user_id,
     )
 
     # Displacement cooling: storing new knowledge pressures existing memories
@@ -675,12 +702,16 @@ def _build_search_query(
     tags: Optional[List[str]] = None,
     min_importance: Optional[str] = None,
     limit: int = 10,
+    owner_user_id: Optional[UUID] = None,
 ) -> tuple:
     """
     Build the SQL query and params for vector similarity search.
 
     Joins against projects to surface scope/name so results from global
     or domain scopes can be distinguished from local project hits.
+    Owner filter is added when `owner_user_id` is provided; in the
+    current codebase every read path requires identity so this should
+    always be set.
 
     Returns:
         (sql_string, params_list) ready for pool.fetch().
@@ -692,6 +723,11 @@ def _build_search_query(
     if project_ids:
         conditions.append(f"m.project_id = ANY(${param_idx})")
         params.append(project_ids)
+        param_idx += 1
+
+    if owner_user_id is not None:
+        conditions.append(f"m.owner_user_id = ${param_idx}")
+        params.append(owner_user_id)
         param_idx += 1
 
     if tags:
@@ -759,7 +795,8 @@ def _format_memory_row(row: Any) -> Dict[str, Any]:
 
 async def search_memories(
     query_embedding: List[float],
-    project_id: Optional[UUID] = None,
+    project_id: UUID,
+    owner_user_id: UUID,
     tags: Optional[List[str]] = None,
     min_importance: Optional[str] = None,
     limit: int = 10,
@@ -767,20 +804,21 @@ async def search_memories(
     """
     Search memories by vector similarity with importance weighting.
 
-    When a local project is provided, results automatically include
-    every global-scope memory plus any domain-scope memories matching
-    that project's declared domains. Global and domain projects search
-    only within themselves.
+    Scope expands from the primary project to (self + caller's globals
+    + caller's matching domains). Ownership filter applies on top so a
+    user never sees another user's memories.
 
     Results are ranked by: (1 - cosine_distance) + importance_bonus.
     Returned memories are reheated (temperature increases).
 
     Args:
         query_embedding: 768-dim query vector.
-        project_id: Primary project to search. If None, searches all
-            projects regardless of scope.
+        project_id: Primary project to search. Required.
+        owner_user_id: Caller identity. Required. Every result row has
+            this owner.
         tags: Optional tag filter (any match).
-        min_importance: Optional floor (e.g. "high" excludes low and normal).
+        min_importance: Optional floor (e.g. "high" excludes low and
+            normal).
         limit: Max results to return.
 
     Returns:
@@ -794,14 +832,12 @@ async def search_memories(
 
     pool = await get_pool()
 
-    # Expand the primary project to its visible set (self + globals +
-    # matching domains). Passing None means cross-project search.
-    visible_ids = None
-    if project_id is not None:
-        visible_ids = await get_visible_project_ids(project_id)
+    # Expand the primary project to its owner-scoped visible set.
+    visible_ids = await get_visible_project_ids(project_id, owner_user_id)
 
     sql, params = _build_search_query(
         query_embedding, visible_ids, tags, min_importance, limit,
+        owner_user_id=owner_user_id,
     )
     rows = await pool.fetch(sql, *params)
 
@@ -822,35 +858,412 @@ async def search_memories(
 
 # -- Forget -----------------------------------------------------------------
 
-async def forget_memory(memory_id: UUID) -> bool:
+async def admin_get_memory(
+    memory_id: UUID, owner_user_id: UUID,
+) -> Optional[Dict[str, Any]]:
     """
-    Delete a memory by ID.
+    Fetch a single memory by ID, scoped to the caller's ownership.
 
-    Args:
-        memory_id: UUID of the memory to remove.
+    Returns a dict with the fields memory_store / search return plus
+    the project directory so the admin UI can render a rescope form.
+    None if the memory does not exist or is not owned by the caller.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+                  m.created_at, m.last_accessed, m.access_count,
+                  m.project_id,
+                  p.scope AS project_scope,
+                  p.name AS project_name,
+                  p.directory AS project_directory
+           FROM memories m
+           JOIN projects p ON p.id = m.project_id
+           WHERE m.id = $1 AND m.owner_user_id = $2""",
+        memory_id, owner_user_id,
+    )
+    if not row:
+        return None
+    out = _format_memory_row(row)
+    out["project_directory"] = row["project_directory"]
+    return out
 
-    Returns:
-        True if a memory was deleted, False if not found.
+
+async def admin_update_memory(
+    memory_id: UUID,
+    owner_user_id: UUID,
+    *,
+    content: Optional[str] = None,
+    embedding: Optional[List[float]] = None,
+    tags: Optional[List[str]] = None,
+    importance: Optional[str] = None,
+    project_id: Optional[UUID] = None,
+) -> bool:
+    """
+    Update a memory in place. Every field is optional; only the ones
+    you pass are written. Returns True if the update hit a row, False
+    if the memory doesn't exist or belongs to someone else.
+
+    Re-embedding is the caller's responsibility: when the content
+    changes, pass a fresh `embedding` alongside the new `content` or
+    downstream search results will drift from what the UI shows.
+    """
+    sets = []
+    params: List[Any] = []
+    idx = 1
+
+    if content is not None:
+        sets.append(f"content = ${idx}")
+        params.append(content)
+        idx += 1
+    if embedding is not None:
+        sets.append(f"embedding = ${idx}::vector")
+        params.append(str(embedding))
+        idx += 1
+    if tags is not None:
+        sets.append(f"tags = ${idx}")
+        params.append(tags)
+        idx += 1
+    if importance is not None:
+        if importance not in _IMPORTANCE_WEIGHT:
+            raise ValueError(f"Invalid importance: {importance}")
+        sets.append(f"importance = ${idx}")
+        params.append(importance)
+        idx += 1
+    if project_id is not None:
+        sets.append(f"project_id = ${idx}")
+        params.append(project_id)
+        idx += 1
+
+    if not sets:
+        return False
+
+    params.extend([memory_id, owner_user_id])
+    pool = await get_pool()
+    result = await pool.execute(
+        f"""UPDATE memories SET {', '.join(sets)}
+            WHERE id = ${idx} AND owner_user_id = ${idx + 1}""",
+        *params,
+    )
+    return result == "UPDATE 1"
+
+
+async def admin_list_facts(
+    owner_user_id: UUID,
+    *,
+    subject: Optional[str] = None,
+    predicate: Optional[str] = None,
+    scope: Optional[str] = None,
+    q: Optional[str] = None,
+    include_history: bool = False,
+    offset: int = 0,
+    limit: int = 50,
+) -> tuple:
+    """
+    Facts list for the admin UI. Scoped to the caller's rows.
+
+    Filters compose with AND. `include_history=False` (the default)
+    hides superseded facts (valid_to IS NOT NULL) so the list shows
+    only the currently-true assertions. Pass True to see history.
+
+    Returns (fact_dicts, total_count_int).
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+    if offset < 0:
+        offset = 0
+
+    pool = await get_pool()
+
+    conditions = ["f.owner_user_id = $1"]
+    params: List[Any] = [owner_user_id]
+    idx = 2
+
+    if subject:
+        conditions.append(f"f.subject ILIKE ${idx}")
+        params.append(f"%{subject}%")
+        idx += 1
+    if predicate:
+        conditions.append(f"f.predicate = ${idx}")
+        params.append(predicate)
+        idx += 1
+    if scope in ("local", "global", "domain"):
+        conditions.append(f"p.scope = ${idx}")
+        params.append(scope)
+        idx += 1
+    if q:
+        conditions.append(
+            f"(f.object ILIKE ${idx} OR f.subject ILIKE ${idx})"
+        )
+        params.append(f"%{q}%")
+        idx += 1
+    if not include_history:
+        conditions.append("f.valid_to IS NULL")
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    count_row = await pool.fetchrow(
+        f"""SELECT COUNT(*) AS n FROM facts f
+            JOIN projects p ON p.id = f.project_id
+            {where}""",
+        *params,
+    )
+    total = int(count_row["n"] or 0)
+
+    limit_placeholder = idx
+    offset_placeholder = idx + 1
+    params.append(limit)
+    params.append(offset)
+
+    rows = await pool.fetch(
+        f"""SELECT f.id, f.subject, f.predicate, f.object, f.confidence,
+                   f.valid_from, f.valid_to, f.source_memory_id,
+                   f.created_at,
+                   p.scope AS project_scope,
+                   p.name AS project_name,
+                   p.directory AS project_directory
+            FROM facts f
+            JOIN projects p ON p.id = f.project_id
+            {where}
+            ORDER BY f.valid_from DESC, f.created_at DESC
+            LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
+        *params,
+    )
+
+    out = []
+    for r in rows:
+        out.append({
+            "id": str(r["id"]),
+            "subject": r["subject"],
+            "predicate": r["predicate"],
+            "object": r["object"],
+            "confidence": float(r["confidence"]),
+            "valid_from": r["valid_from"].isoformat(),
+            "valid_to": r["valid_to"].isoformat() if r["valid_to"] else None,
+            "created_at": r["created_at"].isoformat(),
+            "scope": r["project_scope"],
+            "project": r["project_name"],
+            "project_directory": r["project_directory"],
+            "source_memory_id": str(r["source_memory_id"]) if r["source_memory_id"] else None,
+        })
+    return out, total
+
+
+async def forget_fact(fact_id: UUID, owner_user_id: UUID) -> bool:
+    """
+    Hard-delete a fact row. Only the owner can delete their own.
     """
     pool = await get_pool()
     result = await pool.execute(
-        "DELETE FROM memories WHERE id = $1", memory_id,
+        "DELETE FROM facts WHERE id = $1 AND owner_user_id = $2",
+        fact_id, owner_user_id,
+    )
+    return result == "DELETE 1"
+
+
+async def admin_bulk_delete(
+    memory_ids: List[UUID], owner_user_id: UUID,
+) -> int:
+    """
+    Delete several memories at once, scoped to the caller. IDs that
+    don't exist or belong to another user are silently skipped.
+
+    Returns the number of rows actually deleted.
+    """
+    if not memory_ids:
+        return 0
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM memories WHERE id = ANY($1) AND owner_user_id = $2",
+        memory_ids, owner_user_id,
+    )
+    # asyncpg returns "DELETE N"
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError) as exc:
+        _log.debug("admin_bulk_delete: unparseable result %r (%s)", result, exc)
+        return 0
+
+
+async def forget_memory(memory_id: UUID, owner_user_id: UUID) -> bool:
+    """
+    Delete a memory by ID. Only the owner can delete their own memory;
+    deleting someone else's memory returns False without side effects.
+
+    Args:
+        memory_id: UUID of the memory to remove.
+        owner_user_id: Caller identity. Required.
+
+    Returns:
+        True if a memory was deleted, False if not found or not owned.
+    """
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM memories WHERE id = $1 AND owner_user_id = $2",
+        memory_id, owner_user_id,
     )
     return result == "DELETE 1"
 
 
 # -- List -------------------------------------------------------------------
 
+# Whitelist of columns the admin UI is allowed to sort by. Any column
+# outside this set gets rejected; prevents SQL injection via a hostile
+# `sort` query-string value.
+_ADMIN_SORT_COLUMNS = {
+    "created_at", "last_accessed", "temperature", "access_count",
+    "importance",
+}
+
+
+async def admin_list_memories(
+    owner_user_id: UUID,
+    *,
+    project: Optional[str] = None,
+    scope: Optional[str] = None,
+    tag: Optional[str] = None,
+    min_importance: Optional[str] = None,
+    q: Optional[str] = None,
+    sort: str = "created_at",
+    order: str = "DESC",
+    offset: int = 0,
+    limit: int = 20,
+) -> tuple:
+    """
+    Rich list query for the admin UI. Scoped to the caller's rows.
+
+    Filters all compose with AND. The return value is
+    (memory_dicts, total_count_before_paging) so the caller can
+    render "showing X-Y of N" + paging controls without a second
+    query.
+
+    Args:
+        owner_user_id: caller identity (required).
+        project: exact directory to filter to, or a reserved scope
+            name ("_global", "_domain_<name>"). None means "any
+            project owned by this user."
+        scope: filter by project scope; 'local' | 'global' | 'domain'.
+        tag: require this tag to be present on the memory.
+        min_importance: 'low' | 'normal' | 'high' | 'critical'; acts
+            as a floor (critical-only, high+, normal+, low+).
+        q: content substring (case-insensitive ILIKE).
+        sort: column from _ADMIN_SORT_COLUMNS.
+        order: 'ASC' or 'DESC'.
+        offset: pagination offset.
+        limit: page size (clamped to 1..100).
+
+    Returns:
+        (list_of_memory_dicts, total_count_int).
+    """
+    if sort not in _ADMIN_SORT_COLUMNS:
+        sort = "created_at"
+    order = "ASC" if order.upper() == "ASC" else "DESC"
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+    if offset < 0:
+        offset = 0
+
+    pool = await get_pool()
+
+    conditions = ["m.owner_user_id = $1"]
+    params: List[Any] = [owner_user_id]
+    param_idx = 2
+
+    if project:
+        conditions.append(f"p.directory = ${param_idx}")
+        params.append(project)
+        param_idx += 1
+
+    if scope in ("local", "global", "domain"):
+        conditions.append(f"p.scope = ${param_idx}")
+        params.append(scope)
+        param_idx += 1
+
+    if tag:
+        conditions.append(f"${param_idx} = ANY(m.tags)")
+        params.append(tag)
+        param_idx += 1
+
+    if min_importance:
+        importance_order = ["low", "normal", "high", "critical"]
+        if min_importance in importance_order:
+            idx = importance_order.index(min_importance)
+            allowed = importance_order[idx:]
+            conditions.append(f"m.importance = ANY(${param_idx})")
+            params.append(allowed)
+            param_idx += 1
+
+    if q:
+        conditions.append(f"m.content ILIKE ${param_idx}")
+        params.append(f"%{q}%")
+        param_idx += 1
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    count_row = await pool.fetchrow(
+        f"""SELECT COUNT(*) AS n FROM memories m
+            JOIN projects p ON p.id = m.project_id
+            {where}""",
+        *params,
+    )
+    total = int(count_row["n"] or 0)
+
+    # Append limit + offset as the last two parameters. $N numbering
+    # picks up where the filter block left off.
+    limit_placeholder = param_idx
+    offset_placeholder = param_idx + 1
+    params.append(limit)
+    params.append(offset)
+
+    # Importance ORDER BY uses a CASE to respect low<normal<high<critical;
+    # other columns sort directly.
+    if sort == "importance":
+        order_clause = (
+            "CASE m.importance "
+            "WHEN 'critical' THEN 3 "
+            "WHEN 'high' THEN 2 "
+            "WHEN 'normal' THEN 1 "
+            "WHEN 'low' THEN 0 "
+            f"END {order}"
+        )
+    else:
+        order_clause = f"m.{sort} {order}"
+
+    rows = await pool.fetch(
+        f"""SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+                   m.created_at, m.last_accessed, m.access_count,
+                   m.project_id,
+                   p.scope AS project_scope,
+                   p.name AS project_name,
+                   p.directory AS project_directory
+            FROM memories m
+            JOIN projects p ON p.id = m.project_id
+            {where}
+            ORDER BY {order_clause}, m.created_at DESC
+            LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
+        *params,
+    )
+
+    return [_format_memory_row(r) for r in rows], total
+
+
 async def list_memories(
+    owner_user_id: UUID,
     project_id: Optional[UUID] = None,
     tags: Optional[List[str]] = None,
     limit: int = 20,
 ) -> List[Dict[str, Any]]:
     """
-    List memories, optionally filtered by project and tags.
+    List memories scoped to a specific user, optionally filtered by
+    project and tags.
 
     Args:
-        project_id: Optional project scope.
+        owner_user_id: Caller identity. Required.
+        project_id: Optional project filter. When None, lists across
+            every project the caller owns.
         tags: Optional tag filter.
         limit: Max results.
 
@@ -864,9 +1277,9 @@ async def list_memories(
 
     pool = await get_pool()
 
-    conditions = []
-    params: List[Any] = []
-    param_idx = 1
+    conditions = ["owner_user_id = $1"]
+    params: List[Any] = [owner_user_id]
+    param_idx = 2
 
     if project_id:
         conditions.append(f"project_id = ${param_idx}")
@@ -878,10 +1291,7 @@ async def list_memories(
         params.append(tags)
         param_idx += 1
 
-    where = ""
-    if conditions:
-        where = "WHERE " + " AND ".join(conditions)
-
+    where = "WHERE " + " AND ".join(conditions)
     params.append(limit)
 
     rows = await pool.fetch(
@@ -900,6 +1310,7 @@ async def list_memories(
 
 async def get_context_memories(
     project_id: UUID,
+    owner_user_id: UUID,
     max_tokens: int = 500,
 ) -> List[Dict[str, Any]]:
     """
@@ -926,10 +1337,10 @@ async def get_context_memories(
 
     pool = await get_pool()
 
-    # Expand to visible project set (self + globals + matching domains)
-    visible_ids = await get_visible_project_ids(project_id)
+    # Owner-scoped visible set: self + user's globals + user's matching
+    # domains. Another user's _global row never surfaces here.
+    visible_ids = await get_visible_project_ids(project_id, owner_user_id)
 
-    # Fetch more than we need, then trim to budget
     rows = await pool.fetch(
         """SELECT m.id, m.content, m.tags, m.importance, m.temperature,
                   m.created_at, m.last_accessed, m.access_count,
@@ -939,6 +1350,7 @@ async def get_context_memories(
            FROM memories m
            JOIN projects p ON p.id = m.project_id
            WHERE m.project_id = ANY($1)
+             AND m.owner_user_id = $2
            ORDER BY
                CASE m.importance
                    WHEN 'critical' THEN 3
@@ -948,7 +1360,7 @@ async def get_context_memories(
                END DESC,
                m.temperature DESC
            LIMIT 50""",
-        visible_ids,
+        visible_ids, owner_user_id,
     )
 
     # Trim to token budget (~4 chars per token)
@@ -984,6 +1396,7 @@ async def add_fact(
     subject: str,
     predicate: str,
     obj: str,
+    owner_user_id: UUID,
     confidence: float = 1.0,
     source_memory_id: Optional[UUID] = None,
 ) -> Dict[str, Any]:
@@ -996,25 +1409,27 @@ async def add_fact(
     """
     pool = await get_pool()
 
-    # Invalidate any existing valid fact with the same subject + predicate
+    # Invalidate any existing valid fact with the same subject +
+    # predicate owned by this user. Cross-user facts aren't touched.
     result = await pool.execute(
         """UPDATE facts SET valid_to = now()
            WHERE project_id = $1
              AND subject = $2
              AND predicate = $3
+             AND owner_user_id = $4
              AND valid_to IS NULL""",
-        project_id, subject, predicate,
+        project_id, subject, predicate, owner_user_id,
     )
     superseded = int(result.split()[-1]) if result else 0
 
     row = await pool.fetchrow(
         """INSERT INTO facts
                (project_id, subject, predicate, object, confidence,
-                source_memory_id)
-           VALUES ($1, $2, $3, $4, $5, $6)
+                source_memory_id, owner_user_id)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
            RETURNING id, valid_from""",
         project_id, subject, predicate, obj, confidence,
-        source_memory_id,
+        source_memory_id, owner_user_id,
     )
 
     return {
@@ -1025,16 +1440,19 @@ async def add_fact(
 
 
 async def query_facts(
-    project_id: Optional[UUID],
+    owner_user_id: UUID,
     subject: str,
+    project_id: Optional[UUID] = None,
     as_of: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """
     Query facts about a subject, optionally at a point in time.
 
     Args:
-        project_id: Optional project scope.
+        owner_user_id: Caller identity. Required. Results are filtered
+            to this user only.
         subject: The subject to query facts about.
+        project_id: Optional project scope.
         as_of: Optional timestamp. If provided, returns facts valid at
             that time. Defaults to now (current facts only).
 
@@ -1043,9 +1461,9 @@ async def query_facts(
     """
     pool = await get_pool()
 
-    conditions = ["subject = $1"]
-    params: List[Any] = [subject]
-    param_idx = 2
+    conditions = ["subject = $1", "owner_user_id = $2"]
+    params: List[Any] = [subject, owner_user_id]
+    param_idx = 3
 
     if project_id:
         conditions.append(f"project_id = ${param_idx}")

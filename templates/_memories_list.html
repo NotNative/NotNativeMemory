@@ -1,0 +1,68 @@
+{# Partial: memory list + bulk actions + paging. Rendered either
+   inside memories.html (full page) or directly (HTMX in-place swap). #}
+
+<form method="post" action="/memories/bulk-delete"
+      hx-post="/memories/bulk-delete"
+      hx-target="body"
+      hx-swap="none"
+      hx-confirm="Delete every selected memory? This cannot be undone."
+      id="bulk-form">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+  <div class="list-header">
+    <p style="margin:0;">
+      {% if total == 0 %}
+        No memories match.
+      {% else %}
+        Showing {{ offset + 1 }}-{{ offset + count }} of {{ total }}.
+      {% endif %}
+    </p>
+    {% if memories %}
+    <div class="bulk-bar">
+      <label style="display:flex;gap:0.4em;align-items:center;margin:0;">
+        <input type="checkbox" id="select-all"
+               onchange="document.querySelectorAll('#memory-list input[name=ids]')
+                            .forEach(c => c.checked = this.checked)">
+        Select all visible
+      </label>
+      <button type="submit" class="secondary danger-btn">
+        Delete selected
+      </button>
+    </div>
+    {% endif %}
+  </div>
+
+  <div id="memory-list">
+    {% for m in memories %}
+      {% include "_memory_row.html" %}
+    {% else %}
+      <p>No memories match the current filters. Clear filters to see all.</p>
+    {% endfor %}
+  </div>
+</form>
+
+{% if total > limit %}
+<div class="paging">
+  {% if prev_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ prev_offset }}"
+       hx-get="?{{ qs_without_offset }}&offset={{ prev_offset }}"
+       hx-target="#memory-panel" hx-push-url="true">&larr; Prev</a>
+  {% else %}
+    <span class="disabled">&larr; Prev</span>
+  {% endif %}
+  {% if next_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ next_offset }}"
+       hx-get="?{{ qs_without_offset }}&offset={{ next_offset }}"
+       hx-target="#memory-panel" hx-push-url="true">Next &rarr;</a>
+  {% else %}
+    <span class="disabled">Next &rarr;</span>
+  {% endif %}
+</div>
+{% endif %}
+
+<style>
+  .list-header { display: flex; justify-content: space-between;
+                 align-items: center; margin: 0.5em 0; gap: 1em;
+                 flex-wrap: wrap; }
+  .bulk-bar { display: flex; gap: 0.75em; align-items: center; }
+</style>

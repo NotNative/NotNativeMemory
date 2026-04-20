@@ -84,6 +84,66 @@ No reboot-survival unless you wire up a service manager (systemd, launchd, Task 
 
 No server on this machine — the hooks talk to the remote MCP URL configured at install time.
 
+## Web GUI
+
+The server ships a browser UI for curating your own memories, facts,
+and API tokens. It runs on the same port as the MCP (default 9500)
+and uses the same auth layer; sign in once and you see only your own
+data.
+
+Open the server URL in a browser and log in:
+
+```
+http://localhost:9500/            # auto-redirects to /login
+http://localhost:9500/memories    # browse, filter, edit, bulk delete
+http://localhost:9500/facts       # triple store browser
+http://localhost:9500/tokens      # mint and revoke API tokens
+```
+
+What's there:
+
+- **Memory list** with full-text search, filters (scope, tag,
+  importance, project), sort (created, accessed, temperature,
+  importance), and pagination. Every change updates the URL so
+  views are bookmarkable.
+- **Memory detail** lets you edit content (re-embeds on save),
+  tags, importance, and scope (rescope works by looking up or
+  creating the target project for your user).
+- **Bulk select + delete** with an all-visible toggle.
+- **Facts browser** with the same filter conventions. History is
+  hidden by default; check "Include superseded facts" to see the
+  temporal chain.
+- **Token management**: list your tokens (label, created, last
+  used, revoked state), mint new ones with a label, revoke.
+  New tokens are shown exactly once at creation; copy before
+  reloading the page.
+
+Auth is Bearer tokens under the hood. The browser stores the token
+in an HttpOnly session cookie; all state-changing requests are
+CSRF-protected with a double-submit cookie.
+
+## Authentication
+
+The server supports Bearer-token auth with open self-registration.
+No admin concept: every user sees only their own memories, including
+their own `_global` and `_domain_*` scopes.
+
+Two operational modes picked at install time:
+
+- **Solo mode** (`MEMORY_AUTH_LOCALHOST_BYPASS=1` +
+  `MEMORY_AUTH_LOCALHOST_USER=<username>`): loopback callers are
+  implicitly authenticated as the named user. Hooks and on-host
+  agents work without a token. Explicit Bearer headers still win,
+  so a second user with their own token can still use the server
+  from the same machine without being silently overridden.
+- **Multi-user mode**: bypass off, every caller must present a
+  valid Bearer token. Registration, login, and token management
+  go through `POST /auth/register`, `POST /auth/login`, and
+  `GET|POST|DELETE /auth/tokens`.
+
+Full API reference including curl examples for login, token
+management, and client setup: [`docs/api-auth.md`](api-auth.md).
+
 ## Configure Your AI Tools
 
 **In most cases you don't need to.** The installer detects `claude` and `nnc` on your PATH and wires both the hook bundle (under `~/.claude/` and/or `~/.nnc/`) and the MCP server registration automatically. Skip ahead to [Add Memory Instructions to Your Agent](#add-memory-instructions-to-your-agent) if you used the installer.
@@ -165,6 +225,30 @@ Run the server on one machine, connect from everywhere. No local install needed 
 
 1. **Server machine:** Run the install script, start with `python server.py --http`
 2. **Client machines:** Just add the HTTP config pointing to the server's hostname
+
+## Deployment Shapes
+
+Pick the shape that matches where the server runs. The two env vars that control network posture are `MEMORY_BIND_HOST` (which interface uvicorn listens on) and `MEMORY_COOKIE_SECURE` (whether session and CSRF cookies carry the Secure attribute). Both live in `.env`.
+
+**Loopback-only (safest default; one-user-on-one-machine).**
+No other machine can reach the server over the network. Suitable when only agents running on the same box hit the MCP, or when you access the web GUI from a browser on the same host.
+```
+MEMORY_BIND_HOST=127.0.0.1
+MEMORY_COOKIE_SECURE=
+```
+
+**LAN behind a trusted reverse proxy (TLS on the proxy).**
+Expose `nnm.example.internal` via nginx / Caddy / Traefik terminating TLS, proxying plain HTTP to the MCP. Session cookies now carry `Secure`, so they only flow over TLS.
+```
+MEMORY_BIND_HOST=0.0.0.0
+MEMORY_COOKIE_SECURE=1
+```
+
+**Public via reverse proxy.**
+Same as LAN behind a proxy, plus: the proxy should set `Strict-Transport-Security` with an appropriate `max-age`, and you should strongly consider firewalling the raw MCP port so only the proxy can reach it.
+
+**Plain HTTP on a non-loopback interface (NOT RECOMMENDED).**
+Leaving `MEMORY_BIND_HOST=0.0.0.0` without `MEMORY_COOKIE_SECURE=1` makes the server print a loud warning at startup and keep running. Session cookies then travel in plaintext; anyone on the network path can read them and impersonate logged-in users. Fine only for throwaway dev on a fully trusted LAN.
 
 ## Verify It Works
 
@@ -272,6 +356,7 @@ docker/
     docker-compose.yml  - Postgres + pgvector + MCP server containers
 docs/
     README.md           - This file
+    api-auth.md         - Bearer-token auth API reference
     memory-persona.md   - Platform-neutral system prompt for any MCP agent
 claude/
     CLAUDE.md           - Memory instructions for new Claude Code projects

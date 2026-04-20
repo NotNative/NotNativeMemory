@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+{% block title %}Memories — NotNativeMemory{% endblock %}
+{% block content %}
+<h1>Memories</h1>
+
+<form class="filters" method="get" action="/memories"
+      hx-get="/memories"
+      hx-target="#memory-panel"
+      hx-trigger="submit, change delay:400ms from:input[name=q]"
+      hx-push-url="true">
+  <div class="filter-row">
+    <input name="q" value="{{ filters.q or '' }}"
+           placeholder="Search content..." autocomplete="off"
+           style="flex: 2 1 220px; min-width: 180px;">
+    <select name="scope" style="flex: 0 1 120px;">
+      <option value="">scope: any</option>
+      <option value="local" {% if filters.scope == 'local' %}selected{% endif %}>local</option>
+      <option value="global" {% if filters.scope == 'global' %}selected{% endif %}>global</option>
+      <option value="domain" {% if filters.scope == 'domain' %}selected{% endif %}>domain</option>
+    </select>
+    <select name="min_importance" style="flex: 0 1 150px;">
+      <option value="">importance: any</option>
+      <option value="low" {% if filters.min_importance == 'low' %}selected{% endif %}>low+</option>
+      <option value="normal" {% if filters.min_importance == 'normal' %}selected{% endif %}>normal+</option>
+      <option value="high" {% if filters.min_importance == 'high' %}selected{% endif %}>high+</option>
+      <option value="critical" {% if filters.min_importance == 'critical' %}selected{% endif %}>critical only</option>
+    </select>
+    <input name="tag" value="{{ filters.tag or '' }}"
+           placeholder="tag" style="flex: 0 1 140px;">
+    <input name="project" value="{{ filters.project or '' }}"
+           placeholder="project (exact)" style="flex: 1 1 200px;">
+  </div>
+  <div class="filter-row">
+    <select name="sort" style="flex: 0 1 180px;">
+      <option value="created_at" {% if filters.sort == 'created_at' %}selected{% endif %}>sort: created</option>
+      <option value="last_accessed" {% if filters.sort == 'last_accessed' %}selected{% endif %}>sort: last accessed</option>
+      <option value="temperature" {% if filters.sort == 'temperature' %}selected{% endif %}>sort: temperature</option>
+      <option value="access_count" {% if filters.sort == 'access_count' %}selected{% endif %}>sort: access count</option>
+      <option value="importance" {% if filters.sort == 'importance' %}selected{% endif %}>sort: importance</option>
+    </select>
+    <select name="order" style="flex: 0 1 120px;">
+      <option value="DESC" {% if filters.order == 'DESC' %}selected{% endif %}>descending</option>
+      <option value="ASC" {% if filters.order == 'ASC' %}selected{% endif %}>ascending</option>
+    </select>
+    <input type="hidden" name="limit" value="{{ limit }}">
+    <button type="submit">Apply</button>
+    <a href="/memories" class="clear-link">clear</a>
+  </div>
+</form>
+
+<style>
+  .filters { max-width: none; margin-bottom: 1em; }
+  .filter-row { display: flex; gap: 0.5em; flex-wrap: wrap; margin: 0.3em 0; align-items: center; }
+  .filter-row input, .filter-row select { padding: 0.35em; font-size: 0.95em; }
+  .clear-link { color: var(--faint-fg); text-decoration: none; margin-left: 0.5em; font-size: 0.9em; }
+  .clear-link:hover { color: var(--error-fg); }
+  .paging { margin: 1em 0; display: flex; gap: 1em; align-items: center; color: var(--muted-fg); }
+  .paging a { color: var(--link); text-decoration: none; padding: 0.3em 0.8em; border: 1px solid var(--border-strong); border-radius: 3px; }
+  .paging a:hover { background: var(--paging-hover-bg); }
+  .paging .disabled { color: var(--faint-fg); pointer-events: none; border-color: var(--border); }
+</style>
+
+<div id="memory-panel">
+  {% include "_memories_list.html" %}
+</div>
+{% endblock %}

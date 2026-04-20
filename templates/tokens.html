@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Tokens — NotNativeMemory{% endblock %}
+{% block content %}
+<h1>API Tokens</h1>
+<p>Bearer tokens for MCP clients and scripts. The raw value is shown
+  <strong>once</strong> at creation and then only the hash is kept.</p>
+
+{% if new_token %}
+<div class="flash">
+  <p><strong>New token minted.</strong> Copy it now — it will not be
+    shown again.</p>
+  <pre style="background:var(--code-bg);color:var(--fg);padding:0.5em;
+              border:1px solid var(--border);border-radius:3px;overflow-x:auto;
+              user-select:all;word-break:break-all;">{{ new_token }}</pre>
+  <p style="font-size:0.9em;margin:0;">Label: {{ new_token_label or "(none)" }}</p>
+</div>
+{% endif %}
+
+<h2 style="margin-top:2em;">Mint a new token</h2>
+<form class="stacked" method="post" action="/tokens">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <label>
+    Label (optional, helps you remember where it's used)
+    <input name="label" maxlength="64" placeholder="e.g. laptop, CI">
+  </label>
+  <button type="submit">Create token</button>
+</form>
+
+<h2 style="margin-top:2em;">Existing tokens</h2>
+<p>{{ count }} token{{ '' if count == 1 else 's' }} on record (including revoked).</p>
+<div id="token-list">
+  {% for t in tokens %}
+    {% include "_token_row.html" %}
+  {% else %}
+    <p>None yet. Create one above to let a CLI or agent authenticate.</p>
+  {% endfor %}
+</div>
+{% endblock %}
