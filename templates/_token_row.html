@@ -1,0 +1,28 @@
+<div class="memory" id="token-{{ t.id }}"
+     {% if t.revoked_at %}style="opacity:0.6;"{% endif %}>
+  {% if not t.revoked_at %}
+  <button
+    hx-delete="/tokens/{{ t.id }}"
+    hx-target="#token-{{ t.id }}"
+    hx-swap="outerHTML"
+    hx-confirm="Revoke this token? Any client still using it will stop working.">Revoke</button>
+  {% endif %}
+  <div class="content">
+    {% if t.label %}<strong>{{ t.label }}</strong>{% else %}<em>(no label)</em>{% endif %}
+    {% if t.revoked_at %}<span class="badge imp-low">revoked</span>{% endif %}
+  </div>
+  <div class="meta">
+    <span>created {{ t.created_at[:19].replace('T',' ') }}</span>
+    {% if t.last_used_at %}
+      <span>last used {{ t.last_used_at[:19].replace('T',' ') }}</span>
+    {% else %}
+      <span>never used</span>
+    {% endif %}
+    {% if t.revoked_at %}
+      <span>revoked {{ t.revoked_at[:19].replace('T',' ') }}</span>
+    {% endif %}
+    <span style="color:#999;font-family:ui-monospace,monospace;font-size:0.8em;">
+      id {{ t.id[:8] }}
+    </span>
+  </div>
+</div>

@@ -257,6 +257,84 @@ def register_routes(mcp) -> None:
             memories=memories, count=len(memories),
         )
 
+    # -- Token management ------------------------------------------------
+
+    @mcp.custom_route("/tokens", methods=["GET"])
+    async def tokens_page(request: Request):
+        redirect = _require_login(request)
+        if redirect:
+            return redirect
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        tokens_list = await auth_db.list_tokens(uid)
+        return _render_with_csrf(
+            request, "tokens.html",
+            tokens=tokens_list, count=len(tokens_list),
+        )
+
+    @mcp.custom_route("/tokens", methods=["POST"])
+    async def tokens_create(request: Request):
+        redirect = _require_login(request)
+        if redirect:
+            return redirect
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        form = await request.form()
+        label = (form.get("label") or "").strip() or None
+
+        minted = await auth_db.create_token(uid, label=label)
+        # Re-render the page with the raw value exposed as new_token.
+        # The token is NOT stored server-side in this flow after this
+        # render; if the user navigates away or reloads, the banner
+        # disappears. Cookie-mint is idempotent on re-render.
+        tokens_list = await auth_db.list_tokens(uid)
+        return _render_with_csrf(
+            request, "tokens.html",
+            tokens=tokens_list, count=len(tokens_list),
+            new_token=minted["token"],
+            new_token_label=label,
+        )
+
+    @mcp.custom_route("/tokens/{token_id}", methods=["DELETE"])
+    async def tokens_revoke(request: Request):
+        redirect = _require_login(request)
+        if redirect:
+            return HTMLResponse("unauthorized", status_code=401)
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        try:
+            token_uuid = UUID(request.path_params["token_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid token id", status_code=400)
+
+        ok = await auth_db.revoke_token(uid, token_uuid)
+        if not ok:
+            return HTMLResponse("not found", status_code=404)
+
+        # HTMX swap target is the row itself. Return empty body so the
+        # row vanishes, matching how memory delete works. Alternative
+        # would be returning an updated row showing the revoked state,
+        # but that requires a partial-render handler; vanishing is
+        # simpler and the full list is one click away.
+        return HTMLResponse("", status_code=200)
+
     @mcp.custom_route("/memories/{memory_id}", methods=["DELETE"])
     async def memory_delete(request: Request):
         redirect = _require_login(request)
