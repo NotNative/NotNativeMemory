@@ -6,9 +6,9 @@ them as memories. Useful for retroactive capture of important context
 from sessions where the model didn't proactively use memory tools.
 
 Usage:
-    python mine.py <transcript_path> [--project <name>]
-    python mine.py conversations/session-2026-04-07.jsonl
-    python mine.py conversations/session.jsonl --project "/path/to/your/project"
+    python scripts/mine.py <transcript_path> [--project <name>]
+    python scripts/mine.py conversations/session-2026-04-07.jsonl
+    python scripts/mine.py conversations/session.jsonl --project "/path/to/your/project"
 """
 
 import argparse

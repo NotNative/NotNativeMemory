@@ -14,7 +14,7 @@ RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/wh
 COPY server.py .
 COPY lib/ lib/
 COPY config/ config/
-COPY selftest.py .
+COPY scripts/ scripts/
 
 # Embedding model is mounted as a volume at runtime, not baked in.
 # Default MEMORY_MODEL_PATH=models/gte-base-en-v1.5 resolves to

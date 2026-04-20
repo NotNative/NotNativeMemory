@@ -59,7 +59,7 @@ proxy. It is *not* designed as a multi-tenant SaaS.
 
 ## Deployment shapes
 
-See `docs/README.md` → "Deployment Shapes" for the full matrix. The
+See `README.md` → "Deployment Shapes" for the full matrix. The
 two env vars that gate network posture are:
 
 - `MEMORY_BIND_HOST` — which interface uvicorn listens on. Default

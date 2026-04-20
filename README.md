@@ -1,14 +1,21 @@
 # NotNativeMemory
 
-Persistent, vector-backed memory for any MCP-compatible AI agent platform. Stores memories with semantic embeddings so they survive context compaction, session boundaries, and model changes.
+**Multi-user persistent memory for MCP-capable AI agents. Run it solo on localhost, or share one server across a team with per-user auth and full memory isolation.**
 
-## What This Does
+- **Persistent semantic memory** — embeddings-backed recall that survives context compaction and session boundaries.
+- **Multi-user by design** — open self-registration, Bearer-token auth, per-user isolation enforced at the database (Postgres RLS). Every user sees only their own memories, including their own global and domain scopes.
+- **Facts with history** — record assertions as triples with automatic supersession and `as_of` time-travel, alongside the free-form memory store.
+- **Ambient via hooks** — shipped hook bundles for **Claude Code** and **NotNativeCoder** inject relevant memory before prompts, tool calls, and compaction. The model doesn't have to remember to search.
+- **Web GUI** — curate memories, facts, and API tokens in a browser; same auth as the MCP.
 
-When you work with an AI coding assistant, the conversation context has a limited window. Long sessions get compacted or truncated, and important decisions, preferences, and constraints get lost. NotNativeMemory gives the AI a persistent memory it can read and write to, so the things that matter survive.
+Works with any [MCP](https://modelcontextprotocol.io)-compatible client (Claude Code, LM Studio, Cline, Continue.dev, Cursor custom modes, self-hosted agents). Tested extensively with Claude Code and LM Studio.
 
-The AI stores memories as it works (decisions, corrections, preferences) and searches for them when context is thin (session start, after compaction). You never have to manually manage it.
+## Solo or shared
 
-Built and tested with **Claude Code** and **LM Studio**, but works with any platform that speaks [MCP](https://modelcontextprotocol.io) — Cline, Continue.dev, Cursor custom modes, self-hosted agents, etc. For platforms without a CLAUDE.md-style instruction file, paste [`docs/memory-persona.md`](memory-persona.md) into your system prompt so the model knows when and how to use the tools.
+Two operational modes, picked at install time:
+
+- **Solo** — loopback-only, `MEMORY_AUTH_LOCALHOST_BYPASS=1` lets on-host agents and hooks work without tokens. One user, one machine, zero auth ceremony.
+- **Shared** — server listens on a routable interface (typically behind a reverse proxy); every client presents a Bearer token. Registration, login, and token management via the web GUI or the auth API. Per-user isolation holds whether or not Postgres RLS is actively enforcing it.
 
 ## Prerequisites
 
@@ -124,25 +131,22 @@ CSRF-protected with a double-submit cookie.
 
 ## Authentication
 
-The server supports Bearer-token auth with open self-registration.
-No admin concept: every user sees only their own memories, including
-their own `_global` and `_domain_*` scopes.
+Details for the two modes introduced in [Solo or shared](#solo-or-shared).
 
-Two operational modes picked at install time:
-
-- **Solo mode** (`MEMORY_AUTH_LOCALHOST_BYPASS=1` +
-  `MEMORY_AUTH_LOCALHOST_USER=<username>`): loopback callers are
-  implicitly authenticated as the named user. Hooks and on-host
-  agents work without a token. Explicit Bearer headers still win,
-  so a second user with their own token can still use the server
-  from the same machine without being silently overridden.
-- **Multi-user mode**: bypass off, every caller must present a
-  valid Bearer token. Registration, login, and token management
-  go through `POST /auth/register`, `POST /auth/login`, and
-  `GET|POST|DELETE /auth/tokens`.
+- **Solo** — set `MEMORY_AUTH_LOCALHOST_BYPASS=1` and
+  `MEMORY_AUTH_LOCALHOST_USER=<username>`. Loopback callers are
+  implicitly authenticated as the named user. Explicit Bearer
+  headers still win, so a second user with their own token can
+  use the server from the same machine without being silently
+  overridden.
+- **Shared** — bypass off; every caller presents a Bearer token.
+  Endpoints: `POST /auth/register`, `POST /auth/login`,
+  `GET|POST|DELETE /auth/tokens`. No admin concept — every user
+  sees only their own memories, including their own `_global`
+  and `_domain_*` scopes.
 
 Full API reference including curl examples for login, token
-management, and client setup: [`docs/api-auth.md`](api-auth.md).
+management, and client setup: [`docs/api-auth.md`](docs/api-auth.md).
 
 ## Configure Your AI Tools
 
@@ -185,7 +189,7 @@ Copy `claude/CLAUDE.md` to your project root.
 Append the contents of `claude/memory-instructions.md` to your existing CLAUDE.md.
 
 **Any other MCP-compatible platform (LM Studio, Cline, Continue.dev, Cursor, custom agents):**
-Paste [`docs/memory-persona.md`](memory-persona.md) into the system prompt / persona / custom instructions field. It's platform-neutral and covers all eight tools, when to use each, and the scope hierarchy.
+Paste [`docs/memory-persona.md`](docs/memory-persona.md) into the system prompt / persona / custom instructions field. It's platform-neutral and covers all eight tools, when to use each, and the scope hierarchy.
 
 ## Optional: Ambient Memory via Hooks
 
@@ -199,7 +203,7 @@ Together they cover the three points in a turn where memory matters most: when t
 
 ### Claude Code
 
-Located at `claude/hooks/`. Claude Code's install script wires them up automatically. For manual setup or tuning, see [`claude/hooks/README.md`](../claude/hooks/README.md).
+Located at `claude/hooks/`. Claude Code's install script wires them up automatically. For manual setup or tuning, see [`claude/hooks/README.md`](claude/hooks/README.md).
 
 Tool matcher: `Edit|Write|Bash`.
 
@@ -211,7 +215,7 @@ Located at `nnc/hooks/`. Install manually:
 python nnc/hooks/merge_hooks.py /absolute/path/to/NotNativeMemory http://localhost:9500/mcp
 ```
 
-The installer idempotently writes to `~/.nnc/settings.json` and generates `nnc/hooks/hooks.env`. See [`nnc/hooks/README.md`](../nnc/hooks/README.md) for payload format, tuning, and the exact settings it produces.
+The installer idempotently writes to `~/.nnc/settings.json` and generates `nnc/hooks/hooks.env`. See [`nnc/hooks/README.md`](nnc/hooks/README.md) for payload format, tuning, and the exact settings it produces.
 
 Tool matcher: `edit_file|write_file|read_file|bash`.
 
@@ -299,11 +303,11 @@ Cross-project knowledge (gotchas, language patterns, style rules) no longer has 
 
 ## Bulk Import from Transcripts
 
-`mine.py` retroactively imports Claude Code JSONL transcripts into memory:
+`scripts/mine.py` retroactively imports Claude Code JSONL transcripts into memory:
 
 ```bash
-python mine.py path/to/session.jsonl
-python mine.py path/to/session.jsonl --project /path/to/your/project
+python scripts/mine.py path/to/session.jsonl
+python scripts/mine.py path/to/session.jsonl --project /path/to/your/project
 ```
 
 Each user/assistant exchange becomes a memory, auto-classified and deduplicated against existing ones.
@@ -343,8 +347,12 @@ The `.env` file and project directory are preserved — remove them manually if 
 ## File Structure
 
 ```
+README.md               - This file
+SECURITY.md             - Security posture, threat model, deployment guidance
 server.py               - MCP server (run by any MCP-compatible agent)
-mine.py                 - CLI for bulk-importing conversation transcripts
+scripts/
+    mine.py             - CLI for bulk-importing conversation transcripts
+    selftest.py         - Post-install store/search/forget verification
 lib/
     db.py               - Database operations, migration runner, scope resolution
     embeddings.py       - Local embedding model wrapper
@@ -355,9 +363,9 @@ config/
 docker/
     docker-compose.yml  - Postgres + pgvector + MCP server containers
 docs/
-    README.md           - This file
     api-auth.md         - Bearer-token auth API reference
     memory-persona.md   - Platform-neutral system prompt for any MCP agent
+    incident-response.md - Runbook for suspected compromise
 claude/
     CLAUDE.md           - Memory instructions for new Claude Code projects
     memory-instructions.md - Short version to append to an existing CLAUDE.md

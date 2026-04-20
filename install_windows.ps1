@@ -732,9 +732,9 @@ print('Model saved to models/gte-base-en-v1.5')
 Write-Step "Running self-test..."
 if ($useDocker) {
     # Run selftest inside the MCP container where deps and model are available
-    & docker compose -f docker/docker-compose.yml exec mcp python selftest.py 2>&1
+    & docker compose -f docker/docker-compose.yml exec mcp python scripts/selftest.py 2>&1
 } else {
-    python selftest.py 2>&1
+    python scripts/selftest.py 2>&1
 }
 if ($LASTEXITCODE -ne 0) {
     Write-Err "Self-test failed. Check the output above for details."

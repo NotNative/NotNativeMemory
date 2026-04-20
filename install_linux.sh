@@ -734,9 +734,9 @@ fi
 step "Running self-test..."
 if [ "$USE_DOCKER" = true ]; then
     # Run selftest inside the MCP container where deps and model are available
-    docker compose -f docker/docker-compose.yml exec mcp python selftest.py
+    docker compose -f docker/docker-compose.yml exec mcp python scripts/selftest.py
 else
-    python3 selftest.py
+    python3 scripts/selftest.py
 fi
 if [ $? -ne 0 ]; then
     err "Self-test failed. Check the output above for details."
