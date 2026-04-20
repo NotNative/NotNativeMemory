@@ -884,14 +884,22 @@ def _start_foreground(port: int) -> None:
     import uvicorn
     from lib.auth_middleware import BearerAuthMiddleware
     from lib.limits import BodySizeLimitMiddleware
+    from lib.security_headers import SecurityHeadersMiddleware
 
     app = mcp.streamable_http_app()
-    # Middleware order matters: outer wraps inner. We want the size cap
-    # to reject oversize payloads BEFORE auth resolution spends cycles
-    # on them, so BodySizeLimitMiddleware goes first (added last to the
-    # stack — Starlette composes last-added-outermost).
+    # Starlette composes middleware last-added-outermost. Order of
+    # the `add_middleware` calls below, inner-to-outer:
+    #
+    #   BearerAuthMiddleware    — resolves identity for downstream.
+    #   BodySizeLimitMiddleware — rejects oversize bodies BEFORE auth
+    #                             spends scrypt cycles on them.
+    #   SecurityHeadersMiddleware — outermost, so its headers land on
+    #                             every response including the 413
+    #                             from BodySizeLimit and the 401 from
+    #                             BearerAuth.
     app.add_middleware(BearerAuthMiddleware)
     app.add_middleware(BodySizeLimitMiddleware)
+    app.add_middleware(SecurityHeadersMiddleware)
 
     _write_pid(port)
     print(f"NotNativeMemory MCP server starting on http://0.0.0.0:{port} (foreground)")
