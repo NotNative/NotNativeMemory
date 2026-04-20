@@ -143,6 +143,9 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token_hash TEXT UNIQUE NOT NULL,      -- hashlib.scrypt digest
+    -- Plaintext random string used for O(1) lookup on the auth path.
+    -- Secrecy not required; entropy just keeps rows from colliding.
+    lookup_key TEXT,
     label TEXT,
     -- Snapshot of users.token_generation at mint time. Auth rejects
     -- the token when this drifts from the user's current generation.
@@ -155,9 +158,9 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
 CREATE INDEX IF NOT EXISTS idx_auth_tokens_user
     ON auth_tokens (user_id);
 
-CREATE INDEX IF NOT EXISTS idx_auth_tokens_active
-    ON auth_tokens (token_hash)
-    WHERE revoked_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS uniq_auth_tokens_lookup_key
+    ON auth_tokens (lookup_key)
+    WHERE lookup_key IS NOT NULL;
 
 -- Ownership columns: every row belongs to exactly one user. NOT NULL
 -- enforces "no anonymous rows"; per-user reads trust the non-null

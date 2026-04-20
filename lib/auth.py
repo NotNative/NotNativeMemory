@@ -44,11 +44,23 @@ _SALT_BYTES = 16
 # Pass a higher ceiling so the kernel gets to decide the real limit.
 _SCRYPT_MAXMEM = 128 * 1024 * 1024
 
-# Token entropy: 32 bytes = 256 bits, URL-safe base64 for clean display.
+# Token entropy: 32 bytes = 256 bits of secret, URL-safe base64.
+# An additional 16-byte random "lookup key" is generated alongside for
+# O(1) DB lookup; the two halves are joined by "." in the raw string.
 # The raw token carries a "nnm_" prefix so it is visually distinguishable
 # from API keys of other services when it leaks into logs.
+#
+# Format: nnm_<lookup_key_b64>.<secret_b64>
+#
+# The lookup key is indexed in the DB as plaintext (its unguessability
+# only matters enough that rows don't collide, which 128 bits of entropy
+# achieves trivially). The secret is scrypt-hashed at rest and is the
+# actual auth credential. An attacker who steals the DB sees lookup keys
+# but not secrets; forging requires guessing a scrypt-protected value.
 _TOKEN_PREFIX = "nnm_"
-_TOKEN_BYTES = 32
+_TOKEN_SECRET_BYTES = 32
+_TOKEN_LOOKUP_BYTES = 16
+_TOKEN_DELIMITER = "."
 
 
 def _b64(raw: bytes) -> str:
@@ -136,22 +148,48 @@ def verify_secret(secret: str, stored: str) -> bool:
 
 def generate_token() -> str:
     """
-    Return a fresh Bearer token. The prefix `nnm_` is part of the
-    token value and must be sent back verbatim in the Authorization
-    header. The random segment is 256 bits of entropy, URL-safe.
+    Return a fresh Bearer token in the split-format:
+
+        nnm_<lookup_key_b64>.<secret_b64>
+
+    lookup_key has 128 bits of random entropy (stored plain, indexed).
+    secret has 256 bits of random entropy (scrypt-hashed at rest).
 
     The returned value is never stored anywhere by this function. The
-    caller MUST hash it with hash_secret before writing to the DB and
-    show the raw value to the user exactly once.
+    caller MUST split it via parse_token, store the lookup key plain,
+    hash the secret with hash_secret, and show the raw value to the
+    user exactly once.
     """
-    return _TOKEN_PREFIX + secrets.token_urlsafe(_TOKEN_BYTES)
+    lookup = secrets.token_urlsafe(_TOKEN_LOOKUP_BYTES)
+    secret = secrets.token_urlsafe(_TOKEN_SECRET_BYTES)
+    return f"{_TOKEN_PREFIX}{lookup}{_TOKEN_DELIMITER}{secret}"
+
+
+def parse_token(raw: str) -> Optional[tuple[str, str]]:
+    """
+    Split a raw Bearer token into `(lookup_key, secret)` or return
+    None if the shape is wrong. Accepts strings that is_token_shaped
+    would accept; anything else short-circuits to None so callers do
+    not spend scrypt time on random garbage.
+    """
+    if not is_token_shaped(raw):
+        return None
+    body = raw[len(_TOKEN_PREFIX):]
+    if _TOKEN_DELIMITER not in body:
+        return None
+    lookup, _, secret = body.partition(_TOKEN_DELIMITER)
+    if not lookup or not secret:
+        return None
+    return lookup, secret
 
 
 def is_token_shaped(candidate: str) -> bool:
     """
-    Cheap pre-flight check before hashing an incoming header. Reject
+    Cheap pre-flight check before parsing an incoming header. Rejects
     obviously-not-our-tokens early so the middleware does not spend
-    scrypt time on random garbage.
+    cycles on random garbage. A "shaped" token starts with the prefix
+    and has non-trivial content afterwards; the delimiter and halves
+    are validated by parse_token.
     """
     return bool(
         isinstance(candidate, str)

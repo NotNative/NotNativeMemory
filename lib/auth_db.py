@@ -27,14 +27,6 @@ from lib.limits import (
 
 _log = logging.getLogger("notnative.auth")
 
-# Cap how many active tokens we scrypt-verify against per incoming
-# request. For a single-user or small-team deploy, realistic counts
-# are 1-10 and the limit never fires. The cap protects against a DoS
-# surface where an attacker (or a misconfigured client) accumulates
-# tokens to slow down every subsequent login. Ordering by
-# last_used_at DESC keeps the freshest tokens in the candidate set.
-_ACTIVE_TOKEN_LIMIT = 500
-
 
 # ==========================================================================
 # Users
@@ -139,21 +131,32 @@ async def create_token(
     Returns a dict containing the RAW token value (shown once) plus
     metadata. Callers must pass the raw `token` back to the user and
     never log it.
+
+    The raw token has format nnm_<lookup_key>.<secret>. The lookup
+    key is stored plain (indexed for O(1) resolve). The secret is
+    scrypt-hashed. See lib/auth.py for the split rationale.
     """
     raw = auth.generate_token()
-    token_hash = auth.hash_secret(raw)
+    parts = auth.parse_token(raw)
+    # parse_token returns None only if generate_token's own output is
+    # malformed, which would be a logic bug. Assert rather than swallow.
+    assert parts is not None, "generate_token produced malformed token"
+    lookup_key, secret = parts
+    secret_hash = auth.hash_secret(secret)
 
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO auth_tokens (user_id, token_hash, label, issued_generation)
+        INSERT INTO auth_tokens (
+            user_id, token_hash, lookup_key, label, issued_generation
+        )
         VALUES (
-            $1, $2, $3,
+            $1, $2, $3, $4,
             (SELECT token_generation FROM users WHERE id = $1)
         )
         RETURNING id, user_id, label, created_at
         """,
-        user_id, token_hash, label,
+        user_id, secret_hash, lookup_key, label,
     )
     return {
         "id": str(row["id"]),
@@ -243,41 +246,47 @@ async def resolve_token(raw_token: str) -> Optional[Dict[str, Any]]:
     revoked, drifted from the user's current generation, or does not
     match any row.
 
+    O(1) lookup: parse the raw token into (lookup_key, secret), SELECT
+    WHERE lookup_key = $1, then scrypt-verify the secret against the
+    stored hash. No per-row scrypt loop, no LIMIT window.
+
     The `t.issued_generation = u.token_generation` predicate enforces
     session revocation: when a user's generation is bumped, every
-    previously-issued token is filtered out of the candidate set here
-    and stops passing auth from that moment on.
+    previously-issued token is filtered out here and stops passing
+    auth immediately.
     """
-    if not auth.is_token_shaped(raw_token):
+    parts = auth.parse_token(raw_token)
+    if parts is None:
         return None
+    lookup_key, secret = parts
 
     pool = await get_pool()
-    rows = await pool.fetch(
+    row = await pool.fetchrow(
         """
         SELECT t.id, t.token_hash, t.user_id,
                u.username
         FROM auth_tokens t
         JOIN users u ON u.id = t.user_id
-        WHERE t.revoked_at IS NULL
+        WHERE t.lookup_key = $1
+          AND t.revoked_at IS NULL
           AND t.issued_generation = u.token_generation
-        ORDER BY t.last_used_at DESC NULLS LAST
-        LIMIT $1
         """,
-        _ACTIVE_TOKEN_LIMIT,
+        lookup_key,
     )
+    if row is None:
+        return None
 
-    for row in rows:
-        if auth.verify_secret(raw_token, row["token_hash"]):
-            # Fire-and-forget last_used_at. If it races with another
-            # concurrent auth the difference is not functional.
-            await pool.execute(
-                "UPDATE auth_tokens SET last_used_at = now() WHERE id = $1",
-                row["id"],
-            )
-            return {
-                "token_id": str(row["id"]),
-                "user_id": row["user_id"],
-                "username": row["username"],
-            }
+    if not auth.verify_secret(secret, row["token_hash"]):
+        return None
 
-    return None
+    # Fire-and-forget last_used_at update. If it races with another
+    # concurrent auth the difference is not functional.
+    await pool.execute(
+        "UPDATE auth_tokens SET last_used_at = now() WHERE id = $1",
+        row["id"],
+    )
+    return {
+        "token_id": str(row["id"]),
+        "user_id": row["user_id"],
+        "username": row["username"],
+    }

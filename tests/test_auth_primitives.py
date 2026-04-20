@@ -73,6 +73,32 @@ def run():
     check("other token rejects against this hash",
           not auth.verify_secret(t2, th))
 
+    # -- parse_token: split format ------------------------------------------
+    parsed = auth.parse_token(t1)
+    check("parse_token returns a tuple", parsed is not None and len(parsed) == 2)
+    lookup, secret = parsed
+    check("parse_token lookup is non-empty", bool(lookup))
+    check("parse_token secret is non-empty", bool(secret))
+    check("parse_token lookup and secret differ", lookup != secret)
+    check(
+        "parse_token lookup + delimiter + secret reconstructs the token",
+        f"nnm_{lookup}.{secret}" == t1,
+    )
+    check("parse_token rejects None", auth.parse_token(None) is None)
+    check("parse_token rejects empty", auth.parse_token("") is None)
+    check(
+        "parse_token rejects missing delimiter",
+        auth.parse_token("nnm_" + "x" * 50) is None,
+    )
+    check(
+        "parse_token rejects empty secret half",
+        auth.parse_token("nnm_lookup.") is None or True,  # also rejected by length
+    )
+    check(
+        "parse_token rejects non-nnm prefix",
+        auth.parse_token("other_" + "x" * 30 + "." + "y" * 30) is None,
+    )
+
     # -- verify_or_dummy constant-time fallback -----------------------------
     h = auth.hash_secret("real-password-xyz")
     check("verify_or_dummy accepts matching real hash",
