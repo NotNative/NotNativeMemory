@@ -21,7 +21,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.templating import Jinja2Templates
 
-from lib import audit, auth, auth_db, password_policy, rate_limit
+from lib import admin_bootstrap, audit, auth, auth_db, password_policy, rate_limit
 from lib.csrf import check_csrf, get_or_mint_csrf, set_csrf_cookie
 
 
@@ -185,6 +185,112 @@ def register_routes(mcp) -> None:
             target_id=UUID(token["id"]),
             detail={**audit.request_detail(request), "label": "web-session"},
         )
+        resp = RedirectResponse("/memories", status_code=303)
+        _set_session_cookie(resp, token["token"])
+        return resp
+
+    # -- Claim admin ------------------------------------------------------
+
+    @mcp.custom_route("/claim-admin", methods=["GET"])
+    async def claim_admin_page(request: Request):
+        # Only available while the bootstrap file exists. Once an admin
+        # is claimed the file is deleted and this page 404s so casual
+        # visitors don't get an enticing target.
+        if not admin_bootstrap.bootstrap_file_exists():
+            return RedirectResponse("/login", status_code=302)
+        return _render_with_csrf(request, "claim_admin.html")
+
+    @mcp.custom_route("/claim-admin", methods=["POST"])
+    async def claim_admin_submit(request: Request):
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        # Re-check file existence on the submit path too; a race where
+        # another claim raced in and succeeded should not let a second
+        # claim slip through.
+        if not admin_bootstrap.bootstrap_file_exists():
+            return RedirectResponse("/login", status_code=302)
+
+        form = await request.form()
+        bootstrap_token = (form.get("bootstrap_token") or "").strip()
+        username = (form.get("username") or "").strip()
+        password = form.get("password") or ""
+        confirm = form.get("password_confirm") or ""
+
+        if not bootstrap_token or not username or not password:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=400,
+                error="Bootstrap token, username, and password are required.",
+            )
+        if password != confirm:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=400,
+                error="Passwords do not match.",
+            )
+
+        if not admin_bootstrap.validate_bootstrap_token(bootstrap_token):
+            await audit.log_event(
+                "admin.claim_fail",
+                detail=audit.request_detail(request),
+            )
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=401,
+                error="Invalid bootstrap token.",
+            )
+
+        policy_err = await password_policy.validate_new_password(password)
+        if policy_err:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=400,
+                error=policy_err,
+            )
+
+        try:
+            new_user = await auth_db.create_user(username, password)
+        except asyncpg.UniqueViolationError:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=409,
+                error="That username is taken.",
+            )
+        except ValueError as exc:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=400,
+                error=str(exc),
+            )
+
+        # Promote and delete the file before minting the session token
+        # so a mid-flow crash never leaves us with a non-admin account
+        # and a still-valid bootstrap file.
+        uid = UUID(new_user["id"])
+        await auth_db.set_admin(uid, True)
+        admin_bootstrap.delete_bootstrap_file()
+
+        await audit.log_event(
+            "admin.claimed",
+            actor_user_id=uid,
+            detail=audit.request_detail(request),
+        )
+        await audit.log_event(
+            "user.register",
+            actor_user_id=uid,
+            detail={**audit.request_detail(request), "is_admin": True},
+        )
+
+        token = await auth_db.create_token(uid, label="web-session")
+        await audit.log_event(
+            "login.success",
+            actor_user_id=uid,
+            target_id=UUID(token["id"]),
+            detail={**audit.request_detail(request), "label": "web-session"},
+        )
+
         resp = RedirectResponse("/memories", status_code=303)
         _set_session_cookie(resp, token["token"])
         return resp

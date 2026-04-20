@@ -31,7 +31,7 @@ import asyncpg
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from lib import audit, auth_db, password_policy, rate_limit
+from lib import admin_bootstrap, audit, auth_db, password_policy, rate_limit
 
 
 def _too_many_requests(retry_after: float, detail: str) -> JSONResponse:
@@ -73,6 +73,88 @@ def _current_user_id(request: Request) -> UUID | None:
 
 def register_routes(mcp) -> None:
     """Attach all /auth/* routes to the FastMCP instance."""
+
+    @mcp.custom_route("/auth/claim-admin", methods=["POST"])
+    async def claim_admin(request: Request):
+        """
+        Claim the admin role with a bootstrap token. Payload:
+            {"bootstrap_token": "...", "username": "...", "password": "..."}
+
+        Only works while ./state/admin_bootstrap.txt exists (i.e.,
+        no admin is yet registered). On success, the file is deleted,
+        a user is created with is_admin=true, a Bearer token is
+        minted, and the raw token is returned once.
+        """
+        if not admin_bootstrap.bootstrap_file_exists():
+            return JSONResponse(
+                {"error": "admin already claimed"}, status_code=409,
+            )
+
+        payload = await _parse_json(request)
+        if payload is None:
+            return JSONResponse({"error": "body must be JSON"}, status_code=400)
+
+        bootstrap_token = (payload.get("bootstrap_token") or "").strip()
+        username = (payload.get("username") or "").strip()
+        password = payload.get("password") or ""
+        if not bootstrap_token or not username or not password:
+            return JSONResponse(
+                {"error": "bootstrap_token, username, and password are required"},
+                status_code=400,
+            )
+
+        if not admin_bootstrap.validate_bootstrap_token(bootstrap_token):
+            await audit.log_event(
+                "admin.claim_fail",
+                detail=audit.request_detail(request),
+            )
+            return JSONResponse(
+                {"error": "invalid bootstrap token"}, status_code=401,
+            )
+
+        policy_err = await password_policy.validate_new_password(password)
+        if policy_err:
+            return JSONResponse({"error": policy_err}, status_code=400)
+
+        try:
+            user = await auth_db.create_user(username, password)
+        except asyncpg.UniqueViolationError:
+            return JSONResponse(
+                {"error": "username taken"}, status_code=409,
+            )
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        uid = UUID(user["id"])
+        await auth_db.set_admin(uid, True)
+        admin_bootstrap.delete_bootstrap_file()
+
+        await audit.log_event(
+            "admin.claimed",
+            actor_user_id=uid,
+            detail=audit.request_detail(request),
+        )
+        await audit.log_event(
+            "user.register",
+            actor_user_id=uid,
+            detail={**audit.request_detail(request), "is_admin": True},
+        )
+
+        token = await auth_db.create_token(uid, label="admin-claim")
+        await audit.log_event(
+            "login.success",
+            actor_user_id=uid,
+            target_id=UUID(token["id"]),
+            detail={**audit.request_detail(request), "label": "admin-claim"},
+        )
+
+        # Re-fetch so the returned user dict has is_admin=True (the
+        # original create_user returned the row before we set it).
+        refreshed = await auth_db.get_user_by_id(uid)
+        return JSONResponse({
+            "user": refreshed,
+            "token": token,
+        }, status_code=201)
 
     @mcp.custom_route("/auth/register", methods=["POST"])
     async def register(request: Request):

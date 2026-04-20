@@ -56,9 +56,11 @@ from lib.auth_context import set_current_user_id
 _WHITELIST_PREFIXES = (
     "/auth/register",
     "/auth/login",
+    "/auth/claim-admin",
     "/health",
     "/login",
     "/register",
+    "/claim-admin",
 )
 
 _WHITELIST_EXACT = ("/",)

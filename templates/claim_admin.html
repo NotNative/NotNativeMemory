@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Claim admin — NotNativeMemory{% endblock %}
+{% block content %}
+<h1>First-run: claim admin</h1>
+
+<p>No admin account exists yet. To register the first admin, paste the
+  bootstrap token from <code>state/admin_bootstrap.txt</code> on the
+  server filesystem, then pick a username and password.</p>
+
+<p style="color:var(--muted-fg);font-size:0.9em;">
+  This page is only available until an admin is claimed. After that,
+  the bootstrap file is deleted and this flow is no longer reachable.
+  To recover from a lost admin, stop the server and run
+  <code>python server.py --reset-admin</code>.
+</p>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<form class="stacked" method="post" action="/claim-admin">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <label>
+    Bootstrap token
+    <input name="bootstrap_token" required autofocus
+           autocomplete="off" spellcheck="false"
+           style="font-family:ui-monospace,monospace;">
+    <small style="color:var(--muted-fg);">
+      The one-time value from <code>state/admin_bootstrap.txt</code>.
+      Paste the whole line.
+    </small>
+  </label>
+  <label>
+    Username
+    <input name="username" required autocomplete="username"
+           pattern="[A-Za-z0-9_.\-]{1,64}"
+           title="Letters, digits, dot, dash, underscore. Up to 64 characters.">
+  </label>
+  <label>
+    Password
+    <input name="password" type="password" required minlength="8"
+           autocomplete="new-password">
+    <small style="color:var(--muted-fg);">
+      Length beats complexity. A memorable passphrase is harder to
+      crack than a short string of punctuation. Breached passwords
+      are rejected.
+    </small>
+  </label>
+  <label>
+    Confirm password
+    <input name="password_confirm" type="password" required minlength="8"
+           autocomplete="new-password">
+  </label>
+  <button type="submit">Claim admin</button>
+</form>
+{% endblock %}
