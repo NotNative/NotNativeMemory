@@ -432,6 +432,19 @@ MEMORY_DB_USER=$DB_USER
 MEMORY_DB_PASSWORD=$DB_PASSWORD
 MEMORY_MODEL_PATH=models/gte-base-en-v1.5
 MEMORY_DEFAULT_PROJECT=
+
+# -- Network exposure -----------------------------------------------------
+# MEMORY_BIND_HOST: which interface the HTTP server listens on.
+#   127.0.0.1 = loopback only (this machine only; safest default)
+#   0.0.0.0   = all interfaces (LAN / Docker / public)
+# When you use a non-loopback value you SHOULD also run behind a
+# TLS-terminating reverse proxy and set MEMORY_COOKIE_SECURE=1 so
+# session cookies never travel in plaintext.
+MEMORY_BIND_HOST=0.0.0.0
+
+# MEMORY_COOKIE_SECURE: set to 1 when behind TLS so session and CSRF
+# cookies carry the Secure attribute. Leave unset on plain HTTP dev.
+MEMORY_COOKIE_SECURE=
 EOF
 info "Saved to .env"
 

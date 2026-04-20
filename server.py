@@ -866,11 +866,56 @@ def _stop_running_server() -> tuple:
     return False, port
 
 
+_LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
+
+
+def _resolve_bind_host() -> str:
+    """
+    MEMORY_BIND_HOST defaults to 0.0.0.0 so existing installs that do
+    not set it keep binding as they did before this change. New
+    installs ship with the env var set explicitly (see install scripts)
+    so the value is always visible to the operator.
+    """
+    return os.environ.get("MEMORY_BIND_HOST", "0.0.0.0").strip() or "0.0.0.0"
+
+
+def _warn_insecure_bind(host: str) -> None:
+    """
+    Print a loud warning when the server is about to bind to a
+    non-loopback interface without MEMORY_COOKIE_SECURE=1. The flag
+    is our proxy for "operator has put this behind TLS" — without
+    it, session cookies fly over plaintext and a network observer
+    reads them.
+
+    This is a warning, not a hard fail: some operators run behind a
+    trusted TLS-terminating proxy and toggle COOKIE_SECURE separately.
+    The message is verbose on purpose so it is impossible to miss.
+    """
+    if host in _LOOPBACK_HOSTS:
+        return
+    cookie_secure = os.environ.get("MEMORY_COOKIE_SECURE", "") in ("1", "true", "yes")
+    if cookie_secure:
+        return
+    print("=" * 72, file=sys.stderr)
+    print("  WARNING: binding to a non-loopback interface without TLS.", file=sys.stderr)
+    print(f"  Bind host: {host}", file=sys.stderr)
+    print("  Session cookies will travel in plaintext; anyone on the", file=sys.stderr)
+    print("  network path can read them and impersonate logged-in users.", file=sys.stderr)
+    print("", file=sys.stderr)
+    print("  Fix: either restrict to loopback by setting", file=sys.stderr)
+    print("    MEMORY_BIND_HOST=127.0.0.1", file=sys.stderr)
+    print("  OR run behind a TLS-terminating reverse proxy and set", file=sys.stderr)
+    print("    MEMORY_COOKIE_SECURE=1", file=sys.stderr)
+    print("=" * 72, file=sys.stderr)
+
+
 def _start_foreground(port: int) -> None:
     """Run the HTTP server in the foreground (attached to console)."""
     global _http_mode
     _http_mode = True
-    mcp.settings.host = "0.0.0.0"
+    bind_host = _resolve_bind_host()
+    _warn_insecure_bind(bind_host)
+    mcp.settings.host = bind_host
     mcp.settings.port = port
     mcp.settings.transport_security.enable_dns_rebinding_protection = False
     mcp.settings.transport_security.allowed_hosts = ["*"]
@@ -902,9 +947,9 @@ def _start_foreground(port: int) -> None:
     app.add_middleware(SecurityHeadersMiddleware)
 
     _write_pid(port)
-    print(f"NotNativeMemory MCP server starting on http://0.0.0.0:{port} (foreground)")
+    print(f"NotNativeMemory MCP server starting on http://{bind_host}:{port} (foreground)")
     try:
-        uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+        uvicorn.run(app, host=bind_host, port=port, log_level="info")
     finally:
         _cleanup_pid()
 
@@ -984,7 +1029,7 @@ if __name__ == "__main__":
         pid, port = _read_pid()
         if pid and _is_process_alive(pid):
             print(f"NotNativeMemory server is running (PID {pid}, port {port})")
-            print(f"  Endpoint: http://0.0.0.0:{port}/mcp")
+            print(f"  Endpoint: http://{_resolve_bind_host()}:{port}/mcp")
         elif pid:
             print(f"PID file exists (PID {pid}) but process is not running.")
             _cleanup_pid()
@@ -1002,7 +1047,7 @@ if __name__ == "__main__":
             restart_port = old_port or _DEFAULT_HTTP_PORT
         proc = _spawn_background(restart_port)
         print(f"NotNativeMemory server restarted (PID {proc.pid}, port {restart_port})")
-        print(f"  Endpoint: http://0.0.0.0:{restart_port}/mcp")
+        print(f"  Endpoint: http://{_resolve_bind_host()}:{restart_port}/mcp")
         sys.exit(0)
 
     elif "--stop" in sys.argv:
@@ -1029,5 +1074,5 @@ if __name__ == "__main__":
         else:
             proc = _spawn_background(port)
             print(f"NotNativeMemory MCP server started (PID {proc.pid}, port {port})")
-            print(f"  Endpoint: http://0.0.0.0:{port}/mcp")
+            print(f"  Endpoint: http://{_resolve_bind_host()}:{port}/mcp")
             print(f"  Stop:     python server.py --stop")

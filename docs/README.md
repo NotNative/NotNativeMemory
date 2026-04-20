@@ -226,6 +226,30 @@ Run the server on one machine, connect from everywhere. No local install needed 
 1. **Server machine:** Run the install script, start with `python server.py --http`
 2. **Client machines:** Just add the HTTP config pointing to the server's hostname
 
+## Deployment Shapes
+
+Pick the shape that matches where the server runs. The two env vars that control network posture are `MEMORY_BIND_HOST` (which interface uvicorn listens on) and `MEMORY_COOKIE_SECURE` (whether session and CSRF cookies carry the Secure attribute). Both live in `.env`.
+
+**Loopback-only (safest default; one-user-on-one-machine).**
+No other machine can reach the server over the network. Suitable when only agents running on the same box hit the MCP, or when you access the web GUI from a browser on the same host.
+```
+MEMORY_BIND_HOST=127.0.0.1
+MEMORY_COOKIE_SECURE=
+```
+
+**LAN behind a trusted reverse proxy (TLS on the proxy).**
+Expose `nnm.example.internal` via nginx / Caddy / Traefik terminating TLS, proxying plain HTTP to the MCP. Session cookies now carry `Secure`, so they only flow over TLS.
+```
+MEMORY_BIND_HOST=0.0.0.0
+MEMORY_COOKIE_SECURE=1
+```
+
+**Public via reverse proxy.**
+Same as LAN behind a proxy, plus: the proxy should set `Strict-Transport-Security` with an appropriate `max-age`, and you should strongly consider firewalling the raw MCP port so only the proxy can reach it.
+
+**Plain HTTP on a non-loopback interface (NOT RECOMMENDED).**
+Leaving `MEMORY_BIND_HOST=0.0.0.0` without `MEMORY_COOKIE_SECURE=1` makes the server print a loud warning at startup and keep running. Session cookies then travel in plaintext; anyone on the network path can read them and impersonate logged-in users. Fine only for throwaway dev on a fully trusted LAN.
+
 ## Verify It Works
 
 Open your MCP-configured agent and try:
