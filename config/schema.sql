@@ -197,3 +197,27 @@ BEGIN
             UNIQUE (directory, owner_user_id);
     END IF;
 END $$;
+
+-- Row-Level Security policies. Inert until operators create a
+-- non-superuser DB role AND ENABLE ROW LEVEL SECURITY on each table;
+-- see lib/rls.py and config/migrations/008_rls_foundations.sql.
+
+DROP POLICY IF EXISTS memories_owner_rls ON memories;
+CREATE POLICY memories_owner_rls ON memories
+    USING (owner_user_id = current_setting('app.current_user', true)::uuid)
+    WITH CHECK (owner_user_id = current_setting('app.current_user', true)::uuid);
+
+DROP POLICY IF EXISTS facts_owner_rls ON facts;
+CREATE POLICY facts_owner_rls ON facts
+    USING (owner_user_id = current_setting('app.current_user', true)::uuid)
+    WITH CHECK (owner_user_id = current_setting('app.current_user', true)::uuid);
+
+DROP POLICY IF EXISTS projects_owner_rls ON projects;
+CREATE POLICY projects_owner_rls ON projects
+    USING (owner_user_id = current_setting('app.current_user', true)::uuid)
+    WITH CHECK (owner_user_id = current_setting('app.current_user', true)::uuid);
+
+DROP POLICY IF EXISTS auth_tokens_owner_rls ON auth_tokens;
+CREATE POLICY auth_tokens_owner_rls ON auth_tokens
+    USING (user_id = current_setting('app.current_user', true)::uuid)
+    WITH CHECK (user_id = current_setting('app.current_user', true)::uuid);
