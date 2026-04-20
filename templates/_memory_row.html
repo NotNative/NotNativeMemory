@@ -1,4 +1,6 @@
 <div class="memory" id="memory-{{ m.id }}">
+  <input type="checkbox" name="ids" value="{{ m.id }}" form="bulk-form"
+         style="float:left;margin-right:0.5em;margin-top:0.2em;">
   <button
     hx-delete="/memories/{{ m.id }}"
     hx-target="#memory-{{ m.id }}"

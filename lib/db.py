@@ -947,6 +947,29 @@ async def admin_update_memory(
     return result == "UPDATE 1"
 
 
+async def admin_bulk_delete(
+    memory_ids: List[UUID], owner_user_id: UUID,
+) -> int:
+    """
+    Delete several memories at once, scoped to the caller. IDs that
+    don't exist or belong to another user are silently skipped.
+
+    Returns the number of rows actually deleted.
+    """
+    if not memory_ids:
+        return 0
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM memories WHERE id = ANY($1) AND owner_user_id = $2",
+        memory_ids, owner_user_id,
+    )
+    # asyncpg returns "DELETE N"
+    try:
+        return int(result.split()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
 async def forget_memory(memory_id: UUID, owner_user_id: UUID) -> bool:
     """
     Delete a memory by ID. Only the owner can delete their own memory;

@@ -402,6 +402,59 @@ def register_routes(mcp) -> None:
         # simpler and the full list is one click away.
         return HTMLResponse("", status_code=200)
 
+    @mcp.custom_route("/memories/bulk-delete", methods=["POST"])
+    async def memories_bulk_delete(request: Request):
+        """
+        Delete a set of selected memories in one call. The form posts
+        `ids` once per selected checkbox; we collect them all, parse
+        to UUIDs, and delete owner-scoped. Returns the refreshed
+        /memories panel on HX-Request (HTMX), or redirects otherwise.
+        """
+        redirect = _require_login(request)
+        if redirect:
+            return redirect
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        from lib import db
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        form = await request.form()
+        # getlist is the multi-value accessor in Starlette's FormData.
+        raw_ids = form.getlist("ids")
+        valid_ids = []
+        for raw in raw_ids:
+            try:
+                valid_ids.append(UUID(raw))
+            except (ValueError, TypeError):
+                continue
+
+        deleted = await db.admin_bulk_delete(valid_ids, uid)
+
+        # Refresh the list with any current filters preserved. The
+        # bulk form posts WITHOUT the filter values (to keep the
+        # form simple); reconstruct from the referrer's query string
+        # or fall back to the bare /memories.
+        #
+        # Easy path: if HTMX, use the full-reload redirect via HX-Redirect
+        # header so the client hits /memories?{filters} naturally.
+        if request.headers.get("hx-request"):
+            return HTMLResponse(
+                "",
+                status_code=200,
+                headers={"HX-Redirect": "/memories"},
+            )
+
+        return RedirectResponse(
+            f"/memories?flash=Deleted+{deleted}+memor{'y' if deleted == 1 else 'ies'}",
+            status_code=303,
+        )
+
     @mcp.custom_route("/memories/{memory_id}", methods=["GET"])
     async def memory_detail(request: Request):
         redirect = _require_login(request)
