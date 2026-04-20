@@ -255,6 +255,20 @@ async def memory_store(
     from lib.embeddings import embed
     from lib.db import store_memory, get_or_create_project
     from lib.auth_context import current_user_id
+    from lib.limits import (
+        MAX_MEMORY_CONTENT_BYTES,
+        MAX_TAG_BYTES,
+        PayloadTooLarge,
+        enforce_field_len,
+    )
+
+    # Bound per-field sizes before we pay for embedding and DB work.
+    try:
+        enforce_field_len(content, MAX_MEMORY_CONTENT_BYTES, "content")
+        for t in (tags or []):
+            enforce_field_len(t, MAX_TAG_BYTES, "tag")
+    except PayloadTooLarge as exc:
+        return {"error": str(exc), "stored": False}
 
     owner = current_user_id()
     if owner is None:
@@ -498,6 +512,18 @@ async def memory_fact_add(
 
     from lib.db import add_fact, get_or_create_project
     from lib.auth_context import current_user_id
+    from lib.limits import (
+        MAX_FACT_FIELD_BYTES,
+        PayloadTooLarge,
+        enforce_field_len,
+    )
+
+    try:
+        enforce_field_len(subject, MAX_FACT_FIELD_BYTES, "subject")
+        enforce_field_len(predicate, MAX_FACT_FIELD_BYTES, "predicate")
+        enforce_field_len(object, MAX_FACT_FIELD_BYTES, "object")
+    except PayloadTooLarge as exc:
+        return {"error": str(exc), "stored": False}
 
     owner = current_user_id()
     if owner is None:
@@ -857,9 +883,15 @@ def _start_foreground(port: int) -> None:
     # ride every incoming request.
     import uvicorn
     from lib.auth_middleware import BearerAuthMiddleware
+    from lib.limits import BodySizeLimitMiddleware
 
     app = mcp.streamable_http_app()
+    # Middleware order matters: outer wraps inner. We want the size cap
+    # to reject oversize payloads BEFORE auth resolution spends cycles
+    # on them, so BodySizeLimitMiddleware goes first (added last to the
+    # stack — Starlette composes last-added-outermost).
     app.add_middleware(BearerAuthMiddleware)
+    app.add_middleware(BodySizeLimitMiddleware)
 
     _write_pid(port)
     print(f"NotNativeMemory MCP server starting on http://0.0.0.0:{port} (foreground)")

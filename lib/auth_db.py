@@ -17,6 +17,12 @@ from uuid import UUID
 
 from lib import auth
 from lib.db import get_pool
+from lib.limits import (
+    MAX_PASSWORD_BYTES,
+    MAX_USERNAME_BYTES,
+    PayloadTooLarge,
+    enforce_field_len,
+)
 
 
 _log = logging.getLogger("notnative.auth")
@@ -54,6 +60,14 @@ async def create_user(username: str, password: str) -> Dict[str, Any]:
         raise ValueError("username is required")
     if not password or len(password) < 8:
         raise ValueError("password must be at least 8 characters")
+    # Per-field caps before we spend scrypt time hashing a megabyte
+    # "password". PayloadTooLarge is a ValueError subclass so callers
+    # already-handling ValueError keep working.
+    try:
+        enforce_field_len(username.strip(), MAX_USERNAME_BYTES, "username")
+        enforce_field_len(password, MAX_PASSWORD_BYTES, "password")
+    except PayloadTooLarge as exc:
+        raise ValueError(str(exc))
 
     hashed = auth.hash_secret(password)
     pool = await get_pool()
