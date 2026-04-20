@@ -26,6 +26,7 @@ import base64
 import hashlib
 import hmac
 import secrets
+from typing import Optional
 
 # scrypt cost parameters. OWASP 2024 guidance calls for N>=2**17 for
 # interactive logins. We pick 2**15 because the single-user server
@@ -157,3 +158,35 @@ def is_token_shaped(candidate: str) -> bool:
         and candidate.startswith(_TOKEN_PREFIX)
         and len(candidate) > len(_TOKEN_PREFIX) + 16
     )
+
+
+# A fixed scrypt hash computed once at module load, used by
+# verify_or_dummy when no real user exists to verify against. Generated
+# with the same cost parameters as live user hashes so it takes the
+# same wall time. The plaintext is irrelevant — this hash will never
+# verify against any password a caller would submit by accident, and
+# secrets.compare_digest is constant-time regardless.
+_DUMMY_VERIFY_HASH = hash_secret("nnm-dummy-verify-placeholder-" + _b64(secrets.token_bytes(16)))
+
+
+def verify_or_dummy(password: str, stored_hash: Optional[str]) -> bool:
+    """
+    Timing-equalized password verify for the login path.
+
+    When `stored_hash` is None (the submitted username did not match a
+    user), we still run scrypt against a fixed dummy hash so total
+    handler wall time does not distinguish "no such user" from "bad
+    password". Both branches then return False via the same scrypt
+    compare path; response time leaks nothing about username existence.
+
+    When `stored_hash` is provided, behaves exactly like verify_secret.
+
+    Callers must NOT short-circuit to "no such user" before reaching
+    this function; the whole point is that the timing path goes through
+    scrypt regardless of user existence.
+    """
+    if stored_hash is None:
+        # Discard the result; always False for a missing user.
+        verify_secret(password, _DUMMY_VERIFY_HASH)
+        return False
+    return verify_secret(password, stored_hash)

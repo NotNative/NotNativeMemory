@@ -128,12 +128,13 @@ def register_routes(mcp) -> None:
             return _too_many_requests(retry, "too many login attempts")
 
         record = await auth_db.get_user_by_username(username)
-        # Auth-generic error: attackers can't probe for valid usernames.
+        # verify_or_dummy runs scrypt against a fixed hash even when
+        # `record` is None, so total handler time does not distinguish
+        # "no such user" from "bad password". Auth-generic error text
+        # goes to the caller either way.
         from lib import auth
-        if record is None:
-            rate_limit.record_login_failure(ip, username)
-            return JSONResponse({"error": "invalid credentials"}, status_code=401)
-        if not auth.verify_secret(password, record["password_hash"]):
+        stored = record["password_hash"] if record else None
+        if not auth.verify_or_dummy(password, stored):
             rate_limit.record_login_failure(ip, username)
             return JSONResponse({"error": "invalid credentials"}, status_code=401)
 

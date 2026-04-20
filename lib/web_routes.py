@@ -155,7 +155,12 @@ def register_routes(mcp) -> None:
             return resp
 
         record = await auth_db.get_user_by_username(username)
-        if record is None or not auth.verify_secret(password, record["password_hash"]):
+        # verify_or_dummy runs scrypt against a fixed hash when the user
+        # does not exist, so response time does not distinguish "no
+        # such user" from "bad password". Username enumeration via
+        # timing is what this closes.
+        stored = record["password_hash"] if record else None
+        if not auth.verify_or_dummy(password, stored):
             rate_limit.record_login_failure(ip, username)
             return _render_with_csrf(
                 request, "login.html",

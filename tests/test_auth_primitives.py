@@ -73,6 +73,26 @@ def run():
     check("other token rejects against this hash",
           not auth.verify_secret(t2, th))
 
+    # -- verify_or_dummy constant-time fallback -----------------------------
+    h = auth.hash_secret("real-password-xyz")
+    check("verify_or_dummy accepts matching real hash",
+          auth.verify_or_dummy("real-password-xyz", h))
+    check("verify_or_dummy rejects wrong password against real hash",
+          not auth.verify_or_dummy("wrong", h))
+    check("verify_or_dummy returns False when stored_hash is None",
+          not auth.verify_or_dummy("anything", None))
+    # Rough timing check: a None stored_hash should still run scrypt,
+    # so the None path should take at least half as long as a real
+    # wrong-password verify. Not a tight equality (scheduler noise) but
+    # catches the bug where None short-circuits to a fast return.
+    import time
+    t0 = time.perf_counter(); auth.verify_or_dummy("probe", h); real = time.perf_counter() - t0
+    t0 = time.perf_counter(); auth.verify_or_dummy("probe", None); dummy = time.perf_counter() - t0
+    check(
+        "verify_or_dummy(None) takes comparable time to real verify",
+        dummy > real * 0.4,
+    )
+
     print("---")
     print("all passed" if failed == 0 else f"{failed} FAILED")
     return 0 if failed == 0 else 1
