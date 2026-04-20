@@ -123,18 +123,23 @@ def _get_migrations_dir() -> str:
     return _MIGRATIONS_DIR
 
 
-async def _run_migrations(pool: asyncpg.Pool) -> int:
+async def _run_migrations_on_conn(conn: asyncpg.Connection) -> int:
     """
-    Apply any pending migrations from config/migrations/.
+    Apply any pending migrations from config/migrations/ using the
+    given connection. The caller is responsible for opening/closing
+    the connection; we just run SQL over it.
 
-    Creates the schema_migrations tracking table if it doesn't exist
-    (self-bootstrapping). Scans for *.sql files sorted by name,
-    skips any already recorded, and applies the rest in order.
+    Under default single-role config this connection comes from the
+    app pool. Under dual-role config, migrations run over a one-shot
+    superuser connection so DDL (CREATE POLICY, ALTER TABLE ENABLE
+    RLS, etc.) is always authorized, even when the app role is a
+    non-superuser that cannot ALTER tables.
 
-    Returns the number of migrations applied.
+    Creates the schema_migrations tracking table if missing, scans
+    *.sql files sorted by name, skips already-applied, applies the
+    rest in order. Returns the number applied.
     """
-    # Bootstrap: ensure the tracking table exists
-    await pool.execute("""
+    await conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_migrations (
             filename TEXT PRIMARY KEY,
             applied_at TIMESTAMPTZ DEFAULT now()
@@ -146,7 +151,6 @@ async def _run_migrations(pool: asyncpg.Pool) -> int:
         _log.debug("No migrations directory at %s", migrations_dir)
         return 0
 
-    # List migration files sorted by name (numeric prefix = order)
     migration_files = sorted(
         f for f in os.listdir(migrations_dir)
         if f.endswith(".sql")
@@ -154,8 +158,7 @@ async def _run_migrations(pool: asyncpg.Pool) -> int:
     if not migration_files:
         return 0
 
-    # Get already-applied migrations
-    applied_rows = await pool.fetch(
+    applied_rows = await conn.fetch(
         "SELECT filename FROM schema_migrations"
     )
     applied = {row["filename"] for row in applied_rows}
@@ -171,13 +174,12 @@ async def _run_migrations(pool: asyncpg.Pool) -> int:
             sql = f.read()
 
         try:
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    await conn.execute(sql)
-                    await conn.execute(
-                        "INSERT INTO schema_migrations (filename) VALUES ($1)",
-                        filename,
-                    )
+            async with conn.transaction():
+                await conn.execute(sql)
+                await conn.execute(
+                    "INSERT INTO schema_migrations (filename) VALUES ($1)",
+                    filename,
+                )
             applied_count += 1
             _log.info("Applied migration: %s", filename)
         except Exception as exc:
@@ -193,9 +195,26 @@ async def get_pool() -> asyncpg.Pool:
     """
     Get or create the asyncpg connection pool.
 
-    Reads connection details from environment variables.
-    Pool is created once and cached for the process lifetime.
-    On first creation, applies any pending database migrations.
+    Reads connection details from environment variables. Pool is
+    created once and cached for the process lifetime.
+
+    Dual-role support:
+        MEMORY_DB_USER / MEMORY_DB_PASSWORD always point at the
+        migration/admin role (typically the DB owner / superuser).
+        When MEMORY_APP_DB_USER / MEMORY_APP_DB_PASSWORD are set,
+        the app pool uses THAT role, and migrations run over a
+        separate one-shot connection as the migration role. When
+        the app vars are absent, the app pool uses the migration
+        role (backward-compatible single-role setup).
+
+        The split lets operators enable Postgres RLS (see
+        docs/rls-activation.md): RLS is always bypassed by
+        superusers, so the app needs a non-superuser role for the
+        policies to bite — but migrations still need superuser
+        privilege to ALTER TABLE etc.
+
+    On first call, migrations run BEFORE the app pool is created,
+    so the app pool is guaranteed to see a fully-migrated schema.
     """
     global _pool
     if _pool is not None:
@@ -207,29 +226,53 @@ async def get_pool() -> asyncpg.Pool:
     host = os.environ.get("MEMORY_DB_HOST", "localhost")
     port = int(os.environ.get("MEMORY_DB_PORT", "5433"))
     database = os.environ.get("MEMORY_DB_NAME", "notnative_memory")
-    user = os.environ.get("MEMORY_DB_USER", "memory")
-    password = os.environ.get("MEMORY_DB_PASSWORD", "")
 
-    if not password:
+    mig_user = os.environ.get("MEMORY_DB_USER", "memory")
+    mig_password = os.environ.get("MEMORY_DB_PASSWORD", "")
+    if not mig_password:
         raise ValueError(
             "MEMORY_DB_PASSWORD not set. Run the install script or check .env"
         )
 
-    _pool = await asyncpg.create_pool(
-        host=host, port=port, database=database,
-        user=user, password=password,
-        min_size=1, max_size=_MAX_POOL_SIZE,
+    # App-role credentials default to the migration role so existing
+    # installs keep working without touching .env.
+    app_user = os.environ.get("MEMORY_APP_DB_USER", "").strip() or mig_user
+    app_password = (
+        os.environ.get("MEMORY_APP_DB_PASSWORD", "").strip()
+        or mig_password
     )
+    dual_role = app_user != mig_user
 
-    # Apply any pending migrations on first connect
+    # Run migrations over a one-shot connection as the migration role.
     try:
-        applied = await _run_migrations(_pool)
-        if applied:
-            _log.info("Applied %d pending migration(s)", applied)
+        mig_conn = await asyncpg.connect(
+            host=host, port=port, database=database,
+            user=mig_user, password=mig_password,
+        )
+        try:
+            applied = await _run_migrations_on_conn(mig_conn)
+            if applied:
+                _log.info("Applied %d pending migration(s)", applied)
+        finally:
+            await mig_conn.close()
     except Exception as exc:
         _log.error("Migration check failed: %s", exc)
         # Don't prevent startup — the server can still work with
         # existing schema. Missing tables will error on first use.
+
+    # Create the app pool. In single-role setups this is the same role
+    # that ran migrations. In dual-role setups it's the non-superuser
+    # app role.
+    _pool = await asyncpg.create_pool(
+        host=host, port=port, database=database,
+        user=app_user, password=app_password,
+        min_size=1, max_size=_MAX_POOL_SIZE,
+    )
+    if dual_role:
+        _log.info(
+            "DB dual-role: migrations ran as %r, app pool as %r",
+            mig_user, app_user,
+        )
 
     return _pool
 
