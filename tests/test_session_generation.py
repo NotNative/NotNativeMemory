@@ -32,7 +32,7 @@ sys.path.insert(0, ROOT)
 
 
 async def run() -> int:
-    from lib import auth_db, db
+    from lib import auth_db, db, rls
 
     failed = 0
 
@@ -62,9 +62,12 @@ async def run() -> int:
             resolved is not None and resolved["user_id"] == uid,
         )
 
-        row = await pool.fetchrow(
-            "SELECT issued_generation FROM auth_tokens WHERE id = $1", tid,
-        )
+        # auth_tokens is RLS'd; use admin_conn for direct verification
+        # SELECTs that span user context.
+        async with rls.admin_conn(pool) as conn:
+            row = await conn.fetchrow(
+                "SELECT issued_generation FROM auth_tokens WHERE id = $1", tid,
+            )
         check(
             "token.issued_generation snapshots 0 at mint",
             row["issued_generation"] == 0,
@@ -85,10 +88,11 @@ async def run() -> int:
             (await auth_db.resolve_token(fresh["token"])) is not None,
         )
 
-        row2 = await pool.fetchrow(
-            "SELECT issued_generation FROM auth_tokens WHERE id = $1",
-            UUID(fresh["id"]),
-        )
+        async with rls.admin_conn(pool) as conn:
+            row2 = await conn.fetchrow(
+                "SELECT issued_generation FROM auth_tokens WHERE id = $1",
+                UUID(fresh["id"]),
+            )
         check(
             "fresh token.issued_generation = 1",
             row2["issued_generation"] == 1,

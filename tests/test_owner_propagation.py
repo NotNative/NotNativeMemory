@@ -24,7 +24,7 @@ sys.path.insert(0, ROOT)
 
 
 async def run() -> int:
-    from lib import auth_db, db
+    from lib import auth_db, db, rls
     from lib.auth_context import set_current_user_id, current_user_id
 
     failed = 0
@@ -59,17 +59,25 @@ async def run() -> int:
     check("contextvar reflects set", current_user_id() == uid)
 
     # 3. Create a project and verify owner_user_id lands.
+    #
+    # Verification SELECTs use rls.admin_conn because under FORCE RLS
+    # the pool connects as a non-superuser whose `app.current_user`
+    # is unset outside app_conn blocks — so a bare pool.fetchrow sees
+    # zero rows. admin_conn sets the sentinel bypass so we can inspect
+    # any user's data for test verification. This is test code, not
+    # production; the bypass is fine here.
     project_id = await db.get_or_create_project(
         test_project_dir,
         owner_user_id=uid,
     )
-    row = await pool.fetchrow(
-        "SELECT owner_user_id FROM projects WHERE id = $1",
-        project_id,
-    )
+    async with rls.admin_conn(pool) as conn:
+        row = await conn.fetchrow(
+            "SELECT owner_user_id FROM projects WHERE id = $1",
+            project_id,
+        )
     check(
         "project.owner_user_id matches",
-        row["owner_user_id"] == uid,
+        row is not None and row["owner_user_id"] == uid,
     )
 
     # 4. store_memory with an arbitrary 768-dim zero vector (bypasses
@@ -82,9 +90,10 @@ async def run() -> int:
         owner_user_id=uid,
         importance="normal",
     )
-    row = await pool.fetchrow(
-        "SELECT owner_user_id FROM memories WHERE id = $1", mem_id,
-    )
+    async with rls.admin_conn(pool) as conn:
+        row = await conn.fetchrow(
+            "SELECT owner_user_id FROM memories WHERE id = $1", mem_id,
+        )
     check(
         "memories.owner_user_id matches",
         row is not None and row["owner_user_id"] == uid,
@@ -98,10 +107,11 @@ async def run() -> int:
         obj="passed",
         owner_user_id=uid,
     )
-    row = await pool.fetchrow(
-        "SELECT owner_user_id FROM facts WHERE id = $1",
-        UUID(result["id"]),
-    )
+    async with rls.admin_conn(pool) as conn:
+        row = await conn.fetchrow(
+            "SELECT owner_user_id FROM facts WHERE id = $1",
+            UUID(result["id"]),
+        )
     check(
         "facts.owner_user_id matches",
         row is not None and row["owner_user_id"] == uid,
@@ -123,9 +133,10 @@ async def run() -> int:
     # (tokens, projects, memories, facts) via the ON DELETE CASCADE
     # FKs on users. Belt-and-suspenders: explicitly wipe the ones
     # we know about in case a future schema change weakens that
-    # cascade.
-    await pool.execute("DELETE FROM memories WHERE id = $1", mem_id)
-    await pool.execute("DELETE FROM projects WHERE id = $1", project_id)
+    # cascade. Admin conn so the DELETEs aren't filtered by RLS.
+    async with rls.admin_conn(pool) as conn:
+        await conn.execute("DELETE FROM memories WHERE id = $1", mem_id)
+        await conn.execute("DELETE FROM projects WHERE id = $1", project_id)
     await pool.execute("DELETE FROM users WHERE id = $1", uid)
     await db.close_pool()
 

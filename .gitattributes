@@ -1,0 +1,23 @@
+# Default: let git auto-detect text vs binary.
+* text=auto
+
+# Files that MUST have LF endings regardless of the checking-out
+# platform. Shell scripts and Docker init scripts get executed on
+# Linux; a CRLF shebang makes the kernel look for /bin/bash\r which
+# doesn't exist, and the script silently fails to run.
+*.sh            text eol=lf
+Dockerfile      text eol=lf
+*.yml           text eol=lf
+*.yaml          text eol=lf
+
+# SQL migrations run through psql and asyncpg; either handles CRLF,
+# but LF keeps diffs clean across platforms.
+*.sql           text eol=lf
+
+# Python source runs fine with either, but pin LF for diff cleanliness.
+*.py            text eol=lf
+
+# Keep Windows-native scripts as CRLF.
+*.ps1           text eol=crlf
+*.bat           text eol=crlf
+*.cmd           text eol=crlf
