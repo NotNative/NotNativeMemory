@@ -21,7 +21,7 @@
     {% if t.revoked_at %}
       <span>revoked {{ t.revoked_at[:19].replace('T',' ') }}</span>
     {% endif %}
-    <span style="color:#999;font-family:ui-monospace,monospace;font-size:0.8em;">
+    <span style="color:var(--faint-fg);font-family:ui-monospace,monospace;font-size:0.8em;">
       id {{ t.id[:8] }}
     </span>
   </div>
