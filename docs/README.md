@@ -365,16 +365,16 @@ claude/
     lmstudio-config.json    - LM Studio MCP config template
     hooks/
         README.md               - Hook setup and adaptation guide
+        session_start.py        - SessionStart hook (working-continuity at session start)
         user_prompt_inject.py   - UserPromptSubmit hook (context on every prompt)
-        memory_inject.py        - PreToolUse hook (action-specific gotchas)
         compact_guard.py        - PreCompact hook (rules + top memories)
         merge_hooks.py          - Idempotent installer for ~/.claude/settings.json
         hooks-config.json       - Hook registration snippet template
 nnc/
     hooks/
         README.md               - NNC hook setup and payload reference
+        session_start.py        - SessionStart hook (working-continuity at session start)
         user_prompt_inject.py   - UserPromptSubmit hook (context on every prompt)
-        memory_inject.py        - PreToolUse hook (edit_file/write_file/read_file/bash)
         compact_guard.py        - PreCompact hook (rules + top memories)
         merge_hooks.py          - Idempotent installer for ~/.nnc/settings.json
         hooks-config.json       - Hook registration snippet template
