@@ -86,11 +86,22 @@ No server on this machine — the hooks talk to the remote MCP URL configured at
 
 ## Authentication
 
-The server supports Bearer-token auth. The first `POST /auth/register`
-on a fresh server becomes admin and adopts pre-auth memories;
-subsequent registrations require an admin's token. A localhost
-bypass (`MEMORY_AUTH_LOCALHOST_BYPASS=1`) preserves the zero-friction
-single-user case on loopback-only deployments.
+The server supports Bearer-token auth with open self-registration.
+No admin concept: every user sees only their own memories, including
+their own `_global` and `_domain_*` scopes.
+
+Two operational modes picked at install time:
+
+- **Solo mode** (`MEMORY_AUTH_LOCALHOST_BYPASS=1` +
+  `MEMORY_AUTH_LOCALHOST_USER=<username>`): loopback callers are
+  implicitly authenticated as the named user. Hooks and on-host
+  agents work without a token. Explicit Bearer headers still win,
+  so a second user with their own token can still use the server
+  from the same machine without being silently overridden.
+- **Multi-user mode**: bypass off, every caller must present a
+  valid Bearer token. Registration, login, and token management
+  go through `POST /auth/register`, `POST /auth/login`, and
+  `GET|POST|DELETE /auth/tokens`.
 
 Full API reference including curl examples for login, token
 management, and client setup: [`docs/api-auth.md`](api-auth.md).

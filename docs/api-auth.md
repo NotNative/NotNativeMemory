@@ -1,8 +1,7 @@
 # Auth API
 
-Bearer-token auth for the MCP server. Shipped on `feature/mcp-hardening`
-(2026-04-19). First `POST /auth/register` on a fresh server becomes
-admin and adopts every pre-auth memory, project, and fact.
+Bearer-token auth for the MCP server. Open self-registration; every
+user sees only their own memories. No admin concept.
 
 All endpoints return JSON. Errors look like `{"error": "..."}` with an
 HTTP 4xx status.
@@ -16,36 +15,49 @@ http://memory.example.com:9500   # remote deployment
 http://localhost:9500            # local server
 ```
 
+## Operational modes
+
+The server runs in one of two modes, chosen at install time.
+
+**Solo mode** (default for single-user personal use):
+- `MEMORY_AUTH_LOCALHOST_BYPASS=1`
+- `MEMORY_AUTH_LOCALHOST_USER=<username>`
+- Loopback requests without an `Authorization` header are
+  authenticated as the named user. This is what lets hooks and
+  on-host agents reach the server with no token.
+- An explicit Bearer header ALWAYS wins: a request from loopback
+  that carries a token is authenticated by that token, not the
+  bypass user.
+
+**Multi-user mode** (deployments with more than one person):
+- `MEMORY_AUTH_LOCALHOST_BYPASS=0` (or unset)
+- Every caller must present a valid Bearer token. No bypass.
+
+Switching solo to multi is a config flip plus a server restart; no
+data migration needed because solo-mode writes are already tagged
+with a real `owner_user_id`.
+
 ## Authentication model
 
 - **Password** hashes with `hashlib.scrypt` (salted, cost params
   stored with the digest so they can be raised later without
-  re-hashing).
+  re-hashing). Minimum 8 characters.
 - **Tokens** look like `nnm_<43 urlsafe chars>` (256 bits of entropy).
   The raw value is shown exactly once at creation; the database only
   ever sees the scrypt hash.
 - Every protected route expects `Authorization: Bearer nnm_...`.
 - Revocation is immediate (partial index on `revoked_at IS NULL`).
-
-## Localhost bypass
-
-Set `MEMORY_AUTH_LOCALHOST_BYPASS=1` in the server's environment to
-let loopback callers act as admin without a token. Intended for the
-single-user personal-scope case where the server binds to 127.0.0.1
-only. When the server binds to a non-loopback interface (the default
-for any shared deployment), leave the env var unset so every call
-must present a token.
+- Each user is isolated: `_global` for user A is a different row than
+  `_global` for user B. Same for domain scopes and local projects.
 
 ## Endpoints
 
 ### `POST /auth/register`
 
-Create a user. First call on a fresh server bootstraps an admin and
-adopts pre-auth rows. Subsequent calls require an existing admin's
-Bearer token.
+Open self-registration. Anyone can create a user; the account has
+no special privileges and only sees memories it writes itself.
 
 ```bash
-# First user (no auth required)
 curl -X POST http://memory.example.com:9500/auth/register \
   -H 'Content-Type: application/json' \
   -d '{"username":"alice","password":"at-least-8-chars"}'
@@ -57,27 +69,13 @@ Response (201):
   "user": {
     "id": "...",
     "username": "alice",
-    "is_admin": true,
     "created_at": "2026-04-19T..."
-  },
-  "adopted": {"projects": 1, "memories": 1, "facts": 1},
-  "bootstrap_admin": true
+  }
 }
 ```
 
-```bash
-# Admin adds another user
-curl -X POST http://memory.example.com:9500/auth/register \
-  -H 'Authorization: Bearer nnm_ADMIN_TOKEN' \
-  -H 'Content-Type: application/json' \
-  -d '{"username":"alice","password":"..."}'
-```
-
-Response (201): same shape without `adopted` / `bootstrap_admin`.
-
 Errors:
 - 400 if username/password missing or password under 8 chars
-- 403 if a user already exists and the caller isn't admin
 - 409 if username is taken
 
 ### `POST /auth/login`
@@ -94,7 +92,7 @@ curl -X POST http://memory.example.com:9500/auth/login \
 Response (200):
 ```json
 {
-  "user": {"id":"...","username":"alice","is_admin":true},
+  "user": {"id":"...","username":"alice"},
   "token": {
     "id": "...",
     "user_id": "...",
@@ -193,14 +191,13 @@ Response (200):
 {
   "user_id": "...",
   "username": "alice",
-  "is_admin": true,
   "localhost_bypass": false
 }
 ```
 
-With the bypass enabled and no token sent from loopback:
+From loopback in solo mode without a token:
 ```json
-{"user_id": null, "username": null, "is_admin": true, "localhost_bypass": true}
+{"user_id": "...", "username": "<solo-user>", "localhost_bypass": true}
 ```
 
 ### `GET /health`
@@ -235,10 +232,29 @@ claude mcp add --transport http memory --scope user \
 }
 ```
 
+### NotNativeAgent
+
+`~/.nna/settings.json`:
+
+```json
+{
+  "mcpServers": {
+    "memory": {
+      "type": "http",
+      "url": "http://memory.example.com:9500/mcp",
+      "headers": {
+        "Authorization": "Bearer nnm_YOUR_TOKEN"
+      }
+    }
+  }
+}
+```
+
 ### Hooks
 
 `claude/hooks/hooks.env` and `nnc/hooks/hooks.env` only carry
-`MEMORY_MCP_URL` today. When the server requires auth, extend
+`MEMORY_MCP_URL` today. In solo mode the hooks work without a token
+because bypass handles loopback. In multi-user mode, extend
 `merge_hooks.py::_write_hooks_env` to also write
 `MEMORY_MCP_TOKEN=nnm_...` and update the three hook scripts to set
 `Authorization: Bearer <token>` on their `urllib.request.Request`
@@ -255,20 +271,27 @@ per-IP throttling to the middleware.
 
 ## Rolling out to an existing server
 
+Fresh install:
+1. Run the installer, pick solo or multi-user mode.
+2. Solo: installer creates a single user, writes their name to
+   `.env` as `MEMORY_AUTH_LOCALHOST_USER`. No manual steps.
+3. Multi-user: start the server, each user registers themselves
+   via `POST /auth/register` and logs in for a token.
+
+Upgrade from a pre-auth install:
 1. Deploy the new code.
-2. Migration `005_auth_users.sql` runs on first tool call. Existing
-   memories stay accessible because `owner_user_id` is nullable and
-   no query filters on it yet.
-3. Hit `POST /auth/register` once, as yourself, to become admin.
-   Pre-existing memories get adopted in the same call.
-4. Update your Claude Code / LM Studio config to send a Bearer
-   header, using the token returned by `/auth/login`.
-5. Keep `MEMORY_AUTH_LOCALHOST_BYPASS` unset on any non-loopback
-   deployment.
+2. Migrations 005 and 006 run on first tool call. 006 needs no
+   orphan rows: either you already have a Phase 5 admin (orphans
+   were adopted at registration time) or you have exactly one
+   user post-005 (006 auto-adopts orphans to that user).
+3. If the migration halts with an orphan-count error, either
+   register a single user first or assign orphans manually, then
+   restart the server.
 
 ## Rolling back
 
-Apply `config/migrations/rollback/005_auth_users.sql` manually
-(inside a transaction). Drops users, auth_tokens, and the
-`owner_user_id` columns. Memory and fact rows survive with ownership
-links removed.
+Apply `config/migrations/rollback/006_per_user_scoping.sql` then
+`005_auth_users.sql` manually (inside transactions). Rollback 006
+fails if two users share a directory value; merge or delete those
+rows first. Rollback 005 drops users, auth_tokens, and the
+`owner_user_id` columns entirely.

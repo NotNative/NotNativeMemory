@@ -867,18 +867,53 @@ def _start_foreground(port: int) -> None:
         _cleanup_pid()
 
 
+async def _cli_create_user(username: str) -> int:
+    """
+    Create a user from the command line. Prompts for the password on
+    stdin (hidden input). Useful for solo-mode installs and for
+    bootstrapping the first account on a multi-user deployment before
+    opening HTTP registration.
+    """
+    import getpass
+    from lib import auth_db
+    import asyncpg
+
+    password = getpass.getpass(f"Password for {username!r}: ")
+    confirm = getpass.getpass("Confirm password: ")
+    if password != confirm:
+        print("Passwords do not match.", file=sys.stderr)
+        return 1
+
+    try:
+        user = await auth_db.create_user(username, password)
+    except asyncpg.UniqueViolationError:
+        print(f"Username {username!r} is already taken.", file=sys.stderr)
+        return 1
+    except ValueError as exc:
+        print(f"{exc}", file=sys.stderr)
+        return 1
+
+    print(f"Created user {user['username']} ({user['id']}).")
+    print("Next step: login to get a Bearer token.")
+    print(f"  curl -X POST http://localhost:{_DEFAULT_HTTP_PORT}/auth/login "
+          f"-H 'Content-Type: application/json' "
+          f"-d '{{\"username\":\"{user['username']}\",\"password\":\"...\"}}'")
+    return 0
+
+
 if __name__ == "__main__":
     if "--help" in sys.argv or "-h" in sys.argv:
         print("NotNativeMemory - MCP Memory Server")
         print()
         print("Usage:")
-        print("  python server.py [PORT]           Start HTTP server (default, port 9500)")
-        print("  python server.py --foreground     HTTP mode, attached to console")
-        print("  python server.py --mcp            stdio mode (for MCP client configs)")
-        print("  python server.py --stop           Stop a running HTTP server")
-        print("  python server.py --restart, -r    Stop and restart the HTTP server")
-        print("  python server.py --status         Show server status")
-        print("  python server.py --help           Show this help")
+        print("  python server.py [PORT]                Start HTTP server (default, port 9500)")
+        print("  python server.py --foreground          HTTP mode, attached to console")
+        print("  python server.py --mcp                 stdio mode (for MCP client configs)")
+        print("  python server.py --stop                Stop a running HTTP server")
+        print("  python server.py --restart, -r         Stop and restart the HTTP server")
+        print("  python server.py --status              Show server status")
+        print("  python server.py --create-user NAME    Create a user (prompts for password)")
+        print("  python server.py --help                Show this help")
         print()
         print("The default mode is HTTP (background). Use --mcp for stdio transport")
         print("in Claude Code / LM Studio MCP client configurations.")
@@ -894,6 +929,14 @@ if __name__ == "__main__":
         print()
         print("Configuration is loaded from .env in the server directory.")
         sys.exit(0)
+
+    elif "--create-user" in sys.argv:
+        idx = sys.argv.index("--create-user")
+        if idx + 1 >= len(sys.argv):
+            print("Usage: python server.py --create-user <username>", file=sys.stderr)
+            sys.exit(2)
+        import asyncio
+        sys.exit(asyncio.run(_cli_create_user(sys.argv[idx + 1])))
 
     elif "--status" in sys.argv:
         pid, port = _read_pid()
