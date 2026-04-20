@@ -48,6 +48,24 @@ MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://localhost:9500/mcp")
 MAX_TOKENS = int(os.environ.get("MEMORY_SESSION_MAX_TOKENS", "600"))
 TIMEOUT_SECONDS = 5
 
+# The MCP server requires auth since Phase 5. Two paths for hooks:
+#   1. Set MEMORY_MCP_TOKEN in hooks.env — a Bearer token minted via
+#      the /tokens web page or POST /auth/login. Works everywhere.
+#   2. Configure MEMORY_AUTH_LOCALHOST_BYPASS=1 +
+#      MEMORY_AUTH_LOCALHOST_USER=<name> in the SERVER's .env — lets
+#      unauthenticated loopback calls auth-as that named user. Simpler
+#      for single-user local dev but only works when the server binds
+#      loopback-only and the hook runs on the same host.
+# When MEMORY_MCP_TOKEN is blank, we send no Authorization header, which
+# the server will accept under option 2 and reject under token auth.
+_MCP_TOKEN = os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+}
+if _MCP_TOKEN:
+    _HEADERS["Authorization"] = f"Bearer {_MCP_TOKEN}"
+
 # Standing reminder about the deferred-tools issue. Claude Code's
 # system message marks MCP tools as "deferred" and does not load their
 # schemas up front, which means `mcp__memory__*` tools are not callable
@@ -86,10 +104,7 @@ def _fetch_context(project_dir: str) -> list:
     req = urllib.request.Request(
         MCP_URL,
         data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        headers=dict(_HEADERS),
         method="POST",
     )
 

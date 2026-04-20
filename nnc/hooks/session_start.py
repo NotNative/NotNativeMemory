@@ -38,6 +38,17 @@ MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://localhost:9500/mcp")
 MAX_TOKENS = int(os.environ.get("MEMORY_SESSION_MAX_TOKENS", "600"))
 TIMEOUT_SECONDS = 5
 
+# Auth: set MEMORY_MCP_TOKEN in hooks.env to send Authorization: Bearer.
+# Blank token relies on the server-side localhost bypass. See the hooks
+# README for the two supported configurations.
+_MCP_TOKEN = os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+}
+if _MCP_TOKEN:
+    _HEADERS["Authorization"] = f"Bearer {_MCP_TOKEN}"
+
 
 def _fetch_context(project_dir: str) -> list:
     """Call memory_context via HTTP and return the result list."""
@@ -57,10 +68,7 @@ def _fetch_context(project_dir: str) -> list:
     req = urllib.request.Request(
         MCP_URL,
         data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        headers=dict(_HEADERS),
         method="POST",
     )
 

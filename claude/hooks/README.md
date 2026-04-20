@@ -8,31 +8,64 @@ Each fires at a different moment and serves a different purpose:
 
 | Hook | Fires | Purpose |
 |------|-------|---------|
-| `user_prompt_inject.py` | user sends a message | prime the whole turn with context relevant to the request |
-| `memory_inject.py` | before Edit / Write / Bash | surface action-specific gotchas right before risky operations |
+| `session_start.py` | session start / resume / post-compact | prime the fresh session with the hottest + most-critical memories for the project |
+| `user_prompt_inject.py` | user sends a message | prime the turn with context relevant to the specific request |
 | `compact_guard.py` | before context compaction | preserve critical rules + top memories through compression |
 
-The `UserPromptSubmit` hook catches the moment decisions get framed (when the user states intent). The `PreToolUse` hook catches the moment actions happen (targeted, specific context). Together they give coverage across both phases of a turn.
+`SessionStart` covers the cold-boot case (brand new window, resumed conversation, right after compaction). `UserPromptSubmit` covers every subsequent turn with request-specific context. `PreCompact` is the last chance to smuggle operational discipline through the compression event. Together they give coverage across the whole session lifecycle.
+
+A previous `PreToolUse` hook (`memory_inject.py`) was retired 2026-04-19 because firing on every Edit/Write/Bash added noise without proportional signal — session-start priming plus prompt-time injection gave better coverage with fewer false positives. The install script auto-sweeps retired hook entries from `~/.claude/settings.json`.
 
 ## What they do
+
+### `session_start.py` (SessionStart)
+
+Fires at the very start of a session, when the user resumes a prior conversation, and immediately after context compaction. Calls `memory_context` (not a keyword search — the server ranks by importance + thermal activity) and emits the top picks as working-continuity context plus a reminder to ToolSearch-load the deferred MCP tools so `memory_store` / `memory_search` / etc. are callable without the user having to ask.
+
+Output channel is plain stdout rather than the JSON envelope — `hookSpecificOutput` is not in the schema-approved shape for `SessionStart` in current Claude Code versions, and stdout is the universal injection channel the harness folds into session context.
 
 ### `user_prompt_inject.py` (UserPromptSubmit)
 
 Fires when the user sends a message. Uses the prompt text as a semantic query and injects top matches as `additionalContext` so cross-cutting preferences (e.g. "no em dashes"), past decisions, and domain-level gotchas are in scope before the model starts reasoning.
 
-Skips trivial prompts under 15 characters (configurable) to avoid noise on "ok" / "yes" / "continue." Uses a higher similarity floor than `PreToolUse` to filter out weak matches since user messages are longer and more varied than tool arguments.
-
-### `memory_inject.py` (PreToolUse)
-
-Fires before `Edit`, `Write`, and `Bash` tool calls. Builds a semantic query from the tool's arguments (file extension, path segments, command keywords), searches the memory server, and returns matching memories as `additionalContext`.
-
-Two similarity tiers: memories tagged `importance=high` or `critical` surface at a lower threshold because their load-bearing status outweighs imperfect semantic matches.
-
-Writes a telemetry line to `~/.claude/memory_hook.log` per invocation (query, hit count, top similarity). Failures never block the tool call.
+Skips trivial prompts under 15 characters (configurable) to avoid noise on "ok" / "yes" / "continue." Uses a higher similarity floor than a tool-args query would because user messages are longer and more varied. Writes a telemetry line to `~/.claude/memory_prompt_hook.log` per invocation.
 
 ### `compact_guard.py` (PreCompact)
 
 Fires right before Claude Code compresses the context window. Injects a short set of critical rules plus the top high-importance memories for the current project, so operational discipline survives compaction. The rules are baked into the script — customize `_CRITICAL_RULES` at the top of the file for your workflow.
+
+## Authentication
+
+The MCP server requires auth since Phase 5. Hooks call `/mcp` over HTTP, so they need a way to authenticate. Two supported setups:
+
+### Option 1 (recommended): Bearer token
+
+1. Log into the web GUI, open **Tokens**, click **Create token** with a label like `claude-hooks`. Copy the raw value (shown once).
+2. Paste it into `claude/hooks/hooks.env`:
+
+   ```
+   MEMORY_MCP_TOKEN=nnm_<lookup>.<secret>
+   ```
+
+3. Done. Hooks attach `Authorization: Bearer <token>` on every request.
+
+Works for any deployment shape — loopback, LAN, public. The token can be rotated from the Tokens page at any time; just paste the new value and the next hook invocation picks it up.
+
+### Option 2 (single-user local only): server-side bypass
+
+For a solo developer running the server on their own box and wanting to skip token management:
+
+1. In the **server's** `.env` (not `hooks.env`), set:
+
+   ```
+   MEMORY_AUTH_LOCALHOST_BYPASS=1
+   MEMORY_AUTH_LOCALHOST_USER=<your username>
+   ```
+
+2. Leave `MEMORY_MCP_TOKEN` blank in `hooks.env`.
+3. The server now auto-authenticates unauthenticated loopback requests as the named user. Only works when the server binds to loopback and the hooks run on the same host. Disable this in any shared / multi-user / network-exposed deployment.
+
+If neither option is configured, hooks will see 401 responses and their injection silently falls back to empty context (the hook exits 1, the primary action still runs).
 
 ## Configuration
 
@@ -40,17 +73,16 @@ All hooks read from `claude/hooks/hooks.env` (auto-generated by the installer):
 
 ```
 MEMORY_MCP_URL=http://localhost:9500/mcp
-
-# PreToolUse (memory_inject.py)
-MEMORY_HOOK_THRESHOLD=0.55        # similarity floor for normal memories
-MEMORY_HOOK_HIGH_THRESHOLD=0.40   # floor for high/critical importance
-MEMORY_HOOK_MAX_RESULTS=3
+MEMORY_MCP_TOKEN=                 # see Authentication section above
 
 # UserPromptSubmit (user_prompt_inject.py)
-MEMORY_PROMPT_THRESHOLD=0.45      # higher floor — user prompts are noisier
-MEMORY_PROMPT_HIGH_THRESHOLD=0.35
+MEMORY_PROMPT_THRESHOLD=0.45      # similarity floor for normal memories
+MEMORY_PROMPT_HIGH_THRESHOLD=0.35 # floor for high/critical importance
 MEMORY_PROMPT_MAX_RESULTS=3
 MEMORY_PROMPT_MIN_CHARS=15        # skip trivial acknowledgements
+
+# SessionStart (session_start.py)
+MEMORY_SESSION_MAX_TOKENS=600
 
 # PreCompact (compact_guard.py)
 MEMORY_COMPACT_MAX_RESULTS=5
@@ -74,22 +106,21 @@ Claude Code's hook protocol (stdin JSON in, stdout JSON out, event names like `P
 
 ## What gets injected
 
+**SessionStart output** (plain stdout; `hookSpecificOutput` isn't accepted for this event):
+```
+[Session Start] Memory MCP tools are deferred by the harness. Call ToolSearch with ...
+[Session Start] Working-continuity memories for this project:
+  1. [high|global] no em dashes
+  2. [critical|local] read-only review, do not edit files
+  ...
+```
+
 **UserPromptSubmit output** (if matches above threshold):
 ```json
 {
   "hookSpecificOutput": {
     "hookEventName": "UserPromptSubmit",
     "additionalContext": "[Memory Hook] Context from previous sessions relevant to this request:\n  1. [high|global|0.58] ...\n  2. ..."
-  }
-}
-```
-
-**PreToolUse output** (if matches above threshold):
-```json
-{
-  "hookSpecificOutput": {
-    "hookEventName": "PreToolUse",
-    "additionalContext": "[Memory Hook] Relevant memories from previous sessions:\n  1. [high|0.67] ...\n  2. ..."
   }
 }
 ```
@@ -104,4 +135,4 @@ Claude Code's hook protocol (stdin JSON in, stdout JSON out, event names like `P
 }
 ```
 
-All hooks exit with code `0` on success and `1` on non-fatal error (the tool call / prompt / compaction proceeds regardless).
+All hooks exit with code `0` on success and `1` on non-fatal error (the session / prompt / compaction proceeds regardless). A 401 from the MCP server (missing or invalid auth; see Authentication above) logs to stderr and is treated as a non-fatal error — Claude Code keeps running, just without memory injection for that event.

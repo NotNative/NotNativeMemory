@@ -54,6 +54,17 @@ LOG_PATH = os.environ.get(
 
 MAX_QUERY_CHARS = 500
 
+# Auth: set MEMORY_MCP_TOKEN in hooks.env to send Authorization: Bearer.
+# Blank token relies on the server-side localhost bypass. See the hooks
+# README for the two supported configurations.
+_MCP_TOKEN = os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+_HEADERS = {
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+}
+if _MCP_TOKEN:
+    _HEADERS["Authorization"] = f"Bearer {_MCP_TOKEN}"
+
 
 def _search_memories(query: str) -> list:
     """Query the MCP memory server via HTTP. Returns list of memory dicts."""
@@ -74,10 +85,7 @@ def _search_memories(query: str) -> list:
     req = urllib.request.Request(
         MCP_URL,
         data=payload,
-        headers={
-            "Content-Type": "application/json",
-            "Accept": "application/json",
-        },
+        headers=dict(_HEADERS),
         method="POST",
     )
 
