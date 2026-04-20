@@ -18,11 +18,22 @@ services:
       POSTGRES_DB: ${MEMORY_DB_NAME:-notnative_memory}
       POSTGRES_USER: ${MEMORY_DB_USER:-memory}
       POSTGRES_PASSWORD: ${MEMORY_DB_PASSWORD:?Set MEMORY_DB_PASSWORD in .env}
+      # Non-superuser app role. 02-roles.sh reads these at init time
+      # to CREATE the role that the MCP container connects as. With
+      # this role in place, RLS policies actively enforce; without,
+      # the app falls back to the superuser connection and RLS is
+      # inert. See docs/rls-activation.md.
+      MEMORY_APP_DB_USER: ${MEMORY_APP_DB_USER:-memory_app}
+      MEMORY_APP_DB_PASSWORD: ${MEMORY_APP_DB_PASSWORD:-}
     volumes:
       - ./postgres:/var/lib/postgresql/data
       # Auto-create schema on first init. All statements use IF NOT EXISTS
       # so this is safe if the database was previously initialized.
       - ../config/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      # Create the non-superuser app role after the schema lands.
+      # Docker init scripts run in alphabetical order, so 02- runs
+      # after 01-. Idempotent: skips CREATE if the role exists.
+      - ../docker/init/02-roles.sh:/docker-entrypoint-initdb.d/02-roles.sh:ro
     networks:
       - internal
     healthcheck:
