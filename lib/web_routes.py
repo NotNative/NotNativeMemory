@@ -21,7 +21,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.templating import Jinja2Templates
 
-from lib import auth, auth_db
+from lib import auth, auth_db, rate_limit
 from lib.csrf import check_csrf, get_or_mint_csrf, set_csrf_cookie
 
 
@@ -142,14 +142,28 @@ def register_routes(mcp) -> None:
         username = (form.get("username") or "").strip()
         password = form.get("password") or ""
 
+        ip = rate_limit.client_ip(request)
+        allowed, retry = rate_limit.check_login(ip, username)
+        if not allowed:
+            wait = max(1, int(retry + 0.999))
+            resp = _render_with_csrf(
+                request, "login.html",
+                status_code=429,
+                error=f"Too many login attempts. Try again in {wait}s.",
+            )
+            resp.headers["Retry-After"] = str(wait)
+            return resp
+
         record = await auth_db.get_user_by_username(username)
         if record is None or not auth.verify_secret(password, record["password_hash"]):
+            rate_limit.record_login_failure(ip, username)
             return _render_with_csrf(
                 request, "login.html",
                 status_code=401,
                 error="Invalid username or password.",
             )
 
+        rate_limit.clear_login(ip, username)
         token = await auth_db.create_token(record["id"], label="web-session")
         resp = RedirectResponse("/memories", status_code=303)
         _set_session_cookie(resp, token["token"])
@@ -168,6 +182,23 @@ def register_routes(mcp) -> None:
         csrf_err = await check_csrf(request)
         if csrf_err is not None:
             return csrf_err
+
+        ip = rate_limit.client_ip(request)
+        allowed, retry = rate_limit.check_register(ip)
+        if not allowed:
+            wait = max(1, int(retry + 0.999))
+            resp = _render_with_csrf(
+                request, "register.html",
+                status_code=429,
+                error=f"Too many registration attempts. Try again in {wait}s.",
+            )
+            resp.headers["Retry-After"] = str(wait)
+            return resp
+
+        # Count the attempt regardless of outcome so a hostile script
+        # cannot spray registrations at our rate limit for free by
+        # hitting only failure paths.
+        rate_limit.record_register_attempt(ip)
 
         form = await request.form()
         username = (form.get("username") or "").strip()

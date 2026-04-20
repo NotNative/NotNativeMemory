@@ -31,7 +31,18 @@ import asyncpg
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from lib import auth_db
+from lib import auth_db, rate_limit
+
+
+def _too_many_requests(retry_after: float, detail: str) -> JSONResponse:
+    """Build a 429 JSON response with a Retry-After header."""
+    wait = max(1, int(retry_after + 0.999))
+    resp = JSONResponse(
+        {"error": "rate_limited", "detail": detail, "retry_after": wait},
+        status_code=429,
+    )
+    resp.headers["Retry-After"] = str(wait)
+    return resp
 
 
 async def _parse_json(request: Request) -> dict | None:
@@ -70,6 +81,14 @@ def register_routes(mcp) -> None:
         admin approval step, and the first registrant gets no special
         treatment. Each user sees only their own memories.
         """
+        ip = rate_limit.client_ip(request)
+        allowed, retry = rate_limit.check_register(ip)
+        if not allowed:
+            return _too_many_requests(retry, "too many registration attempts")
+        # Count every attempt so a hostile script cannot spray registrations
+        # for free by hitting only the parsing / validation error paths.
+        rate_limit.record_register_attempt(ip)
+
         payload = await _parse_json(request)
         if payload is None:
             return JSONResponse({"error": "body must be JSON"}, status_code=400)
@@ -103,14 +122,22 @@ def register_routes(mcp) -> None:
         password = payload.get("password") or ""
         label = payload.get("label") or None
 
+        ip = rate_limit.client_ip(request)
+        allowed, retry = rate_limit.check_login(ip, username)
+        if not allowed:
+            return _too_many_requests(retry, "too many login attempts")
+
         record = await auth_db.get_user_by_username(username)
         # Auth-generic error: attackers can't probe for valid usernames.
         from lib import auth
         if record is None:
+            rate_limit.record_login_failure(ip, username)
             return JSONResponse({"error": "invalid credentials"}, status_code=401)
         if not auth.verify_secret(password, record["password_hash"]):
+            rate_limit.record_login_failure(ip, username)
             return JSONResponse({"error": "invalid credentials"}, status_code=401)
 
+        rate_limit.clear_login(ip, username)
         token = await auth_db.create_token(record["id"], label=label)
         return JSONResponse({
             "user": {
