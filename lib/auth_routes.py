@@ -31,7 +31,7 @@ import asyncpg
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from lib import auth_db, rate_limit
+from lib import auth_db, password_policy, rate_limit
 
 
 def _too_many_requests(retry_after: float, detail: str) -> JSONResponse:
@@ -100,6 +100,10 @@ def register_routes(mcp) -> None:
                 {"error": "username and password are required"},
                 status_code=400,
             )
+
+        policy_err = await password_policy.validate_new_password(password)
+        if policy_err:
+            return JSONResponse({"error": policy_err}, status_code=400)
 
         try:
             user = await auth_db.create_user(username, password)

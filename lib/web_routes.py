@@ -21,7 +21,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.templating import Jinja2Templates
 
-from lib import auth, auth_db, rate_limit
+from lib import auth, auth_db, password_policy, rate_limit
 from lib.csrf import check_csrf, get_or_mint_csrf, set_csrf_cookie
 
 
@@ -221,6 +221,14 @@ def register_routes(mcp) -> None:
                 request, "register.html",
                 status_code=400,
                 error="Passwords do not match.",
+            )
+
+        policy_err = await password_policy.validate_new_password(password)
+        if policy_err:
+            return _render_with_csrf(
+                request, "register.html",
+                status_code=400,
+                error=policy_err,
             )
 
         try:
