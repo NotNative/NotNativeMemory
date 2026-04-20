@@ -120,6 +120,13 @@ def register_routes(mcp) -> None:
 
     @mcp.custom_route("/", methods=["GET"])
     async def root(request: Request):
+        # First-run claim path takes priority: if a bootstrap file
+        # exists, the operator has not yet claimed admin, and the
+        # claim form is the intended landing page. Once claimed, the
+        # file is deleted (see admin_bootstrap.delete_bootstrap_file)
+        # and this redirect stops firing.
+        if admin_bootstrap.bootstrap_file_exists():
+            return RedirectResponse("/claim-admin", status_code=302)
         if getattr(request.state, "user_id", None):
             return RedirectResponse("/memories", status_code=302)
         return RedirectResponse("/login", status_code=302)
