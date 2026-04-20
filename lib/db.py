@@ -123,18 +123,23 @@ def _get_migrations_dir() -> str:
     return _MIGRATIONS_DIR
 
 
-async def _run_migrations(pool: asyncpg.Pool) -> int:
+async def _run_migrations_on_conn(conn: asyncpg.Connection) -> int:
     """
-    Apply any pending migrations from config/migrations/.
+    Apply any pending migrations from config/migrations/ using the
+    given connection. The caller is responsible for opening/closing
+    the connection; we just run SQL over it.
 
-    Creates the schema_migrations tracking table if it doesn't exist
-    (self-bootstrapping). Scans for *.sql files sorted by name,
-    skips any already recorded, and applies the rest in order.
+    Under default single-role config this connection comes from the
+    app pool. Under dual-role config, migrations run over a one-shot
+    superuser connection so DDL (CREATE POLICY, ALTER TABLE ENABLE
+    RLS, etc.) is always authorized, even when the app role is a
+    non-superuser that cannot ALTER tables.
 
-    Returns the number of migrations applied.
+    Creates the schema_migrations tracking table if missing, scans
+    *.sql files sorted by name, skips already-applied, applies the
+    rest in order. Returns the number applied.
     """
-    # Bootstrap: ensure the tracking table exists
-    await pool.execute("""
+    await conn.execute("""
         CREATE TABLE IF NOT EXISTS schema_migrations (
             filename TEXT PRIMARY KEY,
             applied_at TIMESTAMPTZ DEFAULT now()
@@ -146,7 +151,6 @@ async def _run_migrations(pool: asyncpg.Pool) -> int:
         _log.debug("No migrations directory at %s", migrations_dir)
         return 0
 
-    # List migration files sorted by name (numeric prefix = order)
     migration_files = sorted(
         f for f in os.listdir(migrations_dir)
         if f.endswith(".sql")
@@ -154,8 +158,7 @@ async def _run_migrations(pool: asyncpg.Pool) -> int:
     if not migration_files:
         return 0
 
-    # Get already-applied migrations
-    applied_rows = await pool.fetch(
+    applied_rows = await conn.fetch(
         "SELECT filename FROM schema_migrations"
     )
     applied = {row["filename"] for row in applied_rows}
@@ -171,13 +174,12 @@ async def _run_migrations(pool: asyncpg.Pool) -> int:
             sql = f.read()
 
         try:
-            async with pool.acquire() as conn:
-                async with conn.transaction():
-                    await conn.execute(sql)
-                    await conn.execute(
-                        "INSERT INTO schema_migrations (filename) VALUES ($1)",
-                        filename,
-                    )
+            async with conn.transaction():
+                await conn.execute(sql)
+                await conn.execute(
+                    "INSERT INTO schema_migrations (filename) VALUES ($1)",
+                    filename,
+                )
             applied_count += 1
             _log.info("Applied migration: %s", filename)
         except Exception as exc:
@@ -193,9 +195,26 @@ async def get_pool() -> asyncpg.Pool:
     """
     Get or create the asyncpg connection pool.
 
-    Reads connection details from environment variables.
-    Pool is created once and cached for the process lifetime.
-    On first creation, applies any pending database migrations.
+    Reads connection details from environment variables. Pool is
+    created once and cached for the process lifetime.
+
+    Dual-role support:
+        MEMORY_DB_USER / MEMORY_DB_PASSWORD always point at the
+        migration/admin role (typically the DB owner / superuser).
+        When MEMORY_APP_DB_USER / MEMORY_APP_DB_PASSWORD are set,
+        the app pool uses THAT role, and migrations run over a
+        separate one-shot connection as the migration role. When
+        the app vars are absent, the app pool uses the migration
+        role (backward-compatible single-role setup).
+
+        The split lets operators enable Postgres RLS (see
+        docs/rls-activation.md): RLS is always bypassed by
+        superusers, so the app needs a non-superuser role for the
+        policies to bite — but migrations still need superuser
+        privilege to ALTER TABLE etc.
+
+    On first call, migrations run BEFORE the app pool is created,
+    so the app pool is guaranteed to see a fully-migrated schema.
     """
     global _pool
     if _pool is not None:
@@ -207,29 +226,53 @@ async def get_pool() -> asyncpg.Pool:
     host = os.environ.get("MEMORY_DB_HOST", "localhost")
     port = int(os.environ.get("MEMORY_DB_PORT", "5433"))
     database = os.environ.get("MEMORY_DB_NAME", "notnative_memory")
-    user = os.environ.get("MEMORY_DB_USER", "memory")
-    password = os.environ.get("MEMORY_DB_PASSWORD", "")
 
-    if not password:
+    mig_user = os.environ.get("MEMORY_DB_USER", "memory")
+    mig_password = os.environ.get("MEMORY_DB_PASSWORD", "")
+    if not mig_password:
         raise ValueError(
             "MEMORY_DB_PASSWORD not set. Run the install script or check .env"
         )
 
-    _pool = await asyncpg.create_pool(
-        host=host, port=port, database=database,
-        user=user, password=password,
-        min_size=1, max_size=_MAX_POOL_SIZE,
+    # App-role credentials default to the migration role so existing
+    # installs keep working without touching .env.
+    app_user = os.environ.get("MEMORY_APP_DB_USER", "").strip() or mig_user
+    app_password = (
+        os.environ.get("MEMORY_APP_DB_PASSWORD", "").strip()
+        or mig_password
     )
+    dual_role = app_user != mig_user
 
-    # Apply any pending migrations on first connect
+    # Run migrations over a one-shot connection as the migration role.
     try:
-        applied = await _run_migrations(_pool)
-        if applied:
-            _log.info("Applied %d pending migration(s)", applied)
+        mig_conn = await asyncpg.connect(
+            host=host, port=port, database=database,
+            user=mig_user, password=mig_password,
+        )
+        try:
+            applied = await _run_migrations_on_conn(mig_conn)
+            if applied:
+                _log.info("Applied %d pending migration(s)", applied)
+        finally:
+            await mig_conn.close()
     except Exception as exc:
         _log.error("Migration check failed: %s", exc)
         # Don't prevent startup — the server can still work with
         # existing schema. Missing tables will error on first use.
+
+    # Create the app pool. In single-role setups this is the same role
+    # that ran migrations. In dual-role setups it's the non-superuser
+    # app role.
+    _pool = await asyncpg.create_pool(
+        host=host, port=port, database=database,
+        user=app_user, password=app_password,
+        min_size=1, max_size=_MAX_POOL_SIZE,
+    )
+    if dual_role:
+        _log.info(
+            "DB dual-role: migrations ran as %r, app pool as %r",
+            mig_user, app_user,
+        )
 
     return _pool
 
@@ -311,21 +354,23 @@ async def get_or_create_project(
     scope, auto_name = _resolve_scope(directory)
     final_name = name or auto_name
 
+    from lib import rls
     pool = await get_pool()
-    row = await pool.fetchrow(
-        "SELECT id FROM projects WHERE directory = $1 AND owner_user_id = $2",
-        directory, owner_user_id,
-    )
-    if row:
-        return row["id"]
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT id FROM projects WHERE directory = $1 AND owner_user_id = $2",
+            directory, owner_user_id,
+        )
+        if row:
+            return row["id"]
 
-    row = await pool.fetchrow(
-        "INSERT INTO projects (directory, name, scope, owner_user_id) "
-        "VALUES ($1, $2, $3, $4) "
-        "ON CONFLICT (directory, owner_user_id) DO UPDATE SET name = $2 "
-        "RETURNING id",
-        directory, final_name, scope, owner_user_id,
-    )
+        row = await conn.fetchrow(
+            "INSERT INTO projects (directory, name, scope, owner_user_id) "
+            "VALUES ($1, $2, $3, $4) "
+            "ON CONFLICT (directory, owner_user_id) DO UPDATE SET name = $2 "
+            "RETURNING id",
+            directory, final_name, scope, owner_user_id,
+        )
     return row["id"]
 
 
@@ -337,12 +382,14 @@ async def get_project_info(
     Requires owner_user_id so lookups can't peek at other users'
     project metadata.
     """
+    from lib import rls
     pool = await get_pool()
-    row = await pool.fetchrow(
-        "SELECT id, directory, name, scope, domains, created_at "
-        "FROM projects WHERE id = $1 AND owner_user_id = $2",
-        project_id, owner_user_id,
-    )
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        row = await conn.fetchrow(
+            "SELECT id, directory, name, scope, domains, created_at "
+            "FROM projects WHERE id = $1 AND owner_user_id = $2",
+            project_id, owner_user_id,
+        )
     if not row:
         return None
     return {
@@ -383,13 +430,15 @@ async def set_project_domains(
             clean.append(d)
             seen.add(d)
 
+    from lib import rls
     pool = await get_pool()
-    row = await pool.fetchrow(
-        "UPDATE projects SET domains = $1 "
-        "WHERE id = $2 AND owner_user_id = $3 "
-        "RETURNING domains",
-        clean, project_id, owner_user_id,
-    )
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        row = await conn.fetchrow(
+            "UPDATE projects SET domains = $1 "
+            "WHERE id = $2 AND owner_user_id = $3 "
+            "RETURNING domains",
+            clean, project_id, owner_user_id,
+        )
     if not row:
         raise ValueError(f"Project {project_id} not found")
     return list(row["domains"])
@@ -413,47 +462,51 @@ async def get_visible_project_ids(
     project must not pull user B's `_global` memories even though both
     users may have a row called `_global`.
     """
+    from lib import rls
     pool = await get_pool()
 
-    primary = await pool.fetchrow(
-        "SELECT scope, domains FROM projects WHERE id = $1 AND owner_user_id = $2",
-        primary_id, owner_user_id,
-    )
-    if not primary:
-        return [primary_id]
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        primary = await conn.fetchrow(
+            "SELECT scope, domains FROM projects WHERE id = $1 AND owner_user_id = $2",
+            primary_id, owner_user_id,
+        )
+        if not primary:
+            return [primary_id]
 
-    # Global or domain projects don't expand — search is scoped to them.
-    if primary["scope"] in ("global", "domain"):
-        return [primary_id]
+        # Global or domain projects don't expand — search is scoped to them.
+        if primary["scope"] in ("global", "domain"):
+            return [primary_id]
 
-    # Local: include self + user's globals + user's matching domains
-    domains = list(primary["domains"])
+        # Local: include self + user's globals + user's matching domains
+        domains = list(primary["domains"])
 
-    rows = await pool.fetch(
-        """SELECT id FROM projects
-           WHERE owner_user_id = $3
-             AND (id = $1
-                  OR scope = 'global'
-                  OR (scope = 'domain' AND name = ANY($2)))""",
-        primary_id, domains, owner_user_id,
-    )
+        rows = await conn.fetch(
+            """SELECT id FROM projects
+               WHERE owner_user_id = $3
+                 AND (id = $1
+                      OR scope = 'global'
+                      OR (scope = 'domain' AND name = ANY($2)))""",
+            primary_id, domains, owner_user_id,
+        )
     return [r["id"] for r in rows]
 
 
 # -- Deduplication ----------------------------------------------------------
 
 async def _find_duplicate(
-    pool: asyncpg.Pool,
+    conn: asyncpg.Connection,
     embedding: List[float],
     project_id: UUID,
 ) -> Optional[Dict[str, Any]]:
     """
     Check if a semantically similar memory already exists in this project.
 
-    Returns the existing memory row if similarity exceeds the dedup
-    threshold, or None if no duplicate found.
+    Takes a pre-acquired connection so the caller can establish an
+    RLS context (via `rls.app_conn`) once and reuse it for the whole
+    store_memory flow. Returns the existing memory row if similarity
+    exceeds the dedup threshold, or None if no duplicate found.
     """
-    row = await pool.fetchrow(
+    row = await conn.fetchrow(
         """SELECT id, content, tags, importance, temperature,
                   1 - (embedding <=> $1::vector) AS similarity
            FROM memories
@@ -468,7 +521,7 @@ async def _find_duplicate(
 
 
 async def _merge_duplicate(
-    pool: asyncpg.Pool,
+    conn: asyncpg.Connection,
     existing_id: UUID,
     new_content: str,
     new_embedding: List[float],
@@ -481,7 +534,7 @@ async def _merge_duplicate(
     Updates content, embedding, and tags. Importance is upgraded if the
     new one is higher. Temperature is reheated. Access count is preserved.
     """
-    await pool.execute(
+    await conn.execute(
         """UPDATE memories SET
                content = $2,
                embedding = $3::vector,
@@ -514,7 +567,7 @@ async def _merge_duplicate(
 # -- Displacement cooling ---------------------------------------------------
 
 async def _apply_displacement_cooling(
-    pool: asyncpg.Pool, project_id: UUID,
+    conn: asyncpg.Connection, project_id: UUID,
 ) -> int:
     """
     Cool non-critical memories in a project after a new memory is stored.
@@ -544,7 +597,7 @@ async def _apply_displacement_cooling(
     _store_counters[project_key] = 0
 
     # Check if we're under pressure (above 80% cap)
-    total = await pool.fetchval(
+    total = await conn.fetchval(
         "SELECT count(*) FROM memories WHERE project_id = $1",
         project_id,
     )
@@ -559,7 +612,7 @@ async def _apply_displacement_cooling(
         delta = total_cool * rate
         if delta <= 0:
             continue
-        result = await pool.execute(
+        result = await conn.execute(
             """UPDATE memories SET
                    temperature = GREATEST(temperature - $1, 0.0)
                WHERE project_id = $2
@@ -581,14 +634,14 @@ async def _apply_displacement_cooling(
 
 # -- Cap enforcement --------------------------------------------------------
 
-async def _enforce_cap(pool: asyncpg.Pool, project_id: UUID) -> int:
+async def _enforce_cap(conn: asyncpg.Connection, project_id: UUID) -> int:
     """
     Evict coldest memories if project exceeds the cap.
 
     Critical memories are evicted last (sorted by importance then
     temperature ascending). Returns number of memories evicted.
     """
-    count_row = await pool.fetchrow(
+    count_row = await conn.fetchrow(
         "SELECT count(*) AS cnt FROM memories WHERE project_id = $1",
         project_id,
     )
@@ -597,7 +650,7 @@ async def _enforce_cap(pool: asyncpg.Pool, project_id: UUID) -> int:
         return 0
 
     excess = total - PROJECT_MEMORY_CAP
-    result = await pool.execute(
+    result = await conn.execute(
         """DELETE FROM memories WHERE id IN (
                SELECT id FROM memories
                WHERE project_id = $1
@@ -657,41 +710,43 @@ async def store_memory(
         raise ValueError(f"Invalid importance: {importance}")
 
     from lib.classify import augment_tags
+    from lib import rls
 
     pool = await get_pool()
     clean_tags = augment_tags(tags or [], content)
 
-    # Check for duplicate
-    duplicate = await _find_duplicate(pool, embedding, project_id)
-    if duplicate:
-        _log.info("Dedup: merging into existing memory %s (sim=%.3f)",
-                  duplicate["id"], duplicate["similarity"])
-        return await _merge_duplicate(
-            pool, duplicate["id"],
-            content.strip(), embedding, clean_tags, importance,
+    # Single connection for the whole store flow. app_conn SETs
+    # app.current_user to the owner so dedup SELECTs, INSERTs, cooling
+    # UPDATEs, cap-enforcement DELETEs, and stats writes all execute
+    # under the same RLS context — and no mid-flow pool-acquire grabs
+    # a connection with stale or missing identity.
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        duplicate = await _find_duplicate(conn, embedding, project_id)
+        if duplicate:
+            _log.info("Dedup: merging into existing memory %s (sim=%.3f)",
+                      duplicate["id"], duplicate["similarity"])
+            return await _merge_duplicate(
+                conn, duplicate["id"],
+                content.strip(), embedding, clean_tags, importance,
+            )
+
+        row = await conn.fetchrow(
+            """INSERT INTO memories
+                   (project_id, content, embedding, tags, importance,
+                    temperature, owner_user_id)
+               VALUES ($1, $2, $3::vector, $4, $5, $6, $7)
+               RETURNING id""",
+            project_id, content.strip(), str(embedding),
+            clean_tags, importance, TEMP_INITIAL, owner_user_id,
         )
 
-    # Insert new memory
-    row = await pool.fetchrow(
-        """INSERT INTO memories
-               (project_id, content, embedding, tags, importance,
-                temperature, owner_user_id)
-           VALUES ($1, $2, $3::vector, $4, $5, $6, $7)
-           RETURNING id""",
-        project_id, content.strip(), str(embedding),
-        clean_tags, importance, TEMP_INITIAL, owner_user_id,
-    )
+        # Displacement cooling: storing new knowledge pressures existing
+        # memories in the same project (same owner, so same RLS scope).
+        await _apply_displacement_cooling(conn, project_id)
+        await _enforce_cap(conn, project_id)
+        await _record_store_stats(conn, project_id)
 
-    # Displacement cooling: storing new knowledge pressures existing memories
-    await _apply_displacement_cooling(pool, project_id)
-
-    # Enforce per-project cap (evict coldest if over limit)
-    await _enforce_cap(pool, project_id)
-
-    # Record stats for future self-tuning
-    await _record_store_stats(pool, project_id)
-
-    return row["id"]
+        return row["id"]
 
 
 # -- Search -----------------------------------------------------------------
@@ -830,6 +885,8 @@ async def search_memories(
     if limit > 100:
         limit = 100
 
+    from lib import rls
+
     pool = await get_pool()
 
     # Expand the primary project to its owner-scoped visible set.
@@ -839,19 +896,20 @@ async def search_memories(
         query_embedding, visible_ids, tags, min_importance, limit,
         owner_user_id=owner_user_id,
     )
-    rows = await pool.fetch(sql, *params)
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(sql, *params)
 
-    # Reheat accessed memories and update access timestamps
-    if rows:
-        ids = [row["id"] for row in rows]
-        await pool.execute(
-            """UPDATE memories SET
-                   last_accessed = now(),
-                   access_count = access_count + 1,
-                   temperature = LEAST(temperature + $2, $3)
-               WHERE id = ANY($1)""",
-            ids, REHEAT_DELTA, TEMP_MAX,
-        )
+        # Reheat accessed memories and update access timestamps
+        if rows:
+            ids = [row["id"] for row in rows]
+            await conn.execute(
+                """UPDATE memories SET
+                       last_accessed = now(),
+                       access_count = access_count + 1,
+                       temperature = LEAST(temperature + $2, $3)
+                   WHERE id = ANY($1)""",
+                ids, REHEAT_DELTA, TEMP_MAX,
+            )
 
     return [_format_memory_row(row) for row in rows]
 
@@ -868,19 +926,21 @@ async def admin_get_memory(
     the project directory so the admin UI can render a rescope form.
     None if the memory does not exist or is not owned by the caller.
     """
+    from lib import rls
     pool = await get_pool()
-    row = await pool.fetchrow(
-        """SELECT m.id, m.content, m.tags, m.importance, m.temperature,
-                  m.created_at, m.last_accessed, m.access_count,
-                  m.project_id,
-                  p.scope AS project_scope,
-                  p.name AS project_name,
-                  p.directory AS project_directory
-           FROM memories m
-           JOIN projects p ON p.id = m.project_id
-           WHERE m.id = $1 AND m.owner_user_id = $2""",
-        memory_id, owner_user_id,
-    )
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        row = await conn.fetchrow(
+            """SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+                      m.created_at, m.last_accessed, m.access_count,
+                      m.project_id,
+                      p.scope AS project_scope,
+                      p.name AS project_name,
+                      p.directory AS project_directory
+               FROM memories m
+               JOIN projects p ON p.id = m.project_id
+               WHERE m.id = $1 AND m.owner_user_id = $2""",
+            memory_id, owner_user_id,
+        )
     if not row:
         return None
     out = _format_memory_row(row)
@@ -938,12 +998,14 @@ async def admin_update_memory(
         return False
 
     params.extend([memory_id, owner_user_id])
+    from lib import rls
     pool = await get_pool()
-    result = await pool.execute(
-        f"""UPDATE memories SET {', '.join(sets)}
-            WHERE id = ${idx} AND owner_user_id = ${idx + 1}""",
-        *params,
-    )
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        result = await conn.execute(
+            f"""UPDATE memories SET {', '.join(sets)}
+                WHERE id = ${idx} AND owner_user_id = ${idx + 1}""",
+            *params,
+        )
     return result == "UPDATE 1"
 
 
@@ -974,6 +1036,7 @@ async def admin_list_facts(
     if offset < 0:
         offset = 0
 
+    from lib import rls
     pool = await get_pool()
 
     conditions = ["f.owner_user_id = $1"]
@@ -1003,33 +1066,34 @@ async def admin_list_facts(
 
     where = "WHERE " + " AND ".join(conditions)
 
-    count_row = await pool.fetchrow(
-        f"""SELECT COUNT(*) AS n FROM facts f
-            JOIN projects p ON p.id = f.project_id
-            {where}""",
-        *params,
-    )
-    total = int(count_row["n"] or 0)
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        count_row = await conn.fetchrow(
+            f"""SELECT COUNT(*) AS n FROM facts f
+                JOIN projects p ON p.id = f.project_id
+                {where}""",
+            *params,
+        )
+        total = int(count_row["n"] or 0)
 
-    limit_placeholder = idx
-    offset_placeholder = idx + 1
-    params.append(limit)
-    params.append(offset)
+        limit_placeholder = idx
+        offset_placeholder = idx + 1
+        params.append(limit)
+        params.append(offset)
 
-    rows = await pool.fetch(
-        f"""SELECT f.id, f.subject, f.predicate, f.object, f.confidence,
-                   f.valid_from, f.valid_to, f.source_memory_id,
-                   f.created_at,
-                   p.scope AS project_scope,
-                   p.name AS project_name,
-                   p.directory AS project_directory
-            FROM facts f
-            JOIN projects p ON p.id = f.project_id
-            {where}
-            ORDER BY f.valid_from DESC, f.created_at DESC
-            LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
-        *params,
-    )
+        rows = await conn.fetch(
+            f"""SELECT f.id, f.subject, f.predicate, f.object, f.confidence,
+                       f.valid_from, f.valid_to, f.source_memory_id,
+                       f.created_at,
+                       p.scope AS project_scope,
+                       p.name AS project_name,
+                       p.directory AS project_directory
+                FROM facts f
+                JOIN projects p ON p.id = f.project_id
+                {where}
+                ORDER BY f.valid_from DESC, f.created_at DESC
+                LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
+            *params,
+        )
 
     out = []
     for r in rows:
@@ -1054,11 +1118,13 @@ async def forget_fact(fact_id: UUID, owner_user_id: UUID) -> bool:
     """
     Hard-delete a fact row. Only the owner can delete their own.
     """
+    from lib import rls
     pool = await get_pool()
-    result = await pool.execute(
-        "DELETE FROM facts WHERE id = $1 AND owner_user_id = $2",
-        fact_id, owner_user_id,
-    )
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM facts WHERE id = $1 AND owner_user_id = $2",
+            fact_id, owner_user_id,
+        )
     return result == "DELETE 1"
 
 
@@ -1073,11 +1139,13 @@ async def admin_bulk_delete(
     """
     if not memory_ids:
         return 0
+    from lib import rls
     pool = await get_pool()
-    result = await pool.execute(
-        "DELETE FROM memories WHERE id = ANY($1) AND owner_user_id = $2",
-        memory_ids, owner_user_id,
-    )
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM memories WHERE id = ANY($1) AND owner_user_id = $2",
+            memory_ids, owner_user_id,
+        )
     # asyncpg returns "DELETE N"
     try:
         return int(result.split()[-1])
@@ -1098,11 +1166,13 @@ async def forget_memory(memory_id: UUID, owner_user_id: UUID) -> bool:
     Returns:
         True if a memory was deleted, False if not found or not owned.
     """
+    from lib import rls
     pool = await get_pool()
-    result = await pool.execute(
-        "DELETE FROM memories WHERE id = $1 AND owner_user_id = $2",
-        memory_id, owner_user_id,
-    )
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM memories WHERE id = $1 AND owner_user_id = $2",
+            memory_id, owner_user_id,
+        )
     return result == "DELETE 1"
 
 
@@ -1166,6 +1236,7 @@ async def admin_list_memories(
     if offset < 0:
         offset = 0
 
+    from lib import rls
     pool = await get_pool()
 
     conditions = ["m.owner_user_id = $1"]
@@ -1203,49 +1274,50 @@ async def admin_list_memories(
 
     where = "WHERE " + " AND ".join(conditions)
 
-    count_row = await pool.fetchrow(
-        f"""SELECT COUNT(*) AS n FROM memories m
-            JOIN projects p ON p.id = m.project_id
-            {where}""",
-        *params,
-    )
-    total = int(count_row["n"] or 0)
-
-    # Append limit + offset as the last two parameters. $N numbering
-    # picks up where the filter block left off.
-    limit_placeholder = param_idx
-    offset_placeholder = param_idx + 1
-    params.append(limit)
-    params.append(offset)
-
-    # Importance ORDER BY uses a CASE to respect low<normal<high<critical;
-    # other columns sort directly.
-    if sort == "importance":
-        order_clause = (
-            "CASE m.importance "
-            "WHEN 'critical' THEN 3 "
-            "WHEN 'high' THEN 2 "
-            "WHEN 'normal' THEN 1 "
-            "WHEN 'low' THEN 0 "
-            f"END {order}"
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        count_row = await conn.fetchrow(
+            f"""SELECT COUNT(*) AS n FROM memories m
+                JOIN projects p ON p.id = m.project_id
+                {where}""",
+            *params,
         )
-    else:
-        order_clause = f"m.{sort} {order}"
+        total = int(count_row["n"] or 0)
 
-    rows = await pool.fetch(
-        f"""SELECT m.id, m.content, m.tags, m.importance, m.temperature,
-                   m.created_at, m.last_accessed, m.access_count,
-                   m.project_id,
-                   p.scope AS project_scope,
-                   p.name AS project_name,
-                   p.directory AS project_directory
-            FROM memories m
-            JOIN projects p ON p.id = m.project_id
-            {where}
-            ORDER BY {order_clause}, m.created_at DESC
-            LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
-        *params,
-    )
+        # Append limit + offset as the last two parameters. $N numbering
+        # picks up where the filter block left off.
+        limit_placeholder = param_idx
+        offset_placeholder = param_idx + 1
+        params.append(limit)
+        params.append(offset)
+
+        # Importance ORDER BY uses a CASE to respect low<normal<high<critical;
+        # other columns sort directly.
+        if sort == "importance":
+            order_clause = (
+                "CASE m.importance "
+                "WHEN 'critical' THEN 3 "
+                "WHEN 'high' THEN 2 "
+                "WHEN 'normal' THEN 1 "
+                "WHEN 'low' THEN 0 "
+                f"END {order}"
+            )
+        else:
+            order_clause = f"m.{sort} {order}"
+
+        rows = await conn.fetch(
+            f"""SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+                       m.created_at, m.last_accessed, m.access_count,
+                       m.project_id,
+                       p.scope AS project_scope,
+                       p.name AS project_name,
+                       p.directory AS project_directory
+                FROM memories m
+                JOIN projects p ON p.id = m.project_id
+                {where}
+                ORDER BY {order_clause}, m.created_at DESC
+                LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
+            *params,
+        )
 
     return [_format_memory_row(r) for r in rows], total
 
@@ -1275,6 +1347,7 @@ async def list_memories(
     if limit > 100:
         limit = 100
 
+    from lib import rls
     pool = await get_pool()
 
     conditions = ["owner_user_id = $1"]
@@ -1294,14 +1367,15 @@ async def list_memories(
     where = "WHERE " + " AND ".join(conditions)
     params.append(limit)
 
-    rows = await pool.fetch(
-        f"""SELECT id, content, tags, importance, temperature, created_at,
-                   last_accessed, access_count
-            FROM memories {where}
-            ORDER BY created_at DESC
-            LIMIT ${param_idx}""",
-        *params,
-    )
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(
+            f"""SELECT id, content, tags, importance, temperature, created_at,
+                       last_accessed, access_count
+                FROM memories {where}
+                ORDER BY created_at DESC
+                LIMIT ${param_idx}""",
+            *params,
+        )
 
     return [_format_memory_row(row) for row in rows]
 
@@ -1335,56 +1409,58 @@ async def get_context_memories(
     if max_tokens > 2000:
         max_tokens = 2000
 
+    from lib import rls
     pool = await get_pool()
 
     # Owner-scoped visible set: self + user's globals + user's matching
     # domains. Another user's _global row never surfaces here.
     visible_ids = await get_visible_project_ids(project_id, owner_user_id)
 
-    rows = await pool.fetch(
-        """SELECT m.id, m.content, m.tags, m.importance, m.temperature,
-                  m.created_at, m.last_accessed, m.access_count,
-                  m.project_id,
-                  p.scope AS project_scope,
-                  p.name AS project_name
-           FROM memories m
-           JOIN projects p ON p.id = m.project_id
-           WHERE m.project_id = ANY($1)
-             AND m.owner_user_id = $2
-           ORDER BY
-               CASE m.importance
-                   WHEN 'critical' THEN 3
-                   WHEN 'high' THEN 2
-                   WHEN 'normal' THEN 1
-                   WHEN 'low' THEN 0
-               END DESC,
-               m.temperature DESC
-           LIMIT 50""",
-        visible_ids, owner_user_id,
-    )
-
-    # Trim to token budget (~4 chars per token)
-    char_budget = max_tokens * 4
-    result = []
-    chars_used = 0
-    for row in rows:
-        content_len = len(row["content"])
-        if chars_used + content_len > char_budget and result:
-            break
-        result.append(_format_memory_row(row))
-        chars_used += content_len
-
-    # Reheat accessed memories
-    if result:
-        ids = [row["id"] for row in rows[:len(result)]]
-        await pool.execute(
-            """UPDATE memories SET
-                   last_accessed = now(),
-                   access_count = access_count + 1,
-                   temperature = LEAST(temperature + $2, $3)
-               WHERE id = ANY($1)""",
-            ids, REHEAT_DELTA, TEMP_MAX,
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(
+            """SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+                      m.created_at, m.last_accessed, m.access_count,
+                      m.project_id,
+                      p.scope AS project_scope,
+                      p.name AS project_name
+               FROM memories m
+               JOIN projects p ON p.id = m.project_id
+               WHERE m.project_id = ANY($1)
+                 AND m.owner_user_id = $2
+               ORDER BY
+                   CASE m.importance
+                       WHEN 'critical' THEN 3
+                       WHEN 'high' THEN 2
+                       WHEN 'normal' THEN 1
+                       WHEN 'low' THEN 0
+                   END DESC,
+                   m.temperature DESC
+               LIMIT 50""",
+            visible_ids, owner_user_id,
         )
+
+        # Trim to token budget (~4 chars per token)
+        char_budget = max_tokens * 4
+        result = []
+        chars_used = 0
+        for row in rows:
+            content_len = len(row["content"])
+            if chars_used + content_len > char_budget and result:
+                break
+            result.append(_format_memory_row(row))
+            chars_used += content_len
+
+        # Reheat accessed memories
+        if result:
+            ids = [row["id"] for row in rows[:len(result)]]
+            await conn.execute(
+                """UPDATE memories SET
+                       last_accessed = now(),
+                       access_count = access_count + 1,
+                       temperature = LEAST(temperature + $2, $3)
+                   WHERE id = ANY($1)""",
+                ids, REHEAT_DELTA, TEMP_MAX,
+            )
 
     return result
 
@@ -1407,30 +1483,32 @@ async def add_fact(
 
     Returns dict with the new fact id and whether a prior fact was superseded.
     """
+    from lib import rls
     pool = await get_pool()
 
-    # Invalidate any existing valid fact with the same subject +
-    # predicate owned by this user. Cross-user facts aren't touched.
-    result = await pool.execute(
-        """UPDATE facts SET valid_to = now()
-           WHERE project_id = $1
-             AND subject = $2
-             AND predicate = $3
-             AND owner_user_id = $4
-             AND valid_to IS NULL""",
-        project_id, subject, predicate, owner_user_id,
-    )
-    superseded = int(result.split()[-1]) if result else 0
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        # Invalidate any existing valid fact with the same subject +
+        # predicate owned by this user. Cross-user facts aren't touched.
+        result = await conn.execute(
+            """UPDATE facts SET valid_to = now()
+               WHERE project_id = $1
+                 AND subject = $2
+                 AND predicate = $3
+                 AND owner_user_id = $4
+                 AND valid_to IS NULL""",
+            project_id, subject, predicate, owner_user_id,
+        )
+        superseded = int(result.split()[-1]) if result else 0
 
-    row = await pool.fetchrow(
-        """INSERT INTO facts
-               (project_id, subject, predicate, object, confidence,
-                source_memory_id, owner_user_id)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, valid_from""",
-        project_id, subject, predicate, obj, confidence,
-        source_memory_id, owner_user_id,
-    )
+        row = await conn.fetchrow(
+            """INSERT INTO facts
+                   (project_id, subject, predicate, object, confidence,
+                    source_memory_id, owner_user_id)
+               VALUES ($1, $2, $3, $4, $5, $6, $7)
+               RETURNING id, valid_from""",
+            project_id, subject, predicate, obj, confidence,
+            source_memory_id, owner_user_id,
+        )
 
     return {
         "id": str(row["id"]),
@@ -1459,6 +1537,7 @@ async def query_facts(
     Returns:
         List of fact dicts.
     """
+    from lib import rls
     pool = await get_pool()
 
     conditions = ["subject = $1", "owner_user_id = $2"]
@@ -1484,14 +1563,15 @@ async def query_facts(
 
     where = "WHERE " + " AND ".join(conditions)
 
-    rows = await pool.fetch(
-        f"""SELECT id, subject, predicate, object, confidence,
-                   valid_from, valid_to, source_memory_id, created_at
-            FROM facts
-            {where}
-            ORDER BY predicate, valid_from DESC""",
-        *params,
-    )
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(
+            f"""SELECT id, subject, predicate, object, confidence,
+                       valid_from, valid_to, source_memory_id, created_at
+                FROM facts
+                {where}
+                ORDER BY predicate, valid_from DESC""",
+            *params,
+        )
 
     return [
         {
@@ -1510,7 +1590,7 @@ async def query_facts(
 
 # -- Stats collection (for future self-tuning) ------------------------------
 
-async def _record_store_stats(pool: asyncpg.Pool, project_id: UUID) -> None:
+async def _record_store_stats(conn: asyncpg.Connection, project_id: UUID) -> None:
     """
     Record a snapshot of project metrics after a store operation.
 
@@ -1525,7 +1605,7 @@ async def _record_store_stats(pool: asyncpg.Pool, project_id: UUID) -> None:
         return  # counter was just reset by cooling = time to record
 
     try:
-        row = await pool.fetchrow(
+        row = await conn.fetchrow(
             """SELECT
                    count(*) AS total,
                    avg(temperature) AS avg_temp,
@@ -1537,7 +1617,7 @@ async def _record_store_stats(pool: asyncpg.Pool, project_id: UUID) -> None:
         if not row or row["total"] == 0:
             return
 
-        await pool.execute(
+        await conn.execute(
             """INSERT INTO decay_stats
                    (project_id, total_memories,
                     avg_temperature, avg_access_count)
@@ -1550,7 +1630,7 @@ async def _record_store_stats(pool: asyncpg.Pool, project_id: UUID) -> None:
 
         # Prune old stats
         cutoff = datetime.now(timezone.utc) - timedelta(days=_STATS_RETENTION_DAYS)
-        await pool.execute(
+        await conn.execute(
             "DELETE FROM decay_stats WHERE recorded_at < $1", cutoff,
         )
     except Exception as exc:

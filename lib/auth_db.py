@@ -40,6 +40,154 @@ async def count_users() -> int:
     return int(row["n"] or 0)
 
 
+async def count_admins() -> int:
+    """
+    Return number of users with is_admin=true. Used by the startup
+    bootstrap path: zero means the server should write an admin-
+    bootstrap token for the operator to claim.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT COUNT(*) AS n FROM users WHERE is_admin = true",
+    )
+    return int(row["n"] or 0)
+
+
+async def set_admin(user_id: UUID, is_admin: bool) -> None:
+    """
+    Promote or demote a user's admin flag. The claim-admin flow calls
+    this with is_admin=True; reset-admin clears it with is_admin=False
+    (for all existing admins). No route accepts is_admin as a payload;
+    this function is the only write surface.
+    """
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE users SET is_admin = $2 WHERE id = $1",
+        user_id, is_admin,
+    )
+
+
+async def list_admin_ids() -> List[UUID]:
+    """Return the user_ids of every current admin. Used by reset-admin
+    to iterate token_generation bumps after demoting them."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id FROM users WHERE is_admin = true",
+    )
+    return [row["id"] for row in rows]
+
+
+async def list_users_overview(
+    offset: int = 0, limit: int = 50, search: Optional[str] = None,
+) -> tuple:
+    """
+    Admin-only listing of users with scalar-subquery counts for the
+    admin dashboard. Returns (users, total). Each user dict carries:
+
+        id, username, is_admin, created_at,
+        memory_count, fact_count, project_count, active_token_count
+
+    `search` does a case-insensitive prefix match on username when
+    provided; None or empty returns everyone.
+
+    Counts are scalar subqueries rather than a big JOIN + GROUP BY
+    because the result set is small (operators have dozens of users,
+    not millions) and the plan is equivalent in that regime.
+
+    Runs under admin_conn — the scalar subqueries cross user
+    boundaries (counting every user's rows, not just the admin's),
+    so RLS policies under FORCE RLS would return zero for every user
+    other than the admin without the sentinel bypass.
+    """
+    from lib import rls
+    pool = await get_pool()
+
+    where = "true"
+    args: list = []
+    if search:
+        where = "u.username ILIKE $1"
+        args.append(search + "%")
+
+    async with rls.admin_conn(pool) as conn:
+        total_row = await conn.fetchrow(
+            f"SELECT COUNT(*)::bigint AS n FROM users u WHERE {where}",
+            *args,
+        )
+        total = int(total_row["n"] or 0)
+
+        limit_idx = len(args) + 1
+        offset_idx = len(args) + 2
+        rows = await conn.fetch(
+            f"""
+            SELECT
+                u.id, u.username, u.is_admin, u.created_at,
+                (SELECT COUNT(*) FROM memories    m WHERE m.owner_user_id = u.id) AS memory_count,
+                (SELECT COUNT(*) FROM facts       f WHERE f.owner_user_id = u.id) AS fact_count,
+                (SELECT COUNT(*) FROM projects    p WHERE p.owner_user_id = u.id) AS project_count,
+                (SELECT COUNT(*) FROM auth_tokens t WHERE t.user_id = u.id AND t.revoked_at IS NULL) AS active_token_count
+            FROM users u
+            WHERE {where}
+            ORDER BY u.created_at DESC
+            LIMIT ${limit_idx} OFFSET ${offset_idx}
+            """,
+            *args, limit, offset,
+        )
+
+    users = [
+        {
+            "id": str(r["id"]),
+            "username": r["username"],
+            "is_admin": bool(r["is_admin"]),
+            "created_at": r["created_at"].isoformat(),
+            "memory_count": int(r["memory_count"] or 0),
+            "fact_count": int(r["fact_count"] or 0),
+            "project_count": int(r["project_count"] or 0),
+            "active_token_count": int(r["active_token_count"] or 0),
+        }
+        for r in rows
+    ]
+    return users, total
+
+
+async def delete_user(user_id: UUID) -> bool:
+    """
+    Hard-delete a user. Cascades via FK to memories, facts, projects,
+    auth_tokens. Audit_events carries ON DELETE SET NULL on actor_user_id
+    so the historical trail survives with NULL actor. Returns True when
+    a row was removed; False when the UUID does not match any user.
+    """
+    pool = await get_pool()
+    result = await pool.execute("DELETE FROM users WHERE id = $1", user_id)
+    return result.endswith(" 1")
+
+
+async def set_password(user_id: UUID, new_password: str) -> None:
+    """
+    Overwrite a user's password with a fresh scrypt hash. Per-field
+    length caps apply (same as create_user). Caller should pair this
+    with bump_token_generation so the old sessions die — the session-
+    revocation is NOT automatic because not every caller wants it
+    (a self-service password change might want to keep the current
+    session valid; an admin-triggered reset always wants to kill the
+    other sessions).
+    """
+    if not new_password or len(new_password) < 8:
+        raise ValueError("password must be at least 8 characters")
+    try:
+        enforce_field_len(new_password, MAX_PASSWORD_BYTES, "password")
+    except PayloadTooLarge as exc:
+        raise ValueError(str(exc))
+
+    hashed = auth.hash_secret(new_password)
+    pool = await get_pool()
+    result = await pool.execute(
+        "UPDATE users SET password_hash = $2 WHERE id = $1",
+        user_id, hashed,
+    )
+    if not result.endswith(" 1"):
+        raise ValueError(f"no such user: {user_id}")
+
+
 async def create_user(username: str, password: str) -> Dict[str, Any]:
     """
     Create a user. Raises asyncpg.UniqueViolationError if the username
@@ -67,7 +215,7 @@ async def create_user(username: str, password: str) -> Dict[str, Any]:
         """
         INSERT INTO users (username, password_hash)
         VALUES ($1, $2)
-        RETURNING id, username, created_at
+        RETURNING id, username, is_admin, created_at
         """,
         username.strip(), hashed,
     )
@@ -82,7 +230,7 @@ async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        SELECT id, username, password_hash, created_at
+        SELECT id, username, password_hash, is_admin, created_at
         FROM users WHERE username = $1
         """,
         username.strip() if username else "",
@@ -97,7 +245,8 @@ async def get_user_by_id(user_id: UUID) -> Optional[Dict[str, Any]]:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        SELECT id, username, created_at FROM users WHERE id = $1
+        SELECT id, username, is_admin, created_at
+        FROM users WHERE id = $1
         """,
         user_id,
     )
@@ -108,6 +257,7 @@ def _row_to_user(row) -> Dict[str, Any]:
     return {
         "id": str(row["id"]),
         "username": row["username"],
+        "is_admin": bool(row["is_admin"]),
         "created_at": row["created_at"].isoformat(),
     }
 
@@ -144,20 +294,22 @@ async def create_token(
     lookup_key, secret = parts
     secret_hash = auth.hash_secret(secret)
 
+    from lib import rls
     pool = await get_pool()
-    row = await pool.fetchrow(
-        """
-        INSERT INTO auth_tokens (
-            user_id, token_hash, lookup_key, label, issued_generation
+    async with rls.app_conn(pool, user_id) as conn:
+        row = await conn.fetchrow(
+            """
+            INSERT INTO auth_tokens (
+                user_id, token_hash, lookup_key, label, issued_generation
+            )
+            VALUES (
+                $1, $2, $3, $4,
+                (SELECT token_generation FROM users WHERE id = $1)
+            )
+            RETURNING id, user_id, label, created_at
+            """,
+            user_id, secret_hash, lookup_key, label,
         )
-        VALUES (
-            $1, $2, $3, $4,
-            (SELECT token_generation FROM users WHERE id = $1)
-        )
-        RETURNING id, user_id, label, created_at
-        """,
-        user_id, secret_hash, lookup_key, label,
-    )
     return {
         "id": str(row["id"]),
         "user_id": str(row["user_id"]),
@@ -169,16 +321,18 @@ async def create_token(
 
 async def list_tokens(user_id: UUID) -> List[Dict[str, Any]]:
     """List a user's tokens (hashes never returned, only metadata)."""
+    from lib import rls
     pool = await get_pool()
-    rows = await pool.fetch(
-        """
-        SELECT id, label, created_at, last_used_at, revoked_at
-        FROM auth_tokens
-        WHERE user_id = $1
-        ORDER BY created_at DESC
-        """,
-        user_id,
-    )
+    async with rls.app_conn(pool, user_id) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT id, label, created_at, last_used_at, revoked_at
+            FROM auth_tokens
+            WHERE user_id = $1
+            ORDER BY created_at DESC
+            """,
+            user_id,
+        )
     out = []
     for row in rows:
         out.append({
@@ -196,15 +350,17 @@ async def revoke_token(user_id: UUID, token_id: UUID) -> bool:
     Mark a token as revoked. Only the token's owner can revoke it;
     revoking someone else's token returns False without side effects.
     """
+    from lib import rls
     pool = await get_pool()
-    result = await pool.execute(
-        """
-        UPDATE auth_tokens
-        SET revoked_at = now()
-        WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
-        """,
-        token_id, user_id,
-    )
+    async with rls.app_conn(pool, user_id) as conn:
+        result = await conn.execute(
+            """
+            UPDATE auth_tokens
+            SET revoked_at = now()
+            WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL
+            """,
+            token_id, user_id,
+        )
     return result.endswith(" 1")
 
 
@@ -260,33 +416,40 @@ async def resolve_token(raw_token: str) -> Optional[Dict[str, Any]]:
         return None
     lookup_key, secret = parts
 
+    from lib import rls
     pool = await get_pool()
-    row = await pool.fetchrow(
-        """
-        SELECT t.id, t.token_hash, t.user_id,
-               u.username
-        FROM auth_tokens t
-        JOIN users u ON u.id = t.user_id
-        WHERE t.lookup_key = $1
-          AND t.revoked_at IS NULL
-          AND t.issued_generation = u.token_generation
-        """,
-        lookup_key,
-    )
-    if row is None:
-        return None
+    # Pre-auth: we don't know the user yet. Runs as admin so RLS on
+    # auth_tokens doesn't filter the lookup row out before we can
+    # verify the secret. Once verified, downstream code re-enters
+    # with the authenticated user's context via app_conn.
+    async with rls.admin_conn(pool) as conn:
+        row = await conn.fetchrow(
+            """
+            SELECT t.id, t.token_hash, t.user_id,
+                   u.username, u.is_admin
+            FROM auth_tokens t
+            JOIN users u ON u.id = t.user_id
+            WHERE t.lookup_key = $1
+              AND t.revoked_at IS NULL
+              AND t.issued_generation = u.token_generation
+            """,
+            lookup_key,
+        )
+        if row is None:
+            return None
 
-    if not auth.verify_secret(secret, row["token_hash"]):
-        return None
+        if not auth.verify_secret(secret, row["token_hash"]):
+            return None
 
-    # Fire-and-forget last_used_at update. If it races with another
-    # concurrent auth the difference is not functional.
-    await pool.execute(
-        "UPDATE auth_tokens SET last_used_at = now() WHERE id = $1",
-        row["id"],
-    )
+        # Fire-and-forget last_used_at update. If it races with another
+        # concurrent auth the difference is not functional.
+        await conn.execute(
+            "UPDATE auth_tokens SET last_used_at = now() WHERE id = $1",
+            row["id"],
+        )
     return {
         "token_id": str(row["id"]),
         "user_id": row["user_id"],
         "username": row["username"],
+        "is_admin": bool(row["is_admin"]),
     }

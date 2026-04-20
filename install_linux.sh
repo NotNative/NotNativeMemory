@@ -445,6 +445,16 @@ MEMORY_BIND_HOST=0.0.0.0
 # MEMORY_COOKIE_SECURE: set to 1 when behind TLS so session and CSRF
 # cookies carry the Secure attribute. Leave unset on plain HTTP dev.
 MEMORY_COOKIE_SECURE=
+
+# -- Postgres Row-Level Security (optional defense-in-depth) --------------
+# When unset, the app and migrations both connect as MEMORY_DB_USER
+# above (single-role setup, default). When set, migrations still use
+# MEMORY_DB_USER (must be superuser for DDL) but runtime app queries
+# use MEMORY_APP_DB_USER (typically a non-superuser role created via
+# docs/rls-activation.md). This is required to actually enforce the
+# RLS policies defined in migration 008.
+MEMORY_APP_DB_USER=
+MEMORY_APP_DB_PASSWORD=
 EOF
 info "Saved to .env"
 

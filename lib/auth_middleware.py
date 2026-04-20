@@ -27,6 +27,11 @@ Localhost bypass (solo mode):
 On success:
     request.state.user_id     UUID of the authenticated user
     request.state.username    login name
+    request.state.is_admin    True if the authenticated user has the
+                              admin role (set via claim-admin or the
+                              reset-admin CLI; no API surface toggles
+                              it). Defaults False for token-bypass
+                              paths that can't resolve a DB row.
     request.state.auth_bypass True if solo-mode bypass fired
 """
 
@@ -51,9 +56,11 @@ from lib.auth_context import set_current_user_id
 _WHITELIST_PREFIXES = (
     "/auth/register",
     "/auth/login",
+    "/auth/claim-admin",
     "/health",
     "/login",
     "/register",
+    "/claim-admin",
 )
 
 _WHITELIST_EXACT = ("/",)
@@ -116,6 +123,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             request.state.auth_bypass = False
             request.state.user_id = None
             request.state.username = None
+            request.state.is_admin = False
             await self._try_attach_identity(request)
             return await call_next(request)
 
@@ -145,6 +153,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         request.state.auth_bypass = False
         request.state.user_id = resolved["user_id"]
         request.state.username = resolved["username"]
+        request.state.is_admin = bool(resolved.get("is_admin", False))
         set_current_user_id(resolved["user_id"])
 
         return await call_next(request)
@@ -184,6 +193,7 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         request.state.auth_bypass = True
         request.state.user_id = uid
         request.state.username = user["username"]
+        request.state.is_admin = bool(user.get("is_admin", False))
         set_current_user_id(uid)
         return True
 
@@ -197,4 +207,5 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if resolved is not None:
             request.state.user_id = resolved["user_id"]
             request.state.username = resolved["username"]
+            request.state.is_admin = bool(resolved.get("is_admin", False))
             set_current_user_id(resolved["user_id"])

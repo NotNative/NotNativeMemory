@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}Audit log — NotNativeMemory{% endblock %}
+{% block content %}
+<h1>Audit log</h1>
+
+<p style="color:var(--muted-fg);font-size:0.9em;">
+  Append-only trail of security-relevant events: logins, logouts,
+  token mint/revoke, registrations, rate-limit hits, admin claims.
+  Retention is whatever your DB retains — no application-level
+  trimming happens here.
+</p>
+
+<form class="filters" method="get" action="/admin/audit">
+  <div class="filter-row">
+    <input name="actor_username" value="{{ filters.actor_username or '' }}"
+           placeholder="actor username (exact)"
+           style="flex:1 1 220px;">
+    <select name="event_type" style="flex:0 1 200px;">
+      <option value="">event: any</option>
+      {% for t in event_types %}
+        <option value="{{ t }}" {% if filters.event_type == t %}selected{% endif %}>{{ t }}</option>
+      {% endfor %}
+    </select>
+    <select name="since" style="flex:0 1 180px;">
+      <option value="">since: any</option>
+      <option value="1h" {% if filters.since == '1h' %}selected{% endif %}>last hour</option>
+      <option value="24h" {% if filters.since == '24h' %}selected{% endif %}>last 24 hours</option>
+      <option value="7d" {% if filters.since == '7d' %}selected{% endif %}>last 7 days</option>
+      <option value="30d" {% if filters.since == '30d' %}selected{% endif %}>last 30 days</option>
+    </select>
+    <input type="hidden" name="limit" value="{{ limit }}">
+    <button type="submit">Apply</button>
+    <a href="/admin/audit" class="clear-link">clear</a>
+  </div>
+</form>
+
+<p>
+  {% if total == 0 %}
+    No events match.
+  {% else %}
+    Showing {{ offset + 1 }}-{{ offset + count }} of {{ total }}.
+  {% endif %}
+</p>
+
+{% if events %}
+<table class="audit-table">
+  <thead>
+    <tr>
+      <th>When</th>
+      <th>Actor</th>
+      <th>Event</th>
+      <th>Target</th>
+      <th>Detail</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in events %}
+      <tr>
+        <td class="ts">{{ e.at[:19].replace('T', ' ') }}</td>
+        <td>
+          {% if e.actor_username %}{{ e.actor_username }}
+          {% elif e.actor_user_id %}<em title="{{ e.actor_user_id }}">(deleted)</em>
+          {% else %}<span class="faint">—</span>{% endif %}
+        </td>
+        <td><code>{{ e.event_type }}</code></td>
+        <td>
+          {% if e.target_id %}<code class="tiny">{{ e.target_id[:8] }}</code>
+          {% else %}<span class="faint">—</span>{% endif %}
+        </td>
+        <td><pre class="detail">{{ e.detail | tojson }}</pre></td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endif %}
+
+{% if total > limit %}
+<div class="paging">
+  {% if prev_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ prev_offset }}">&larr; Prev</a>
+  {% else %}
+    <span class="disabled">&larr; Prev</span>
+  {% endif %}
+  {% if next_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ next_offset }}">Next &rarr;</a>
+  {% else %}
+    <span class="disabled">Next &rarr;</span>
+  {% endif %}
+</div>
+{% endif %}
+
+<style>
+  .audit-table { width: 100%; border-collapse: collapse; font-size: 0.9em; }
+  .audit-table th, .audit-table td { text-align: left; padding: 0.35em 0.5em;
+                                     border-bottom: 1px solid var(--border);
+                                     vertical-align: top; }
+  .audit-table th { color: var(--muted-fg); font-weight: 600; }
+  .audit-table .ts { white-space: nowrap; color: var(--muted-fg);
+                      font-family: ui-monospace, monospace; font-size: 0.9em; }
+  .audit-table code.tiny { font-size: 0.8em; }
+  .audit-table pre.detail { margin: 0; background: var(--code-bg);
+                             padding: 0.3em 0.5em; border-radius: 3px;
+                             font-size: 0.85em; overflow-x: auto;
+                             max-width: 40ch; }
+  .audit-table .faint { color: var(--faint-fg); }
+  .paging { margin: 1em 0; display: flex; gap: 1em; align-items: center; color: var(--muted-fg); }
+  .paging a { color: var(--link); text-decoration: none; padding: 0.3em 0.8em;
+              border: 1px solid var(--border-strong); border-radius: 3px; }
+  .paging .disabled { color: var(--faint-fg); pointer-events: none; border-color: var(--border); }
+</style>
+{% endblock %}

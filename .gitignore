@@ -19,6 +19,12 @@ models/
 # Local install state
 .install-manifest.json
 
+# Server runtime state (admin bootstrap token, future state artifacts).
+# Bind-mounted from the host into the mcp container so operators
+# with filesystem access can read the bootstrap token without
+# docker-exec'ing into the container.
+state/
+
 # Claude Code per-project state (not our shipped claude/ templates)
 .claude/
 

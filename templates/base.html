@@ -165,13 +165,19 @@
     <strong>NotNativeMemory</strong>
     {% if username %}
       <span class="sep">|</span>
-      <span>{{ username }}</span>
+      <span>{{ username }}{% if is_admin %} <small style="color:var(--faint-fg);">(admin)</small>{% endif %}</span>
       <span class="sep">|</span>
       <a href="/memories">Memories</a>
       <span class="sep">|</span>
       <a href="/facts">Facts</a>
       <span class="sep">|</span>
       <a href="/tokens">Tokens</a>
+      {% if is_admin %}
+        <span class="sep">|</span>
+        <a href="/admin/users">Users</a>
+        <span class="sep">|</span>
+        <a href="/admin/audit">Audit</a>
+      {% endif %}
       <span class="sep">|</span>
       <form class="inline" method="post" action="/logout">
         <input type="hidden" name="_csrf" value="{{ csrf_token }}">

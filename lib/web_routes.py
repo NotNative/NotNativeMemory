@@ -21,7 +21,7 @@ from starlette.requests import Request
 from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.templating import Jinja2Templates
 
-from lib import audit, auth, auth_db, password_policy, rate_limit
+from lib import admin_bootstrap, audit, auth, auth_db, password_policy, rate_limit
 from lib.csrf import check_csrf, get_or_mint_csrf, set_csrf_cookie
 
 
@@ -80,6 +80,7 @@ def _context_for(request: Request, csrf_token: str, **extra) -> dict:
         "request": request,
         "username": getattr(request.state, "username", None),
         "user_id": getattr(request.state, "user_id", None),
+        "is_admin": bool(getattr(request.state, "is_admin", False)),
         "csrf_token": csrf_token,
     }
     ctx.update(extra)
@@ -112,6 +113,29 @@ def _require_login(request: Request) -> RedirectResponse | None:
     return None
 
 
+def _require_admin(request: Request) -> HTMLResponse | RedirectResponse | None:
+    """
+    Guard for /admin/* pages. Returns:
+      - RedirectResponse to /login when the caller isn't logged in.
+      - HTMLResponse 403 when the caller is logged in but not admin.
+      - None when the caller is an authenticated admin.
+
+    Usage pattern in handlers:
+
+        reject = _require_admin(request)
+        if reject:
+            return reject
+    """
+    redirect = _require_login(request)
+    if redirect:
+        return redirect
+    if not getattr(request.state, "is_admin", False):
+        return HTMLResponse(
+            "Forbidden: admin role required.", status_code=403,
+        )
+    return None
+
+
 # -- Routes -----------------------------------------------------------------
 
 
@@ -120,6 +144,13 @@ def register_routes(mcp) -> None:
 
     @mcp.custom_route("/", methods=["GET"])
     async def root(request: Request):
+        # First-run claim path takes priority: if a bootstrap file
+        # exists, the operator has not yet claimed admin, and the
+        # claim form is the intended landing page. Once claimed, the
+        # file is deleted (see admin_bootstrap.delete_bootstrap_file)
+        # and this redirect stops firing.
+        if admin_bootstrap.bootstrap_file_exists():
+            return RedirectResponse("/claim-admin", status_code=302)
         if getattr(request.state, "user_id", None):
             return RedirectResponse("/memories", status_code=302)
         return RedirectResponse("/login", status_code=302)
@@ -185,6 +216,112 @@ def register_routes(mcp) -> None:
             target_id=UUID(token["id"]),
             detail={**audit.request_detail(request), "label": "web-session"},
         )
+        resp = RedirectResponse("/memories", status_code=303)
+        _set_session_cookie(resp, token["token"])
+        return resp
+
+    # -- Claim admin ------------------------------------------------------
+
+    @mcp.custom_route("/claim-admin", methods=["GET"])
+    async def claim_admin_page(request: Request):
+        # Only available while the bootstrap file exists. Once an admin
+        # is claimed the file is deleted and this page 404s so casual
+        # visitors don't get an enticing target.
+        if not admin_bootstrap.bootstrap_file_exists():
+            return RedirectResponse("/login", status_code=302)
+        return _render_with_csrf(request, "claim_admin.html")
+
+    @mcp.custom_route("/claim-admin", methods=["POST"])
+    async def claim_admin_submit(request: Request):
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        # Re-check file existence on the submit path too; a race where
+        # another claim raced in and succeeded should not let a second
+        # claim slip through.
+        if not admin_bootstrap.bootstrap_file_exists():
+            return RedirectResponse("/login", status_code=302)
+
+        form = await request.form()
+        bootstrap_token = (form.get("bootstrap_token") or "").strip()
+        username = (form.get("username") or "").strip()
+        password = form.get("password") or ""
+        confirm = form.get("password_confirm") or ""
+
+        if not bootstrap_token or not username or not password:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=400,
+                error="Bootstrap token, username, and password are required.",
+            )
+        if password != confirm:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=400,
+                error="Passwords do not match.",
+            )
+
+        if not admin_bootstrap.validate_bootstrap_token(bootstrap_token):
+            await audit.log_event(
+                "admin.claim_fail",
+                detail=audit.request_detail(request),
+            )
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=401,
+                error="Invalid bootstrap token.",
+            )
+
+        policy_err = await password_policy.validate_new_password(password)
+        if policy_err:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=400,
+                error=policy_err,
+            )
+
+        try:
+            new_user = await auth_db.create_user(username, password)
+        except asyncpg.UniqueViolationError:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=409,
+                error="That username is taken.",
+            )
+        except ValueError as exc:
+            return _render_with_csrf(
+                request, "claim_admin.html",
+                status_code=400,
+                error=str(exc),
+            )
+
+        # Promote and delete the file before minting the session token
+        # so a mid-flow crash never leaves us with a non-admin account
+        # and a still-valid bootstrap file.
+        uid = UUID(new_user["id"])
+        await auth_db.set_admin(uid, True)
+        admin_bootstrap.delete_bootstrap_file()
+
+        await audit.log_event(
+            "admin.claimed",
+            actor_user_id=uid,
+            detail=audit.request_detail(request),
+        )
+        await audit.log_event(
+            "user.register",
+            actor_user_id=uid,
+            detail={**audit.request_detail(request), "is_admin": True},
+        )
+
+        token = await auth_db.create_token(uid, label="web-session")
+        await audit.log_event(
+            "login.success",
+            actor_user_id=uid,
+            target_id=UUID(token["id"]),
+            detail={**audit.request_detail(request), "label": "web-session"},
+        )
+
         resp = RedirectResponse("/memories", status_code=303)
         _set_session_cookie(resp, token["token"])
         return resp
@@ -270,6 +407,260 @@ def register_routes(mcp) -> None:
         # Redirect to login rather than auto-login: forces the user to
         # confirm they remember the password they just typed.
         return RedirectResponse("/login", status_code=303)
+
+    # -- Admin: users ------------------------------------------------------
+
+    @mcp.custom_route("/admin/users", methods=["GET"])
+    async def admin_users_page(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+
+        params = request.query_params
+
+        def _int(name: str, default: int) -> int:
+            try:
+                return int(params.get(name, ""))
+            except (TypeError, ValueError):
+                return default
+
+        search = (params.get("search") or "").strip() or None
+        limit = max(1, min(_int("limit", 50), 200))
+        offset = max(0, _int("offset", 0))
+
+        users, total = await auth_db.list_users_overview(
+            offset=offset, limit=limit, search=search,
+        )
+
+        prev_offset = max(0, offset - limit) if offset > 0 else None
+        next_offset = offset + limit if offset + limit < total else None
+        base_qs = []
+        if search:
+            base_qs.append(f"search={search}")
+        base_qs.append(f"limit={limit}")
+        qs_without_offset = "&".join(base_qs)
+
+        return _render_with_csrf(
+            request, "admin_users.html",
+            users=users, count=len(users), total=total,
+            offset=offset, limit=limit, search=search,
+            prev_offset=prev_offset, next_offset=next_offset,
+            qs_without_offset=qs_without_offset,
+        )
+
+    @mcp.custom_route("/admin/users/{user_id}/force-logout", methods=["POST"])
+    async def admin_users_force_logout(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        try:
+            target = UUID(request.path_params["user_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid user id", status_code=400)
+
+        try:
+            new_gen = await auth_db.bump_token_generation(target)
+        except ValueError:
+            return HTMLResponse("user not found", status_code=404)
+
+        acting = request.state.user_id
+        if isinstance(acting, str):
+            acting = UUID(acting)
+        await audit.log_event(
+            "admin.force_logout",
+            actor_user_id=acting,
+            target_id=target,
+            detail={**audit.request_detail(request), "new_generation": new_gen},
+        )
+        return HTMLResponse("", status_code=200)
+
+    @mcp.custom_route("/admin/users/{user_id}/password", methods=["GET"])
+    async def admin_users_password_page(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+        try:
+            target = UUID(request.path_params["user_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid user id", status_code=400)
+        user = await auth_db.get_user_by_id(target)
+        if user is None:
+            return HTMLResponse("user not found", status_code=404)
+        return _render_with_csrf(
+            request, "admin_user_password.html", target_user=user,
+        )
+
+    @mcp.custom_route("/admin/users/{user_id}/password", methods=["POST"])
+    async def admin_users_password_submit(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        try:
+            target = UUID(request.path_params["user_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid user id", status_code=400)
+
+        user = await auth_db.get_user_by_id(target)
+        if user is None:
+            return HTMLResponse("user not found", status_code=404)
+
+        form = await request.form()
+        new_password = form.get("new_password") or ""
+        confirm = form.get("password_confirm") or ""
+
+        if not new_password:
+            return _render_with_csrf(
+                request, "admin_user_password.html",
+                target_user=user, status_code=400,
+                error="New password is required.",
+            )
+        if new_password != confirm:
+            return _render_with_csrf(
+                request, "admin_user_password.html",
+                target_user=user, status_code=400,
+                error="Passwords do not match.",
+            )
+
+        policy_err = await password_policy.validate_new_password(new_password)
+        if policy_err:
+            return _render_with_csrf(
+                request, "admin_user_password.html",
+                target_user=user, status_code=400, error=policy_err,
+            )
+
+        try:
+            await auth_db.set_password(target, new_password)
+        except ValueError as exc:
+            return _render_with_csrf(
+                request, "admin_user_password.html",
+                target_user=user, status_code=400, error=str(exc),
+            )
+
+        # Always kill existing sessions after an admin-triggered reset.
+        # The user must log in with the new password to get a fresh token.
+        await auth_db.bump_token_generation(target)
+
+        acting = request.state.user_id
+        if isinstance(acting, str):
+            acting = UUID(acting)
+        await audit.log_event(
+            "user.password_reset_by_admin",
+            actor_user_id=acting,
+            target_id=target,
+            detail=audit.request_detail(request),
+        )
+
+        return _render_with_csrf(
+            request, "admin_user_password.html",
+            target_user=user, flash="Password reset. All existing sessions invalidated.",
+        )
+
+    @mcp.custom_route("/admin/users/{user_id}/offboard", methods=["POST"])
+    async def admin_users_offboard(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        try:
+            target = UUID(request.path_params["user_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid user id", status_code=400)
+
+        acting = request.state.user_id
+        if isinstance(acting, str):
+            acting = UUID(acting)
+
+        # Refuse to off-board yourself: it's almost always a mistake,
+        # and a reset-admin + logout flow is the correct recovery.
+        if target == acting:
+            return HTMLResponse(
+                "cannot off-board yourself; use --reset-admin instead",
+                status_code=400,
+            )
+
+        removed = await auth_db.delete_user(target)
+        if not removed:
+            return HTMLResponse("user not found", status_code=404)
+
+        await audit.log_event(
+            "admin.offboard",
+            actor_user_id=acting,
+            target_id=target,
+            detail=audit.request_detail(request),
+        )
+        return HTMLResponse("", status_code=200)
+
+    # -- Admin: audit log --------------------------------------------------
+
+    @mcp.custom_route("/admin/audit", methods=["GET"])
+    async def admin_audit_page(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+
+        params = request.query_params
+
+        def _str(name: str):
+            v = params.get(name, "").strip()
+            return v or None
+
+        def _int(name: str, default: int) -> int:
+            try:
+                return int(params.get(name, ""))
+            except (TypeError, ValueError):
+                return default
+
+        since_preset = _str("since") or ""
+        filters = {
+            "actor_username": _str("actor_username"),
+            "event_type": _str("event_type"),
+            "since": since_preset,
+        }
+
+        limit = max(1, min(_int("limit", 50), 200))
+        offset = max(0, _int("offset", 0))
+
+        events, total = await audit.list_events(
+            offset=offset,
+            limit=limit,
+            actor_username=filters["actor_username"],
+            event_type=filters["event_type"],
+            since=audit.parse_since_preset(since_preset),
+        )
+        event_types = await audit.list_event_types()
+
+        base_qs = []
+        for name in ("actor_username", "event_type", "since"):
+            v = filters.get(name)
+            if v:
+                base_qs.append(f"{name}={v}")
+        base_qs.append(f"limit={limit}")
+        qs_without_offset = "&".join(base_qs)
+
+        prev_offset = max(0, offset - limit) if offset > 0 else None
+        next_offset = offset + limit if offset + limit < total else None
+
+        return _render_with_csrf(
+            request, "admin_audit.html",
+            events=events, count=len(events), total=total,
+            offset=offset, limit=limit,
+            filters=filters, event_types=event_types,
+            qs_without_offset=qs_without_offset,
+            prev_offset=prev_offset, next_offset=next_offset,
+        )
 
     # -- Logout -----------------------------------------------------------
 

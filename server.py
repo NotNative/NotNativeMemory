@@ -946,6 +946,35 @@ def _start_foreground(port: int) -> None:
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
 
+    # Bootstrap admin token: run before uvicorn so the operator sees
+    # the banner in the terminal that started the server. Needs the
+    # DB pool to be ready, which triggers the migration runner as a
+    # side effect — so schema is current before we count admins.
+    #
+    # We run this in its own asyncio.run() and then CLOSE the pool so
+    # uvicorn's event loop creates a fresh one. asyncpg pools are
+    # bound to the event loop that created them; reusing the pre-
+    # uvicorn pool inside uvicorn's loop would raise on first use.
+    import asyncio
+    from lib import admin_bootstrap, db as _db_module
+
+    async def _bootstrap_check():
+        try:
+            await _db_module.get_pool()
+            path = await admin_bootstrap.ensure_bootstrap_if_needed()
+            if path:
+                admin_bootstrap.log_bootstrap_banner(path)
+        finally:
+            await _db_module.close_pool()
+
+    try:
+        asyncio.run(_bootstrap_check())
+    except Exception as exc:
+        # Bootstrap check is best-effort: a DB blip here shouldn't
+        # stop the server from starting. Log and continue; the next
+        # restart will retry.
+        print(f"admin bootstrap check skipped: {exc}", file=sys.stderr)
+
     _write_pid(port)
     print(f"NotNativeMemory MCP server starting on http://{bind_host}:{port} (foreground)")
     try:
@@ -988,6 +1017,41 @@ async def _cli_create_user(username: str) -> int:
     return 0
 
 
+async def _cli_reset_admin() -> int:
+    """
+    Clear the admin role on every user currently flagged, bump each of
+    their token_generation counters so outstanding sessions die, and
+    remove any stale bootstrap token file so the next server start
+    regenerates a fresh one.
+
+    No HTTP path toggles is_admin; this CLI and the claim-admin flow
+    are the only writers. Running this always succeeds as a no-op
+    when no admin exists (still cleans up a stale file if present).
+    """
+    from lib import admin_bootstrap, auth_db, db
+
+    admin_ids = await auth_db.list_admin_ids()
+    for uid in admin_ids:
+        await auth_db.set_admin(uid, False)
+        await auth_db.bump_token_generation(uid)
+
+    # Remove any stale bootstrap file that the previous admin might
+    # not have used, OR that was orphaned by a crash. Next startup
+    # will regenerate one.
+    file_removed = admin_bootstrap.delete_bootstrap_file()
+
+    await db.close_pool()
+
+    print(f"Demoted {len(admin_ids)} admin user(s).")
+    for uid in admin_ids:
+        print(f"  - {uid}")
+    if file_removed:
+        print("Removed stale admin bootstrap file.")
+    print("On next server start, a fresh bootstrap token will be issued.")
+    print("See state/admin_bootstrap.txt after startup.")
+    return 0
+
+
 if __name__ == "__main__":
     if "--help" in sys.argv or "-h" in sys.argv:
         print("NotNativeMemory - MCP Memory Server")
@@ -1000,6 +1064,7 @@ if __name__ == "__main__":
         print("  python server.py --restart, -r         Stop and restart the HTTP server")
         print("  python server.py --status              Show server status")
         print("  python server.py --create-user NAME    Create a user (prompts for password)")
+        print("  python server.py --reset-admin         Demote all admins; regen bootstrap file")
         print("  python server.py --help                Show this help")
         print()
         print("The default mode is HTTP (background). Use --mcp for stdio transport")
@@ -1024,6 +1089,10 @@ if __name__ == "__main__":
             sys.exit(2)
         import asyncio
         sys.exit(asyncio.run(_cli_create_user(sys.argv[idx + 1])))
+
+    elif "--reset-admin" in sys.argv:
+        import asyncio
+        sys.exit(asyncio.run(_cli_reset_admin()))
 
     elif "--status" in sys.argv:
         pid, port = _read_pid()
