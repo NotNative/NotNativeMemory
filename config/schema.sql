@@ -12,13 +12,16 @@ CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
 -- domains[] lists which domain-scoped projects this project pulls from.
 CREATE TABLE IF NOT EXISTS projects (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    directory TEXT UNIQUE NOT NULL,
+    directory TEXT NOT NULL,
     name TEXT NOT NULL,
     scope TEXT NOT NULL DEFAULT 'local'
         CHECK (scope IN ('local', 'domain', 'global')),
     domains TEXT[] NOT NULL DEFAULT '{}',
     created_at TIMESTAMPTZ DEFAULT now()
 );
+-- Uniqueness is per-user: each user has their own _global, _domain_*,
+-- and local project rows. Composite is added after users/ownership
+-- tables exist lower in this file.
 
 CREATE INDEX IF NOT EXISTS idx_projects_scope
     ON projects (scope);
@@ -116,14 +119,13 @@ CREATE INDEX IF NOT EXISTS idx_facts_predicate
 CREATE INDEX IF NOT EXISTS idx_facts_valid
     ON facts (valid_from, valid_to);
 
--- Users table: identity for the Bearer-token auth layer. The first
--- row registered on a fresh MCP gets is_admin=TRUE; subsequent
--- registrations require an invite from an admin.
+-- Users table: identity for the Bearer-token auth layer.
+-- Registration is open (any caller can create an account). There is
+-- no admin concept - every user sees only their own memories.
 CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,          -- hashlib.scrypt digest
-    is_admin BOOLEAN NOT NULL DEFAULT FALSE,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -150,18 +152,19 @@ CREATE INDEX IF NOT EXISTS idx_auth_tokens_active
     ON auth_tokens (token_hash)
     WHERE revoked_at IS NULL;
 
--- Ownership columns. Nullable so pre-auth rows remain accessible;
--- per-user isolation in the tool layer enforces scoping.
+-- Ownership columns: every row belongs to exactly one user. NOT NULL
+-- enforces "no anonymous rows"; per-user reads trust the non-null
+-- invariant to skip a nullable branch in the query builder.
 ALTER TABLE projects
-    ADD COLUMN IF NOT EXISTS owner_user_id UUID
+    ADD COLUMN IF NOT EXISTS owner_user_id UUID NOT NULL
         REFERENCES users(id) ON DELETE CASCADE;
 
 ALTER TABLE memories
-    ADD COLUMN IF NOT EXISTS owner_user_id UUID
+    ADD COLUMN IF NOT EXISTS owner_user_id UUID NOT NULL
         REFERENCES users(id) ON DELETE CASCADE;
 
 ALTER TABLE facts
-    ADD COLUMN IF NOT EXISTS owner_user_id UUID
+    ADD COLUMN IF NOT EXISTS owner_user_id UUID NOT NULL
         REFERENCES users(id) ON DELETE CASCADE;
 
 CREATE INDEX IF NOT EXISTS idx_projects_owner
@@ -172,3 +175,18 @@ CREATE INDEX IF NOT EXISTS idx_memories_owner
 
 CREATE INDEX IF NOT EXISTS idx_facts_owner
     ON facts (owner_user_id);
+
+-- Per-user uniqueness on project directory. Two users can both have
+-- a `_global` row, a `D:/Projects/foo` row, etc. Within a single
+-- user, (directory, owner_user_id) is still unique.
+DO $$
+BEGIN
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conname = 'projects_directory_owner_key'
+    ) THEN
+        ALTER TABLE projects
+            ADD CONSTRAINT projects_directory_owner_key
+            UNIQUE (directory, owner_user_id);
+    END IF;
+END $$;
