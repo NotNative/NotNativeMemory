@@ -59,6 +59,11 @@ services:
     volumes:
       # Embedding model downloaded during install, mounted read-only.
       - ../models:/app/models:ro
+      # Writable runtime state: admin bootstrap token on first-run,
+      # any future operator-readable artifacts. Bind-mounted to the
+      # host so the operator can `cat state/admin_bootstrap.txt`
+      # without docker-exec-ing into the container.
+      - ../state:/app/state
     ports:
       - "${MCP_PORT:-9500}:9500"
     networks:
