@@ -947,6 +947,121 @@ async def admin_update_memory(
     return result == "UPDATE 1"
 
 
+async def admin_list_facts(
+    owner_user_id: UUID,
+    *,
+    subject: Optional[str] = None,
+    predicate: Optional[str] = None,
+    scope: Optional[str] = None,
+    q: Optional[str] = None,
+    include_history: bool = False,
+    offset: int = 0,
+    limit: int = 50,
+) -> tuple:
+    """
+    Facts list for the admin UI. Scoped to the caller's rows.
+
+    Filters compose with AND. `include_history=False` (the default)
+    hides superseded facts (valid_to IS NOT NULL) so the list shows
+    only the currently-true assertions. Pass True to see history.
+
+    Returns (fact_dicts, total_count_int).
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+    if offset < 0:
+        offset = 0
+
+    pool = await get_pool()
+
+    conditions = ["f.owner_user_id = $1"]
+    params: List[Any] = [owner_user_id]
+    idx = 2
+
+    if subject:
+        conditions.append(f"f.subject ILIKE ${idx}")
+        params.append(f"%{subject}%")
+        idx += 1
+    if predicate:
+        conditions.append(f"f.predicate = ${idx}")
+        params.append(predicate)
+        idx += 1
+    if scope in ("local", "global", "domain"):
+        conditions.append(f"p.scope = ${idx}")
+        params.append(scope)
+        idx += 1
+    if q:
+        conditions.append(
+            f"(f.object ILIKE ${idx} OR f.subject ILIKE ${idx})"
+        )
+        params.append(f"%{q}%")
+        idx += 1
+    if not include_history:
+        conditions.append("f.valid_to IS NULL")
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    count_row = await pool.fetchrow(
+        f"""SELECT COUNT(*) AS n FROM facts f
+            JOIN projects p ON p.id = f.project_id
+            {where}""",
+        *params,
+    )
+    total = int(count_row["n"] or 0)
+
+    limit_placeholder = idx
+    offset_placeholder = idx + 1
+    params.append(limit)
+    params.append(offset)
+
+    rows = await pool.fetch(
+        f"""SELECT f.id, f.subject, f.predicate, f.object, f.confidence,
+                   f.valid_from, f.valid_to, f.source_memory_id,
+                   f.created_at,
+                   p.scope AS project_scope,
+                   p.name AS project_name,
+                   p.directory AS project_directory
+            FROM facts f
+            JOIN projects p ON p.id = f.project_id
+            {where}
+            ORDER BY f.valid_from DESC, f.created_at DESC
+            LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
+        *params,
+    )
+
+    out = []
+    for r in rows:
+        out.append({
+            "id": str(r["id"]),
+            "subject": r["subject"],
+            "predicate": r["predicate"],
+            "object": r["object"],
+            "confidence": float(r["confidence"]),
+            "valid_from": r["valid_from"].isoformat(),
+            "valid_to": r["valid_to"].isoformat() if r["valid_to"] else None,
+            "created_at": r["created_at"].isoformat(),
+            "scope": r["project_scope"],
+            "project": r["project_name"],
+            "project_directory": r["project_directory"],
+            "source_memory_id": str(r["source_memory_id"]) if r["source_memory_id"] else None,
+        })
+    return out, total
+
+
+async def forget_fact(fact_id: UUID, owner_user_id: UUID) -> bool:
+    """
+    Hard-delete a fact row. Only the owner can delete their own.
+    """
+    pool = await get_pool()
+    result = await pool.execute(
+        "DELETE FROM facts WHERE id = $1 AND owner_user_id = $2",
+        fact_id, owner_user_id,
+    )
+    return result == "DELETE 1"
+
+
 async def admin_bulk_delete(
     memory_ids: List[UUID], owner_user_id: UUID,
 ) -> int:

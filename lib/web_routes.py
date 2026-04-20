@@ -324,6 +324,111 @@ def register_routes(mcp) -> None:
             next_offset=next_offset,
         )
 
+    # -- Facts ------------------------------------------------------------
+
+    @mcp.custom_route("/facts", methods=["GET"])
+    async def facts_page(request: Request):
+        redirect = _require_login(request)
+        if redirect:
+            return redirect
+
+        from lib import db
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        params = request.query_params
+
+        def _str(name: str):
+            v = params.get(name, "").strip()
+            return v or None
+
+        def _int(name: str, default: int) -> int:
+            try:
+                return int(params.get(name, ""))
+            except (TypeError, ValueError):
+                return default
+
+        filters = {
+            "subject": _str("subject"),
+            "predicate": _str("predicate"),
+            "scope": _str("scope"),
+            "q": _str("q"),
+            "include_history": params.get("include_history") in ("1", "on", "true"),
+        }
+        limit = max(1, min(_int("limit", 50), 200))
+        offset = max(0, _int("offset", 0))
+
+        facts, total = await db.admin_list_facts(
+            owner_user_id=uid,
+            subject=filters["subject"],
+            predicate=filters["predicate"],
+            scope=filters["scope"],
+            q=filters["q"],
+            include_history=filters["include_history"],
+            offset=offset,
+            limit=limit,
+        )
+
+        base_qs = []
+        for name in ("subject", "predicate", "scope", "q"):
+            v = filters.get(name)
+            if v:
+                base_qs.append(f"{name}={v}")
+        if filters["include_history"]:
+            base_qs.append("include_history=1")
+        base_qs.append(f"limit={limit}")
+        qs_without_offset = "&".join(base_qs)
+
+        prev_offset = max(0, offset - limit) if offset > 0 else None
+        next_offset = offset + limit if offset + limit < total else None
+
+        template = (
+            "_facts_list.html"
+            if request.headers.get("hx-request")
+            else "facts.html"
+        )
+
+        return _render_with_csrf(
+            request, template,
+            facts=facts,
+            count=len(facts),
+            total=total,
+            offset=offset,
+            limit=limit,
+            filters=filters,
+            qs_without_offset=qs_without_offset,
+            prev_offset=prev_offset,
+            next_offset=next_offset,
+        )
+
+    @mcp.custom_route("/facts/{fact_id}", methods=["DELETE"])
+    async def fact_delete(request: Request):
+        redirect = _require_login(request)
+        if redirect:
+            return HTMLResponse("unauthorized", status_code=401)
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        from lib import db
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        try:
+            fid = UUID(request.path_params["fact_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid id", status_code=400)
+
+        ok = await db.forget_fact(fid, uid)
+        if not ok:
+            return HTMLResponse("not found", status_code=404)
+        return HTMLResponse("", status_code=200)
+
     # -- Token management ------------------------------------------------
 
     @mcp.custom_route("/tokens", methods=["GET"])

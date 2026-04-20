@@ -1,0 +1,37 @@
+<div class="memory" id="fact-{{ f.id }}"
+     {% if f.valid_to %}style="opacity:0.65;"{% endif %}>
+  <button
+    hx-delete="/facts/{{ f.id }}"
+    hx-target="#fact-{{ f.id }}"
+    hx-swap="outerHTML"
+    hx-confirm="Hard-delete this fact? If it is superseded, history is lost.">
+    Delete
+  </button>
+  <div class="content" style="font-family:ui-monospace, monospace; font-size:0.95em;">
+    <strong>{{ f.subject }}</strong>
+    &middot; {{ f.predicate }}
+    &middot; {{ f.object }}
+    {% if f.valid_to %}
+      <span class="badge imp-low">superseded</span>
+    {% else %}
+      <span class="badge">current</span>
+    {% endif %}
+  </div>
+  <div class="meta">
+    <span class="badge">{{ f.scope }}</span>
+    {% if f.project %}<span class="badge">{{ f.project }}</span>{% endif %}
+    <span>confidence {{ '%.2f' % f.confidence }}</span>
+    <span>valid from {{ f.valid_from[:19].replace('T',' ') }}</span>
+    {% if f.valid_to %}
+      <span>to {{ f.valid_to[:19].replace('T',' ') }}</span>
+    {% endif %}
+    {% if f.source_memory_id %}
+      <span>
+        source:
+        <a href="/memories/{{ f.source_memory_id }}">
+          memory {{ f.source_memory_id[:8] }}
+        </a>
+      </span>
+    {% endif %}
+  </div>
+</div>

@@ -1,0 +1,37 @@
+{# Partial: fact list + paging. Rendered inside facts.html (full page)
+   or directly (HTMX in-place swap). #}
+<p>
+  {% if total == 0 %}
+    No facts match.
+  {% else %}
+    Showing {{ offset + 1 }}-{{ offset + count }} of {{ total }}.
+  {% endif %}
+</p>
+
+<div id="fact-list">
+  {% for f in facts %}
+    {% include "_fact_row.html" %}
+  {% else %}
+    <p>No facts match. Store one with the <code>memory_fact_add</code>
+       tool (subject, predicate, object).</p>
+  {% endfor %}
+</div>
+
+{% if total > limit %}
+<div class="paging">
+  {% if prev_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ prev_offset }}"
+       hx-get="?{{ qs_without_offset }}&offset={{ prev_offset }}"
+       hx-target="#fact-panel" hx-push-url="true">&larr; Prev</a>
+  {% else %}
+    <span class="disabled">&larr; Prev</span>
+  {% endif %}
+  {% if next_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ next_offset }}"
+       hx-get="?{{ qs_without_offset }}&offset={{ next_offset }}"
+       hx-target="#fact-panel" hx-push-url="true">Next &rarr;</a>
+  {% else %}
+    <span class="disabled">Next &rarr;</span>
+  {% endif %}
+</div>
+{% endif %}
