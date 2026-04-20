@@ -57,33 +57,59 @@ def _detect_project_directory() -> str:
     """
     Detect the current project directory.
 
-    stdio mode: Claude Code sets the working directory, so os.getcwd() works.
-    HTTP mode: working directory is meaningless, falls back to env var or "general".
-
-    Returns:
-        Project identifier string.
+    stdio mode: Claude Code sets the working directory, so os.getcwd()
+    is the right call. HTTP mode: working directory is meaningless,
+    falls back to an env var or returns the "general" sentinel that
+    the write-path validator rejects so callers can't silently pool
+    writes into an unintended bucket.
     """
-    # Explicit env var takes priority in any mode
     default = os.environ.get("MEMORY_DEFAULT_PROJECT", "")
     if default:
         return default
 
-    # stdio mode: Claude Code's working directory is inherited
     if not _http_mode:
         cwd = os.getcwd()
         if cwd and cwd != "/":
             return os.path.abspath(cwd)
 
-    # HTTP mode or no working directory: use "general" as a catch-all.
-    # This is the value the write-path validator rejects — it forces
-    # callers to set project explicitly instead of silently pooling
-    # writes into an unintended bucket.
     return "general"
 
 
 # Reserved scope names exposed as write targets.
 _GLOBAL_SCOPE = "_global"
 _DOMAIN_PREFIX = "_domain_"
+
+
+def _normalize_project(project: Optional[str]) -> str:
+    """
+    Normalize `project` into a canonical form used by both store and
+    read paths, so `memory_store` and `memory_search` always agree on
+    the DB key. Applied at every tool entry point.
+
+    Rules:
+      - None or "" -> fall through to _detect_project_directory()
+      - `_global` / `_domain_<name>` -> returned verbatim
+      - Absolute path -> os.path.normpath() (collapses slashes, dots)
+      - Anything else -> returned as-is (validator will reject)
+    """
+    if project is None or not project.strip():
+        project = _detect_project_directory()
+
+    value = project.strip()
+
+    if value == _GLOBAL_SCOPE or value.startswith(_DOMAIN_PREFIX):
+        return value
+
+    # Only normalize paths. Rel paths get caught by the validator next.
+    looks_absolute = (
+        value.startswith("/")
+        or value.startswith("\\")
+        or (len(value) >= 3 and value[1] == ":" and value[2] in ("/", "\\"))
+    )
+    if looks_absolute:
+        return os.path.normpath(value)
+
+    return value
 
 
 def _validate_writable_scope(project: str) -> Optional[str]:
@@ -228,26 +254,29 @@ async def memory_store(
     from lib.db import store_memory, get_or_create_project
     from lib.auth_context import current_user_id
 
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "stored": False}
+
     store_tags = list(tags or [])
     if verbatim and "verbatim" not in store_tags:
         store_tags.append("verbatim")
 
-    project_dir = project or _detect_project_directory()
+    project_dir = _normalize_project(project)
     scope_err = _validate_writable_scope(project_dir)
     if scope_err:
         return {"error": scope_err, "stored": False, "project": project_dir}
 
-    owner = current_user_id()
-    project_id = await get_or_create_project(project_dir, owner_user_id=owner)
+    project_id = await get_or_create_project(project_dir, owner)
 
     embedding = embed(content)
     memory_id = await store_memory(
         content=content,
         embedding=embedding,
         project_id=project_id,
+        owner_user_id=owner,
         tags=store_tags,
         importance=importance,
-        owner_user_id=owner,
     )
 
     return {"id": str(memory_id), "stored": True}
@@ -302,17 +331,20 @@ async def memory_search(
 
     from lib.embeddings import embed
     from lib.db import search_memories, get_or_create_project
+    from lib.auth_context import current_user_id
 
-    # Determine project scope
-    project_id = None
-    if project != "":
-        project_dir = project or _detect_project_directory()
-        project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "results": [], "count": 0}
+
+    project_dir = _normalize_project(project)
+    project_id = await get_or_create_project(project_dir, owner)
 
     query_embedding = embed(query)
     results = await search_memories(
         query_embedding=query_embedding,
         project_id=project_id,
+        owner_user_id=owner,
         tags=tags,
         min_importance=min_importance,
         limit=limit,
@@ -346,13 +378,18 @@ async def memory_forget(memory_id: str) -> dict:
         memory_id: UUID of the memory to remove (from search/list results).
     """
     from lib.db import forget_memory
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"forgotten": False, "error": "authentication required"}
 
     try:
         uid = UUID(memory_id)
     except ValueError:
         return {"forgotten": False, "error": "Invalid memory ID format"}
 
-    deleted = await forget_memory(uid)
+    deleted = await forget_memory(uid, owner)
     return {"forgotten": deleted}
 
 
@@ -386,13 +423,17 @@ async def memory_list(
         limit: Max results (1-100, default 20).
     """
     from lib.db import list_memories, get_or_create_project
+    from lib.auth_context import current_user_id
 
-    project_id = None
-    if project != "":
-        project_dir = project or _detect_project_directory()
-        project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    if owner is None:
+        return {"memories": [], "count": 0, "error": "authentication required"}
+
+    project_dir = _normalize_project(project)
+    project_id = await get_or_create_project(project_dir, owner)
 
     results = await list_memories(
+        owner_user_id=owner,
         project_id=project_id,
         tags=tags,
         limit=limit,
@@ -456,21 +497,24 @@ async def memory_fact_add(
     from lib.db import add_fact, get_or_create_project
     from lib.auth_context import current_user_id
 
-    project_dir = project or _detect_project_directory()
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "stored": False}
+
+    project_dir = _normalize_project(project)
     scope_err = _validate_writable_scope(project_dir)
     if scope_err:
         return {"error": scope_err, "stored": False, "project": project_dir}
 
-    owner = current_user_id()
-    project_id = await get_or_create_project(project_dir, owner_user_id=owner)
+    project_id = await get_or_create_project(project_dir, owner)
 
     result = await add_fact(
         project_id=project_id,
         subject=subject.strip(),
         predicate=predicate.strip(),
         obj=object.strip(),
-        confidence=max(0.0, min(1.0, confidence)),
         owner_user_id=owner,
+        confidence=max(0.0, min(1.0, confidence)),
     )
 
     return {"stored": True, **result}
@@ -510,12 +554,17 @@ async def memory_fact_query(
         return {"error": "Subject cannot be empty", "facts": [], "count": 0}
 
     from lib.db import query_facts, get_or_create_project
-    from datetime import datetime, timezone
+    from lib.auth_context import current_user_id
+    from datetime import datetime
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "facts": [], "count": 0}
 
     project_id = None
-    if project != "":
-        project_dir = project or _detect_project_directory()
-        project_id = await get_or_create_project(project_dir)
+    if project is not None and project.strip():
+        project_dir = _normalize_project(project)
+        project_id = await get_or_create_project(project_dir, owner)
 
     as_of_dt = None
     if as_of:
@@ -525,8 +574,9 @@ async def memory_fact_query(
             return {"error": f"Invalid as_of timestamp: {as_of}", "facts": [], "count": 0}
 
     facts = await query_facts(
-        project_id=project_id,
+        owner_user_id=owner,
         subject=subject.strip(),
+        project_id=project_id,
         as_of=as_of_dt,
     )
 
@@ -573,11 +623,16 @@ async def memory_project_configure(
     from lib.db import (
         get_or_create_project, get_project_info, set_project_domains,
     )
+    from lib.auth_context import current_user_id
 
-    project_dir = project or _detect_project_directory()
-    project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    if owner is None:
+        return {"configured": False, "error": "authentication required"}
 
-    info = await get_project_info(project_id)
+    project_dir = _normalize_project(project)
+    project_id = await get_or_create_project(project_dir, owner)
+
+    info = await get_project_info(project_id, owner)
     if info and info["scope"] != "local":
         return {
             "error": f"Cannot set domains on a {info['scope']}-scope project",
@@ -585,7 +640,7 @@ async def memory_project_configure(
             "scope": info["scope"],
         }
 
-    updated = await set_project_domains(project_id, domains)
+    updated = await set_project_domains(project_id, owner, domains)
     return {
         "configured": True,
         "project": info["name"] if info else project_dir,
@@ -633,12 +688,18 @@ async def memory_context(
             max 2000). Keeps injection lightweight.
     """
     from lib.db import get_context_memories, get_or_create_project
+    from lib.auth_context import current_user_id
 
-    project_dir = project or _detect_project_directory()
-    project_id = await get_or_create_project(project_dir)
+    owner = current_user_id()
+    if owner is None:
+        return {"context": [], "count": 0, "error": "authentication required"}
+
+    project_dir = _normalize_project(project)
+    project_id = await get_or_create_project(project_dir, owner)
 
     results = await get_context_memories(
         project_id=project_id,
+        owner_user_id=owner,
         max_tokens=max_tokens,
     )
 
