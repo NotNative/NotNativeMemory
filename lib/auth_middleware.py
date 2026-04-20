@@ -43,13 +43,26 @@ from starlette.responses import JSONResponse
 from lib.auth_context import set_current_user_id
 
 
+# Paths that never require authentication. Extend carefully; every
+# entry is a hole in the auth perimeter. `/login` and `/register`
+# cover both their GET (form page) and POST (submit) variants because
+# the match is prefix-based. `/` is the front door that redirects
+# logged-out callers to /login.
 _WHITELIST_PREFIXES = (
     "/auth/register",
     "/auth/login",
     "/health",
+    "/login",
+    "/register",
 )
 
+_WHITELIST_EXACT = ("/",)
+
 _LOOPBACK_HOSTS = {"127.0.0.1", "::1", "localhost"}
+
+# Browser session cookie name. Must match the value used in
+# lib/web_routes.py::SESSION_COOKIE_NAME.
+_SESSION_COOKIE = "nnm_session"
 
 
 def _localhost_bypass_enabled() -> bool:
@@ -69,7 +82,22 @@ def _is_loopback(request: Request) -> bool:
 
 
 def _is_whitelisted(path: str) -> bool:
+    if path in _WHITELIST_EXACT:
+        return True
     return any(path.startswith(prefix) for prefix in _WHITELIST_PREFIXES)
+
+
+def _read_bearer(request: Request) -> str:
+    """
+    Pull the Bearer token out of the request. Checks the
+    `Authorization: Bearer ...` header first, then falls back to the
+    `nnm_session` cookie set by the web login flow. Returns "" when
+    nothing is present.
+    """
+    header = request.headers.get("authorization", "")
+    if header.lower().startswith("bearer "):
+        return header[len("bearer "):].strip()
+    return request.cookies.get(_SESSION_COOKIE, "") or ""
 
 
 class BearerAuthMiddleware(BaseHTTPMiddleware):
@@ -98,14 +126,13 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
         if bypass_attached:
             return await call_next(request)
 
-        header = request.headers.get("authorization", "")
-        if not header.lower().startswith("bearer "):
+        token = _read_bearer(request)
+        if not token:
             return JSONResponse(
                 {"error": "missing Authorization: Bearer <token>"},
                 status_code=401,
             )
 
-        token = header[len("bearer "):].strip()
         from lib import auth_db
 
         resolved = await auth_db.resolve_token(token)
@@ -136,8 +163,11 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
             return False
         if not _is_loopback(request):
             return False
-        # Explicit token takes precedence over bypass.
-        if request.headers.get("authorization", "").lower().startswith("bearer "):
+        # Explicit credentials take precedence over bypass. This covers
+        # both an Authorization header (CLI / agents) and a session
+        # cookie (browser users). A user holding a token for a
+        # different account can still be recognized as that account.
+        if _read_bearer(request):
             return False
         username = _localhost_user()
         if not username:
@@ -159,10 +189,9 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
     async def _try_attach_identity(self, request: Request) -> None:
         """Best-effort token resolution for whitelisted paths."""
-        header = request.headers.get("authorization", "")
-        if not header.lower().startswith("bearer "):
+        token = _read_bearer(request)
+        if not token:
             return
-        token = header[len("bearer "):].strip()
         from lib import auth_db
         resolved = await auth_db.resolve_token(token)
         if resolved is not None:

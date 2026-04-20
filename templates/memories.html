@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Memories — NotNativeMemory{% endblock %}
+{% block content %}
+<h1>Memories</h1>
+<p>{{ count }} memor{{ 'y' if count == 1 else 'ies' }} stored.</p>
+{% if flash %}<p class="flash">{{ flash }}</p>{% endif %}
+<div id="memory-list">
+  {% for m in memories %}
+    {% include "_memory_row.html" %}
+  {% else %}
+    <p>No memories yet. The server's MCP tools will populate this list as
+       the agent writes to it.</p>
+  {% endfor %}
+</div>
+{% endblock %}

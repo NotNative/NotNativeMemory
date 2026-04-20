@@ -5,3 +5,8 @@ sentence-transformers>=3.0.0,<5.0.0
 transformers>=4.40.0,<5.0.0
 python-dotenv>=1.0.0
 numpy>=1.26.0
+# Web GUI (Jinja templates + Starlette form parsing). Pulled in
+# transitively by Starlette/FastMCP today; pinned explicitly so a
+# clean install is reproducible regardless of upstream changes.
+jinja2>=3.1.0
+python-multipart>=0.0.9

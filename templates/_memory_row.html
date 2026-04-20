@@ -1,0 +1,19 @@
+<div class="memory" id="memory-{{ m.id }}">
+  <button
+    hx-delete="/memories/{{ m.id }}"
+    hx-target="#memory-{{ m.id }}"
+    hx-swap="outerHTML"
+    hx-confirm="Delete this memory? This cannot be undone.">Delete</button>
+  <div class="content">{{ m.content }}</div>
+  <div class="meta">
+    <span class="badge imp-{{ m.importance }}">{{ m.importance }}</span>
+    {% if m.scope %}<span class="badge">{{ m.scope }}</span>{% endif %}
+    {% if m.project and m.project != m.scope %}
+      <span class="badge">{{ m.project }}</span>
+    {% endif %}
+    {% if m.tags %}
+      <span>tags: {{ m.tags | join(", ") }}</span>
+    {% endif %}
+    <span title="{{ m.created_at }}">temp {{ m.temperature }}</span>
+  </div>
+</div>

@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}NotNativeMemory{% endblock %}</title>
+  <script src="https://unpkg.com/htmx.org@2.0.3"
+          integrity="sha384-0895/pl2MU10Hqc6jd4RvrthNlDiE9U1tWmX7WRESftEDRosgxNsQG/Ze9YMRzHq"
+          crossorigin="anonymous"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: ui-sans-serif, system-ui, sans-serif; max-width: 960px;
+           margin: 2em auto; padding: 0 1em; color: #222; line-height: 1.5; }
+    nav { border-bottom: 1px solid #ddd; padding-bottom: 0.5em; margin-bottom: 1em;
+          display: flex; gap: 1em; align-items: center; }
+    nav a { color: #06c; text-decoration: none; }
+    nav a:hover { text-decoration: underline; }
+    nav .sep { color: #bbb; }
+    .memory { border: 1px solid #ddd; padding: 0.75em; margin: 0.5em 0;
+              border-radius: 4px; background: #fafafa; }
+    .memory .content { white-space: pre-wrap; margin-bottom: 0.5em; }
+    .memory .meta { font-size: 0.85em; color: #666; display: flex; gap: 0.75em;
+                    flex-wrap: wrap; }
+    .memory .meta .badge { background: #eee; padding: 0.1em 0.4em; border-radius: 3px; }
+    .memory .meta .imp-critical { background: #fdd; color: #900; }
+    .memory .meta .imp-high { background: #ffe8c7; color: #850; }
+    .memory .meta .imp-low { color: #999; }
+    .memory button { float: right; background: #fff; border: 1px solid #ccc;
+                     padding: 0.3em 0.7em; cursor: pointer; border-radius: 3px; }
+    .memory button:hover { background: #fdd; border-color: #c66; }
+    .error { color: #c00; padding: 0.5em; background: #fee; border-radius: 3px; }
+    .flash { color: #060; padding: 0.5em; background: #efe; border-radius: 3px; }
+    form.inline { display: inline; }
+    form.stacked { max-width: 400px; }
+    form.stacked label { display: block; margin: 0.5em 0; }
+    form.stacked input { width: 100%; font-size: 1em; padding: 0.4em;
+                         border: 1px solid #ccc; border-radius: 3px; }
+    button { font-size: 1em; padding: 0.5em 1em; cursor: pointer;
+             background: #06c; color: white; border: none; border-radius: 3px; }
+    button:hover { background: #048; }
+    button.secondary { background: #eee; color: #222; border: 1px solid #ccc; }
+    button.secondary:hover { background: #ddd; }
+    h1 { margin-top: 0.3em; }
+  </style>
+</head>
+<body>
+  <nav>
+    <strong>NotNativeMemory</strong>
+    {% if username %}
+      <span class="sep">|</span>
+      <span>{{ username }}</span>
+      <span class="sep">|</span>
+      <a href="/memories">Memories</a>
+      <span class="sep">|</span>
+      <a href="/tokens">Tokens</a>
+      <span class="sep">|</span>
+      <form class="inline" method="post" action="/logout">
+        <button class="secondary" type="submit">Log out</button>
+      </form>
+    {% else %}
+      <span class="sep">|</span>
+      <a href="/login">Login</a>
+      <span class="sep">|</span>
+      <a href="/register">Register</a>
+    {% endif %}
+  </nav>
+  {% block content %}{% endblock %}
+</body>
+</html>

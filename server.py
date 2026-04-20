@@ -44,7 +44,9 @@ mcp = FastMCP(
 # Runs at import time so the routes are present by the time anyone
 # calls streamable_http_app() in either stdio-warmup or HTTP mode.
 from lib.auth_routes import register_routes as _register_auth_routes
+from lib.web_routes import register_routes as _register_web_routes
 _register_auth_routes(mcp)
+_register_web_routes(mcp)
 
 
 # Set to True when running in HTTP mode. In HTTP mode, the server's

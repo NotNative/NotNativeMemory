@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Login — NotNativeMemory{% endblock %}
+{% block content %}
+<h1>Login</h1>
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+<form class="stacked" method="post" action="/login">
+  <label>
+    Username
+    <input name="username" required autofocus autocomplete="username">
+  </label>
+  <label>
+    Password
+    <input name="password" type="password" required autocomplete="current-password">
+  </label>
+  <button type="submit">Log in</button>
+</form>
+<p style="margin-top: 1.5em;">
+  No account yet? <a href="/register">Register</a>.
+</p>
+{% endblock %}
