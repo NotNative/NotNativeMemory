@@ -117,6 +117,11 @@ async def create_token(
     """
     Generate, hash, and store a new Bearer token for this user.
 
+    The user's current `token_generation` is snapshotted onto the new
+    token's `issued_generation` via subquery, so the mint is atomic
+    with the generation read. Tokens minted with an older generation
+    than the user's current one are rejected at auth time.
+
     Returns a dict containing the RAW token value (shown once) plus
     metadata. Callers must pass the raw `token` back to the user and
     never log it.
@@ -127,8 +132,11 @@ async def create_token(
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        INSERT INTO auth_tokens (user_id, token_hash, label)
-        VALUES ($1, $2, $3)
+        INSERT INTO auth_tokens (user_id, token_hash, label, issued_generation)
+        VALUES (
+            $1, $2, $3,
+            (SELECT token_generation FROM users WHERE id = $1)
+        )
         RETURNING id, user_id, label, created_at
         """,
         user_id, token_hash, label,
@@ -183,11 +191,48 @@ async def revoke_token(user_id: UUID, token_id: UUID) -> bool:
     return result.endswith(" 1")
 
 
+async def bump_token_generation(user_id: UUID) -> int:
+    """
+    Increment a user's token_generation counter by one and return the
+    new value. Every outstanding token for this user becomes stale
+    immediately (next auth check fails and the client must re-login).
+
+    Intended callers:
+      - Admin "force log out this user" lever.
+      - Password-change flow (invalidate old sessions on credential
+        rotation — to be wired up when password change ships).
+      - Incident response (operator loops over users and bumps each,
+        or runs a single UPDATE statement directly).
+
+    Idempotent in the sense that each call advances by exactly one.
+    Callers do not need to know the prior value.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        UPDATE users
+        SET token_generation = token_generation + 1
+        WHERE id = $1
+        RETURNING token_generation
+        """,
+        user_id,
+    )
+    if row is None:
+        raise ValueError(f"no such user: {user_id}")
+    return int(row["token_generation"])
+
+
 async def resolve_token(raw_token: str) -> Optional[Dict[str, Any]]:
     """
-    Look up an active (non-revoked) token by its raw string and return
-    the owning user. Returns None if the token is invalid, revoked,
-    or does not match any row.
+    Look up an active (non-revoked, non-stale) token by its raw string
+    and return the owning user. Returns None if the token is invalid,
+    revoked, drifted from the user's current generation, or does not
+    match any row.
+
+    The `t.issued_generation = u.token_generation` predicate enforces
+    session revocation: when a user's generation is bumped, every
+    previously-issued token is filtered out of the candidate set here
+    and stops passing auth from that moment on.
     """
     if not auth.is_token_shaped(raw_token):
         return None
@@ -200,6 +245,7 @@ async def resolve_token(raw_token: str) -> Optional[Dict[str, Any]]:
         FROM auth_tokens t
         JOIN users u ON u.id = t.user_id
         WHERE t.revoked_at IS NULL
+          AND t.issued_generation = u.token_generation
         ORDER BY t.last_used_at DESC NULLS LAST
         LIMIT $1
         """,

@@ -126,6 +126,10 @@ CREATE TABLE IF NOT EXISTS users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     username TEXT UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,          -- hashlib.scrypt digest
+    -- Monotonic session-revocation counter. Tokens snapshot this at
+    -- mint time and auth rejects any token whose snapshot differs from
+    -- the current value. Bumping invalidates every outstanding token.
+    token_generation INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -140,6 +144,9 @@ CREATE TABLE IF NOT EXISTS auth_tokens (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     token_hash TEXT UNIQUE NOT NULL,      -- hashlib.scrypt digest
     label TEXT,
+    -- Snapshot of users.token_generation at mint time. Auth rejects
+    -- the token when this drifts from the user's current generation.
+    issued_generation INT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
     last_used_at TIMESTAMPTZ,
     revoked_at TIMESTAMPTZ
