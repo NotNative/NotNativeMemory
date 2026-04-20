@@ -4,7 +4,11 @@
     hx-target="#memory-{{ m.id }}"
     hx-swap="outerHTML"
     hx-confirm="Delete this memory? This cannot be undone.">Delete</button>
-  <div class="content">{{ m.content }}</div>
+  <div class="content">
+    <a href="/memories/{{ m.id }}" style="color:inherit;text-decoration:none;">
+      {{ m.content }}
+    </a>
+  </div>
   <div class="meta">
     <span class="badge imp-{{ m.importance }}">{{ m.importance }}</span>
     {% if m.scope %}<span class="badge">{{ m.scope }}</span>{% endif %}

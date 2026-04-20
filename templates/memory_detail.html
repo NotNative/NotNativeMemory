@@ -1,0 +1,79 @@
+{% extends "base.html" %}
+{% block title %}Memory — NotNativeMemory{% endblock %}
+{% block content %}
+<p><a href="/memories">&larr; All memories</a></p>
+<h1>Memory detail</h1>
+
+{% if flash %}<p class="flash">{{ flash }}</p>{% endif %}
+{% if errors %}
+  <div class="error">
+    <strong>Could not save:</strong>
+    <ul style="margin: 0.3em 0 0 1.2em;">
+      {% for e in errors %}<li>{{ e }}</li>{% endfor %}
+    </ul>
+  </div>
+{% endif %}
+
+<form class="stacked" method="post" action="/memories/{{ memory.id }}"
+      style="max-width: none;">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+
+  <label>
+    Content
+    <textarea name="content" rows="6" style="width:100%;font-family:inherit;
+              padding:0.5em;border:1px solid #ccc;border-radius:3px;
+              font-size:1em;">{{ memory.content }}</textarea>
+  </label>
+
+  <div class="filter-row" style="margin-top: 0.75em;">
+    <label style="flex:1 1 240px;">
+      Tags (comma-separated)
+      <input name="tags" value="{{ memory.tags | join(', ') }}">
+    </label>
+    <label style="flex:0 1 180px;">
+      Importance
+      <select name="importance">
+        {% for imp in ['low', 'normal', 'high', 'critical'] %}
+          <option value="{{ imp }}" {% if memory.importance == imp %}selected{% endif %}>{{ imp }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  </div>
+
+  <label style="margin-top:0.75em;">
+    Project / scope
+    <input name="project" value="{{ memory.project_directory }}">
+    <small style="color:#666;">
+      Use <code>_global</code> for global, <code>_domain_&lt;name&gt;</code>
+      for a shared domain, or an absolute path for a local project.
+      Changing scope moves the memory to the new row but keeps its
+      history.
+    </small>
+  </label>
+
+  <div style="margin-top:1em;display:flex;gap:0.75em;">
+    <button type="submit">Save changes</button>
+    <a href="/memories" style="padding:0.55em 1em;border:1px solid #ccc;
+          border-radius:3px;color:#333;text-decoration:none;">Cancel</a>
+    <button type="button" class="secondary" style="margin-left:auto;
+            background:#fee;border-color:#d88;color:#900;"
+            hx-delete="/memories/{{ memory.id }}"
+            hx-confirm="Delete this memory? This cannot be undone."
+            hx-on::after-request="if(event.detail.xhr.status === 200) window.location.href = '/memories';">
+      Delete
+    </button>
+  </div>
+</form>
+
+<div style="margin-top:2em;color:#666;font-size:0.9em;">
+  <p><strong>Metadata</strong> (read-only):</p>
+  <ul style="list-style:none;padding:0;">
+    <li>ID: <code>{{ memory.id }}</code></li>
+    <li>Scope: {{ memory.scope or '?' }} &middot; Project: {{ memory.project or '?' }}</li>
+    <li>Temperature: {{ memory.temperature }}</li>
+    <li>Access count: {{ memory.access_count }}</li>
+    <li>Created: {{ memory.created_at[:19].replace('T',' ') }}</li>
+    <li>Last accessed: {{ memory.last_accessed[:19].replace('T',' ') }}</li>
+  </ul>
+</div>
+{% endblock %}

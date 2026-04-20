@@ -402,6 +402,136 @@ def register_routes(mcp) -> None:
         # simpler and the full list is one click away.
         return HTMLResponse("", status_code=200)
 
+    @mcp.custom_route("/memories/{memory_id}", methods=["GET"])
+    async def memory_detail(request: Request):
+        redirect = _require_login(request)
+        if redirect:
+            return redirect
+
+        from lib import db
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        try:
+            mid = UUID(request.path_params["memory_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid id", status_code=400)
+
+        memory = await db.admin_get_memory(mid, uid)
+        if memory is None:
+            return HTMLResponse("not found", status_code=404)
+
+        return _render_with_csrf(
+            request, "memory_detail.html",
+            memory=memory,
+        )
+
+    @mcp.custom_route("/memories/{memory_id}", methods=["POST"])
+    async def memory_update(request: Request):
+        """
+        Edit a memory. POST rather than PATCH so the HTML form can
+        submit it directly without needing a JS shim. The route
+        accepts content, tags, importance, and project; any subset
+        of those fields gets updated. Content change triggers a
+        re-embed.
+        """
+        redirect = _require_login(request)
+        if redirect:
+            return redirect
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        from lib import db
+        from lib.embeddings import embed
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        try:
+            mid = UUID(request.path_params["memory_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid id", status_code=400)
+
+        # Fetch existing so we can diff and leave un-submitted fields
+        # alone (HTML forms send "" for empty inputs; we need to
+        # distinguish "cleared by user" from "same as before").
+        existing = await db.admin_get_memory(mid, uid)
+        if existing is None:
+            return HTMLResponse("not found", status_code=404)
+
+        form = await request.form()
+        errors = []
+
+        new_content = form.get("content")
+        new_tags_raw = form.get("tags")
+        new_importance = form.get("importance")
+        new_project = (form.get("project") or "").strip()
+
+        updates: dict = {}
+
+        if new_content is not None and new_content != existing["content"]:
+            if not new_content.strip():
+                errors.append("Content cannot be empty.")
+            else:
+                updates["content"] = new_content
+                updates["embedding"] = embed(new_content)
+
+        if new_tags_raw is not None:
+            # comma-separated list in the form; strip + dedupe order
+            parsed = [t.strip() for t in new_tags_raw.split(",") if t.strip()]
+            if parsed != existing["tags"]:
+                updates["tags"] = parsed
+
+        if new_importance and new_importance != existing["importance"]:
+            if new_importance not in ("low", "normal", "high", "critical"):
+                errors.append(f"Invalid importance: {new_importance}")
+            else:
+                updates["importance"] = new_importance
+
+        if new_project and new_project != existing.get("project_directory"):
+            # Normalize + validate the new scope. Same rules as
+            # memory_store: reject bare names / relative paths.
+            from server import _normalize_project, _validate_writable_scope
+            normalized = _normalize_project(new_project)
+            scope_err = _validate_writable_scope(normalized)
+            if scope_err:
+                errors.append(scope_err)
+            else:
+                new_project_id = await db.get_or_create_project(
+                    normalized, uid,
+                )
+                updates["project_id"] = new_project_id
+
+        if errors:
+            return _render_with_csrf(
+                request, "memory_detail.html",
+                memory=existing,
+                errors=errors,
+                status_code=400,
+            )
+
+        if not updates:
+            return _render_with_csrf(
+                request, "memory_detail.html",
+                memory=existing,
+                flash="No changes.",
+            )
+
+        await db.admin_update_memory(mid, uid, **updates)
+
+        # Re-fetch so the rendered detail reflects the new state.
+        refreshed = await db.admin_get_memory(mid, uid)
+        return _render_with_csrf(
+            request, "memory_detail.html",
+            memory=refreshed,
+            flash="Saved.",
+        )
+
     @mcp.custom_route("/memories/{memory_id}", methods=["DELETE"])
     async def memory_delete(request: Request):
         redirect = _require_login(request)

@@ -858,6 +858,95 @@ async def search_memories(
 
 # -- Forget -----------------------------------------------------------------
 
+async def admin_get_memory(
+    memory_id: UUID, owner_user_id: UUID,
+) -> Optional[Dict[str, Any]]:
+    """
+    Fetch a single memory by ID, scoped to the caller's ownership.
+
+    Returns a dict with the fields memory_store / search return plus
+    the project directory so the admin UI can render a rescope form.
+    None if the memory does not exist or is not owned by the caller.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+                  m.created_at, m.last_accessed, m.access_count,
+                  m.project_id,
+                  p.scope AS project_scope,
+                  p.name AS project_name,
+                  p.directory AS project_directory
+           FROM memories m
+           JOIN projects p ON p.id = m.project_id
+           WHERE m.id = $1 AND m.owner_user_id = $2""",
+        memory_id, owner_user_id,
+    )
+    if not row:
+        return None
+    out = _format_memory_row(row)
+    out["project_directory"] = row["project_directory"]
+    return out
+
+
+async def admin_update_memory(
+    memory_id: UUID,
+    owner_user_id: UUID,
+    *,
+    content: Optional[str] = None,
+    embedding: Optional[List[float]] = None,
+    tags: Optional[List[str]] = None,
+    importance: Optional[str] = None,
+    project_id: Optional[UUID] = None,
+) -> bool:
+    """
+    Update a memory in place. Every field is optional; only the ones
+    you pass are written. Returns True if the update hit a row, False
+    if the memory doesn't exist or belongs to someone else.
+
+    Re-embedding is the caller's responsibility: when the content
+    changes, pass a fresh `embedding` alongside the new `content` or
+    downstream search results will drift from what the UI shows.
+    """
+    sets = []
+    params: List[Any] = []
+    idx = 1
+
+    if content is not None:
+        sets.append(f"content = ${idx}")
+        params.append(content)
+        idx += 1
+    if embedding is not None:
+        sets.append(f"embedding = ${idx}::vector")
+        params.append(str(embedding))
+        idx += 1
+    if tags is not None:
+        sets.append(f"tags = ${idx}")
+        params.append(tags)
+        idx += 1
+    if importance is not None:
+        if importance not in _IMPORTANCE_WEIGHT:
+            raise ValueError(f"Invalid importance: {importance}")
+        sets.append(f"importance = ${idx}")
+        params.append(importance)
+        idx += 1
+    if project_id is not None:
+        sets.append(f"project_id = ${idx}")
+        params.append(project_id)
+        idx += 1
+
+    if not sets:
+        return False
+
+    params.extend([memory_id, owner_user_id])
+    pool = await get_pool()
+    result = await pool.execute(
+        f"""UPDATE memories SET {', '.join(sets)}
+            WHERE id = ${idx} AND owner_user_id = ${idx + 1}""",
+        *params,
+    )
+    return result == "UPDATE 1"
+
+
 async def forget_memory(memory_id: UUID, owner_user_id: UUID) -> bool:
     """
     Delete a memory by ID. Only the owner can delete their own memory;
