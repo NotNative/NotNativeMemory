@@ -270,3 +270,14 @@ CREATE POLICY auth_tokens_owner_rls ON auth_tokens
         current_setting('app.current_user', true) = 'admin'
         OR user_id::text = current_setting('app.current_user', true)
     );
+
+-- Enable and FORCE the policies. Inert for superuser connections
+-- (which always bypass), enforced for non-superuser app roles.
+ALTER TABLE memories    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memories    FORCE ROW LEVEL SECURITY;
+ALTER TABLE facts       ENABLE ROW LEVEL SECURITY;
+ALTER TABLE facts       FORCE ROW LEVEL SECURITY;
+ALTER TABLE projects    ENABLE ROW LEVEL SECURITY;
+ALTER TABLE projects    FORCE ROW LEVEL SECURITY;
+ALTER TABLE auth_tokens ENABLE ROW LEVEL SECURITY;
+ALTER TABLE auth_tokens FORCE ROW LEVEL SECURITY;
