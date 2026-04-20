@@ -232,6 +232,7 @@ def register_routes(mcp) -> None:
         return JSONResponse({
             "user_id": str(uid) if uid else None,
             "username": getattr(request.state, "username", None),
+            "is_admin": bool(getattr(request.state, "is_admin", False)),
             "localhost_bypass": bypass,
         })
 

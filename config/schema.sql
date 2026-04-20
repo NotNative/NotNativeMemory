@@ -130,6 +130,9 @@ CREATE TABLE IF NOT EXISTS users (
     -- mint time and auth rejects any token whose snapshot differs from
     -- the current value. Bumping invalidates every outstanding token.
     token_generation INT NOT NULL DEFAULT 0,
+    -- Admin flag. Set only by the claim-admin bootstrap flow or the
+    -- reset-admin CLI. No route accepts is_admin in a payload.
+    is_admin BOOLEAN NOT NULL DEFAULT false,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

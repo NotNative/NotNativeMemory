@@ -40,6 +40,43 @@ async def count_users() -> int:
     return int(row["n"] or 0)
 
 
+async def count_admins() -> int:
+    """
+    Return number of users with is_admin=true. Used by the startup
+    bootstrap path: zero means the server should write an admin-
+    bootstrap token for the operator to claim.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT COUNT(*) AS n FROM users WHERE is_admin = true",
+    )
+    return int(row["n"] or 0)
+
+
+async def set_admin(user_id: UUID, is_admin: bool) -> None:
+    """
+    Promote or demote a user's admin flag. The claim-admin flow calls
+    this with is_admin=True; reset-admin clears it with is_admin=False
+    (for all existing admins). No route accepts is_admin as a payload;
+    this function is the only write surface.
+    """
+    pool = await get_pool()
+    await pool.execute(
+        "UPDATE users SET is_admin = $2 WHERE id = $1",
+        user_id, is_admin,
+    )
+
+
+async def list_admin_ids() -> List[UUID]:
+    """Return the user_ids of every current admin. Used by reset-admin
+    to iterate token_generation bumps after demoting them."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id FROM users WHERE is_admin = true",
+    )
+    return [row["id"] for row in rows]
+
+
 async def create_user(username: str, password: str) -> Dict[str, Any]:
     """
     Create a user. Raises asyncpg.UniqueViolationError if the username
@@ -67,7 +104,7 @@ async def create_user(username: str, password: str) -> Dict[str, Any]:
         """
         INSERT INTO users (username, password_hash)
         VALUES ($1, $2)
-        RETURNING id, username, created_at
+        RETURNING id, username, is_admin, created_at
         """,
         username.strip(), hashed,
     )
@@ -82,7 +119,7 @@ async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        SELECT id, username, password_hash, created_at
+        SELECT id, username, password_hash, is_admin, created_at
         FROM users WHERE username = $1
         """,
         username.strip() if username else "",
@@ -97,7 +134,8 @@ async def get_user_by_id(user_id: UUID) -> Optional[Dict[str, Any]]:
     pool = await get_pool()
     row = await pool.fetchrow(
         """
-        SELECT id, username, created_at FROM users WHERE id = $1
+        SELECT id, username, is_admin, created_at
+        FROM users WHERE id = $1
         """,
         user_id,
     )
@@ -108,6 +146,7 @@ def _row_to_user(row) -> Dict[str, Any]:
     return {
         "id": str(row["id"]),
         "username": row["username"],
+        "is_admin": bool(row["is_admin"]),
         "created_at": row["created_at"].isoformat(),
     }
 
@@ -264,7 +303,7 @@ async def resolve_token(raw_token: str) -> Optional[Dict[str, Any]]:
     row = await pool.fetchrow(
         """
         SELECT t.id, t.token_hash, t.user_id,
-               u.username
+               u.username, u.is_admin
         FROM auth_tokens t
         JOIN users u ON u.id = t.user_id
         WHERE t.lookup_key = $1
@@ -289,4 +328,5 @@ async def resolve_token(raw_token: str) -> Optional[Dict[str, Any]]:
         "token_id": str(row["id"]),
         "user_id": row["user_id"],
         "username": row["username"],
+        "is_admin": bool(row["is_admin"]),
     }
