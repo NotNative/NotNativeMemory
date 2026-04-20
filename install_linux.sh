@@ -316,6 +316,8 @@ DB_PORT="5433"
 DB_NAME="notnative_memory"
 DB_USER="memory"
 DB_PASSWORD=""
+APP_DB_USER="memory_app"
+APP_DB_PASSWORD=""
 
 if [ "$INSTALL_MODE" = "full" ]; then
     # Local Docker database
@@ -331,17 +333,28 @@ if [ "$INSTALL_MODE" = "full" ]; then
         exit 1
     fi
 
-    # Reuse existing password from .env if present
+    # Reuse existing passwords from .env if present (idempotent install)
     if [ -f ".env" ]; then
         EXISTING_PW=$(grep -oP '^MEMORY_DB_PASSWORD=\K.+' .env 2>/dev/null || true)
         if [ -n "$EXISTING_PW" ]; then
             DB_PASSWORD="$EXISTING_PW"
-            info "Using existing password from .env"
+            info "Using existing MEMORY_DB_PASSWORD from .env"
+        fi
+        EXISTING_APP_PW=$(grep -oP '^MEMORY_APP_DB_PASSWORD=\K.+' .env 2>/dev/null || true)
+        if [ -n "$EXISTING_APP_PW" ]; then
+            APP_DB_PASSWORD="$EXISTING_APP_PW"
+            info "Using existing MEMORY_APP_DB_PASSWORD from .env"
         fi
     fi
     if [ -z "$DB_PASSWORD" ]; then
         DB_PASSWORD=$(python3 -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24)))")
         info "Generated new database password"
+    fi
+    if [ -z "$APP_DB_PASSWORD" ]; then
+        # url-safe characters only: no single-quote risk when the
+        # password is interpolated into docker init SQL literals.
+        APP_DB_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+        info "Generated memory_app role password (RLS enforcement enabled)"
     fi
 
     # Start Postgres container first (MCP depends on it, started after model download)
@@ -350,6 +363,8 @@ if [ "$INSTALL_MODE" = "full" ]; then
     MEMORY_DB_PORT="$DB_PORT" \
     MEMORY_DB_NAME="$DB_NAME" \
     MEMORY_DB_USER="$DB_USER" \
+    MEMORY_APP_DB_USER="$APP_DB_USER" \
+    MEMORY_APP_DB_PASSWORD="$APP_DB_PASSWORD" \
     docker compose -f docker/docker-compose.yml --profile full up -d postgres 2>&1
 
     # Wait for healthy
@@ -404,6 +419,21 @@ elif [ "$INSTALL_MODE" = "server" ]; then
         err "Password is required for remote database."
         exit 1
     fi
+
+    # Remote-DB path: generate the app-role password if not already
+    # set. The installer will CREATE ROLE later via asyncpg (needs
+    # MEMORY_DB_USER to have CREATE ROLE privilege on the remote).
+    if [ -f ".env" ]; then
+        EXISTING_APP_PW=$(grep -oP '^MEMORY_APP_DB_PASSWORD=\K.+' .env 2>/dev/null || true)
+        if [ -n "$EXISTING_APP_PW" ]; then
+            APP_DB_PASSWORD="$EXISTING_APP_PW"
+            info "Using existing MEMORY_APP_DB_PASSWORD from .env"
+        fi
+    fi
+    if [ -z "$APP_DB_PASSWORD" ]; then
+        APP_DB_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+        info "Generated memory_app role password (RLS enforcement enabled)"
+    fi
 fi
 
 # -----------------------------------------------------------------------
@@ -446,15 +476,14 @@ MEMORY_BIND_HOST=0.0.0.0
 # cookies carry the Secure attribute. Leave unset on plain HTTP dev.
 MEMORY_COOKIE_SECURE=
 
-# -- Postgres Row-Level Security (optional defense-in-depth) --------------
-# When unset, the app and migrations both connect as MEMORY_DB_USER
-# above (single-role setup, default). When set, migrations still use
-# MEMORY_DB_USER (must be superuser for DDL) but runtime app queries
-# use MEMORY_APP_DB_USER (typically a non-superuser role created via
-# docs/rls-activation.md). This is required to actually enforce the
-# RLS policies defined in migration 008.
-MEMORY_APP_DB_USER=
-MEMORY_APP_DB_PASSWORD=
+# -- Postgres Row-Level Security (default on) -----------------------------
+# The installer creates a non-superuser memory_app role at DB init
+# time and points the app at it, so RLS policies enforce from the
+# first request. Migrations still use MEMORY_DB_USER (needs superuser
+# for DDL). To disable RLS enforcement, blank these two values and
+# restart the server — the app will fall back to MEMORY_DB_USER.
+MEMORY_APP_DB_USER=$APP_DB_USER
+MEMORY_APP_DB_PASSWORD=$APP_DB_PASSWORD
 EOF
 info "Saved to .env"
 
@@ -560,6 +589,19 @@ asyncio.run(run_schema())
     fi
 
     # -----------------------------------------------------------------------
+    # 6c. Ensure memory_app role exists (all Docker modes)
+    # For full mode, the postgres container's 02-roles.sh handled this at
+    # first init; running again is idempotent and heals cases where the
+    # DB volume predates the addition of the init script.
+    # For server mode, this is the only path that creates the role.
+    # -----------------------------------------------------------------------
+    step "Ensuring memory_app role (RLS enforcement)..."
+    docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python docker/init/ensure_app_role.py
+    if [ $? -ne 0 ]; then
+        warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
+    fi
+
+    # -----------------------------------------------------------------------
     # 7. Start containers and wait for ready
     # -----------------------------------------------------------------------
     step "Starting MCP server container..."
@@ -653,6 +695,11 @@ asyncio.run(run_schema())
         err "Schema creation failed."
         exit 1
     fi
+
+    step "Ensuring memory_app role (RLS enforcement)..."
+    # ensure_app_role.py loads .env itself via python-dotenv, so no
+    # pre-sourcing needed here.
+    python3 docker/init/ensure_app_role.py || warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
 
     # -----------------------------------------------------------------------
     # 7. Download embedding model (host python server)

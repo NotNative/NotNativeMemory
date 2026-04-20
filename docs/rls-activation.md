@@ -1,178 +1,204 @@
-# RLS Activation Runbook
+# Row-Level Security: Operations and Recovery
 
-**Status:** Optional hardening. The Phase 7 per-user `owner_user_id`
-filters in `lib/db.py` are the primary cross-user isolation
-mechanism; Row-Level Security (RLS) layers a DB-level safety net on
-top of them, so a future forgotten `WHERE owner_user_id = $N` returns
-zero rows instead of leaking.
+**Default state:** NNM ships with Postgres Row-Level Security active
+on `memories`, `facts`, `projects`, and `auth_tokens`. Enforcement is
+wired up end-to-end: the installer provisions a non-superuser
+`memory_app` role, points the app pool at it, and every query in
+`lib/db.py`, `lib/auth_db.py`, and `lib/audit.py` runs inside an
+`rls.app_conn` or `rls.admin_conn` block that sets
+`app.current_user` before executing.
 
-Activation is an **operational choice** that requires a small infra
-change (creating a non-superuser DB role), because Postgres RLS is
-always bypassed by superusers and by the `BYPASSRLS` role attribute.
-The stock pgvector Docker image creates the default user as a
-superuser, so shipping RLS as "on by default" would be a no-op.
+This doc covers:
+- How to verify RLS is actually enforcing.
+- How to recover when the role is missing or privileges drifted.
+- How to disable RLS if you need a single-role setup for some reason.
 
-## When to do this
+## Architecture in one paragraph
 
-- You're opening NNM to more than one user and want defense against
-  your own future bugs.
-- You're deploying to a shared database and want a second line of
-  containment.
-- You're auditing a production deployment and want to be able to
-  tell a reviewer "RLS is enforced at the DB layer."
+Two DB roles live inside Postgres. `MEMORY_DB_USER` (default `memory`,
+typically a superuser) runs migrations and other DDL. `MEMORY_APP_DB_USER`
+(default `memory_app`, deliberately `NOSUPERUSER NOBYPASSRLS`) runs
+every query from the running server. Postgres bypasses RLS for
+superusers, so the app role being a non-superuser is the load-bearing
+part. Every per-user query wraps its body in
+`async with rls.app_conn(pool, user_id):`, which `SET app.current_user`
+on acquire and `RESET` on release; admin cross-user queries use
+`rls.admin_conn(pool)` which sets the sentinel `'admin'` that the
+policies treat as a bypass. Defined in migration 008 (base policies)
+and 013 (admin sentinel); activated in migration 012 (ENABLE + FORCE).
 
-## When NOT to do this
+## Verify enforcement
 
-- Single-user deployment where per-user isolation is moot.
-- You haven't deployed all of the Phase 5C code changes yet (this
-  doc depends on `lib/rls.py::app_conn` plus the dual-role config
-  in `lib/db.py`).
-
-## Prerequisites
-
-1. Superuser access to the Postgres instance NNM uses (the default
-   `memory` user in the Docker setup qualifies).
-2. NNM code at or past the commit that lands the dual-role config
-   (`MEMORY_APP_DB_USER` / `MEMORY_APP_DB_PASSWORD` env vars) — 5C.2.
-3. NNM code at or past the commit that migrates `lib/db.py` call
-   sites to use `rls.app_conn` and `rls.admin_conn` (5C.3, "Pass 2").
-   **Until this lands, do NOT run step 3 of this runbook.** Without
-   the call-site migration, the app role will hit an RLS policy
-   that denies every row, and user-scoped routes will see empty
-   results. The scaffold is shipped (migration 008 + 013, admin
-   sentinel policy, helpers in `lib/rls.py`) but the query paths
-   still use the raw pool today — follow-up work.
-4. A maintenance window. Activation changes auth for every query;
-   short downtime is expected on the switch.
-
-## Steps
-
-### 1. Create the non-superuser role
-
-Connect to Postgres as the superuser (`memory`, or `postgres` if you
-split those):
-
-```sql
--- Replace with a strong password. Store it wherever you keep
--- MEMORY_DB_PASSWORD today.
-CREATE ROLE memory_app LOGIN PASSWORD 'a-strong-random-password';
-
--- Scope privileges to the database NNM uses.
-GRANT CONNECT ON DATABASE notnative_memory TO memory_app;
-
--- Give access to the schema and its existing objects.
-GRANT USAGE ON SCHEMA public TO memory_app;
-GRANT SELECT, INSERT, UPDATE, DELETE
-    ON ALL TABLES IN SCHEMA public
-    TO memory_app;
-GRANT USAGE, SELECT
-    ON ALL SEQUENCES IN SCHEMA public
-    TO memory_app;
-
--- Future tables and sequences (e.g., from a new migration) should
--- also be accessible to memory_app without revisiting this step.
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO memory_app;
-ALTER DEFAULT PRIVILEGES IN SCHEMA public
-    GRANT USAGE, SELECT ON SEQUENCES TO memory_app;
-```
-
-Verify the role was created and is NOT a superuser / BYPASSRLS:
+### 1. Role attributes
 
 ```sql
 SELECT rolname, rolsuper, rolbypassrls
 FROM pg_roles
-WHERE rolname = 'memory_app';
--- Expected: rolsuper = false, rolbypassrls = false
+WHERE rolname IN ('memory_app', 'memory');
 ```
 
-If either flag is `t`, RLS will still be bypassed. Fix with:
+Expected:
+
+| rolname     | rolsuper | rolbypassrls |
+|-------------|----------|--------------|
+| memory      | t        | f            |
+| memory_app  | f        | f            |
+
+If `memory_app` is missing entirely, see **Recovery → missing role**
+below.
+
+### 2. RLS state on the tables
 
 ```sql
-ALTER ROLE memory_app NOSUPERUSER NOBYPASSRLS;
+SELECT relname, relrowsecurity AS enabled, relforcerowsecurity AS forced
+FROM pg_class
+WHERE relname IN ('memories', 'facts', 'projects', 'auth_tokens')
+ORDER BY relname;
 ```
 
-### 2. Point the application at the new role
+All four should show `enabled = t, forced = t`. If not, migration 012
+never applied — re-running the server with a working DB connection
+will apply it on next `get_pool()` call.
 
-Edit `.env`:
-
-```
-# Keep these for the MIGRATION connection (needs superuser to run
-# CREATE POLICY / ENABLE ROW LEVEL SECURITY in migration 012).
-MEMORY_DB_USER=memory
-MEMORY_DB_PASSWORD=<original>
-
-# NEW: app connection uses the non-superuser role.
-MEMORY_APP_DB_USER=memory_app
-MEMORY_APP_DB_PASSWORD=<from step 1>
-```
-
-Restart the server. It should start cleanly; user-scoped routes
-continue to work because `lib/db.py` call sites use `app_conn` which
-`SET app.current_user` before each query.
-
-### 3. Run migration 012 to FORCE RLS
-
-Migration 012 ships with the ALTER TABLE ENABLE/FORCE block that
-activates the policies defined in migration 008. The migration runs
-under the superuser connection (`MEMORY_DB_*`), not the app role,
-so it has permission to alter the tables.
-
-Options:
-
-- **Automatic (recommended)**: Normal server startup applies pending
-  migrations. Just restart — 012 runs on the next `get_pool()`
-  call.
-- **Manual**: `psql` as the superuser and
-  `\i config/migrations/012_rls_force.sql`.
-
-### 4. Verify enforcement
-
-From psql as `memory_app`:
+### 3. Policies are installed
 
 ```sql
--- No app.current_user set yet → RLS denies everything.
-SELECT COUNT(*) FROM memories;
--- Expected: 0 (even if the DB has thousands of memories)
-
--- Set a user context.
-SELECT set_config('app.current_user', '<some-user-uuid>', false);
-SELECT COUNT(*) FROM memories;
--- Expected: only that user's memory count
+SELECT tablename, policyname
+FROM pg_policies
+WHERE tablename IN ('memories', 'facts', 'projects', 'auth_tokens')
+ORDER BY tablename;
 ```
 
-Swap in a different user's UUID; you should see only their memories.
-Cross-user access is now impossible at the DB layer regardless of
-what SQL the app runs.
+Expected four rows, one per table, named `<table>_owner_rls`.
 
-### 5. Confirm via the application
+### 4. End-to-end (from the app's point of view)
 
-- Register two users via `/register`.
-- Log in as each, store a memory as each.
-- Confirm neither can see the other's memory via `/memories` or
-  `/memories?q=...`.
-- Check audit_events for any unexpected errors around the switch.
+```bash
+python tests/test_rls_enforcement.py
+```
 
-## Rolling back
+The test creates a temporary non-superuser role, downgrades to it via
+`SET ROLE`, and validates that unset GUC returns zero rows, per-user
+GUC returns only that user's rows, the admin sentinel sees all, and
+cross-user INSERTs are blocked by `WITH CHECK`. Requires the
+caller's `MEMORY_DB_USER` to have `CREATE ROLE` privilege (the test
+creates a throwaway role and drops it).
 
-If something breaks, roll back in the opposite order:
+## Recovery
 
-1. `\i config/migrations/rollback/012_rls_force.sql` (DISABLE RLS,
-   keep policies defined).
-2. Optionally revert the `.env` switch back to a superuser connection
-   for the app (single-role setup).
-3. If you want to also drop the policies:
-   `\i config/migrations/rollback/008_rls_foundations.sql`.
+### Missing role
 
-## Notes
+Symptom: server logs show `password authentication failed for user
+"memory_app"` on startup, or a Postgres log shows `role "memory_app"
+does not exist`.
 
-- The `memory_app` role has no access to the `audit_events` table?
-  Yes it does — `GRANT ... ON ALL TABLES` covers it. The Phase 3.2
-  audit writer runs from app routes, and needs INSERT.
-- Migration runner: if you configure `MEMORY_APP_DB_USER`, app
-  queries use it; migrations continue to use `MEMORY_DB_USER`.
-  `lib/db.py::_run_migrations` is invoked on pool init; only the
-  superuser pool applies migrations.
-- The bootstrap-admin startup check in `server.py` runs under the
-  superuser connection (same as migrations), not the app role, so
-  it can count admins regardless of the RLS state.
+Cause: either the Docker init never ran (pre-existing volume) or the
+role was manually dropped.
+
+Fix: re-run the installer OR run the ensure script directly.
+
+```bash
+python docker/init/ensure_app_role.py
+```
+
+The script is idempotent. It CREATE-ROLEs if missing, refreshes the
+password if the role exists but the password in `.env` changed, and
+re-applies all the necessary grants.
+
+Inside a Docker server-mode install, equivalent is:
+
+```bash
+docker compose -f docker/docker-compose.yml --profile server \
+  run --rm mcp python docker/init/ensure_app_role.py
+```
+
+### Password drift
+
+Symptom: authentication fails for the app role. `.env` says one thing
+but Postgres has a different password on the role.
+
+Fix: same as above. `ensure_app_role.py` calls `ALTER ROLE ... WITH
+PASSWORD ...` when the role exists, so it self-heals.
+
+### Privilege drift
+
+Symptom: server logs show `permission denied for relation <table>`.
+
+Cause: a previous admin manually revoked grants from `memory_app`.
+
+Fix: same as above. The script re-applies `GRANT SELECT, INSERT,
+UPDATE, DELETE ON ALL TABLES IN SCHEMA public TO memory_app` (plus
+sequences and default privileges) every time it runs.
+
+### Policies dropped
+
+Symptom: verification query #3 returns fewer than four policies, or
+RLS isn't filtering rows.
+
+Fix: re-apply the two policy migrations manually:
+
+```bash
+# As MEMORY_DB_USER:
+psql -U memory -d notnative_memory -f config/migrations/008_rls_foundations.sql
+psql -U memory -d notnative_memory -f config/migrations/013_rls_admin_sentinel.sql
+```
+
+These use `DROP POLICY IF EXISTS` + `CREATE POLICY`, so re-running is
+safe.
+
+## Disabling RLS
+
+Two knobs, pick whichever matches your intent:
+
+### Option A: runtime fallback to single-role (keeps RLS defined, just not enforced)
+
+Blank the app-role env vars and restart:
+
+```
+MEMORY_APP_DB_USER=
+MEMORY_APP_DB_PASSWORD=
+```
+
+`lib/db.py::get_pool` sees the blanks and falls back to
+`MEMORY_DB_USER` for the app pool. That role is a superuser, so RLS
+policies are bypassed. Policies remain defined; ENABLE + FORCE stay
+on the tables. Flipping the vars back flips enforcement back.
+
+### Option B: disable RLS at the DB layer (policies stay, enforcement off globally)
+
+Run the rollback for migration 012:
+
+```bash
+psql -U memory -d notnative_memory -f config/migrations/rollback/012_rls_force.sql
+```
+
+This runs `NO FORCE ROW LEVEL SECURITY` + `DISABLE ROW LEVEL SECURITY`
+on all four tables. Policies remain defined; re-enabling is a single
+psql invocation of `012_rls_force.sql`.
+
+### Option C: nuke the policies entirely
+
+Rollback both policy migrations:
+
+```bash
+psql -U memory -d notnative_memory -f config/migrations/rollback/013_rls_admin_sentinel.sql
+psql -U memory -d notnative_memory -f config/migrations/rollback/008_rls_foundations.sql
+```
+
+Not recommended — you lose the defense-in-depth and the schema
+diverges from what fresh installs get.
+
+## Internals reference
+
+- Migration `008_rls_foundations.sql` — defines the base policies.
+- Migration `012_rls_force.sql` — ENABLE + FORCE on the four tables.
+- Migration `013_rls_admin_sentinel.sql` — policies with admin
+  sentinel bypass.
+- `docker/init/02-roles.sh` — creates `memory_app` at Postgres
+  container init time (Docker full mode, first DB volume only).
+- `docker/init/ensure_app_role.py` — idempotent role provisioner
+  the installer runs in all modes. Safe to run by hand.
+- `lib/rls.py::app_conn` — per-user RLS context for the app pool.
+- `lib/rls.py::admin_conn` — admin-sentinel context for cross-user
+  admin queries and pre-auth token resolution.
+- `tests/test_rls_enforcement.py` — end-to-end enforcement test.
