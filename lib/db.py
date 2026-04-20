@@ -1081,7 +1081,8 @@ async def admin_bulk_delete(
     # asyncpg returns "DELETE N"
     try:
         return int(result.split()[-1])
-    except (ValueError, IndexError):
+    except (ValueError, IndexError) as exc:
+        _log.debug("admin_bulk_delete: unparseable result %r (%s)", result, exc)
         return 0
 
 

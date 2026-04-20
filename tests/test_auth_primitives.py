@@ -74,7 +74,7 @@ def run():
           not auth.verify_secret(t2, th))
 
     print("---")
-    print(f"{len(str(failed))} passed" if failed == 0 else f"{failed} FAILED")
+    print("all passed" if failed == 0 else f"{failed} FAILED")
     return 0 if failed == 0 else 1
 
 

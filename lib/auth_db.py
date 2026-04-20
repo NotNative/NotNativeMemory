@@ -11,11 +11,23 @@ Depends on lib.db.get_pool() for the shared asyncpg connection pool.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from lib import auth
 from lib.db import get_pool
+
+
+_log = logging.getLogger("notnative.auth")
+
+# Cap how many active tokens we scrypt-verify against per incoming
+# request. For a single-user or small-team deploy, realistic counts
+# are 1-10 and the limit never fires. The cap protects against a DoS
+# surface where an attacker (or a misconfigured client) accumulates
+# tokens to slow down every subsequent login. Ordering by
+# last_used_at DESC keeps the freshest tokens in the candidate set.
+_ACTIVE_TOKEN_LIMIT = 500
 
 
 # ==========================================================================
@@ -188,7 +200,10 @@ async def resolve_token(raw_token: str) -> Optional[Dict[str, Any]]:
         FROM auth_tokens t
         JOIN users u ON u.id = t.user_id
         WHERE t.revoked_at IS NULL
+        ORDER BY t.last_used_at DESC NULLS LAST
+        LIMIT $1
         """,
+        _ACTIVE_TOKEN_LIMIT,
     )
 
     for row in rows:

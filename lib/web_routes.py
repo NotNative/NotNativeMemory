@@ -12,6 +12,7 @@ management. Edit, rescope, bulk ops, and filters come in later slices.
 
 from __future__ import annotations
 
+import logging
 import os
 from uuid import UUID
 
@@ -22,6 +23,14 @@ from starlette.templating import Jinja2Templates
 
 from lib import auth, auth_db
 from lib.csrf import ensure_csrf, check_csrf
+
+
+_log = logging.getLogger("notnative.web")
+
+# Cap on how many memories a single bulk-delete form submission can
+# target. Stops a hostile or buggy client from shoveling the entire
+# DB into one request and turning a 400ms DELETE into a 40s one.
+_BULK_DELETE_LIMIT = 100
 
 
 # -- Template loader --------------------------------------------------------
@@ -230,8 +239,14 @@ def register_routes(mcp) -> None:
                         else resolved["user_id"],
                         UUID(resolved["token_id"]),
                     )
-                except (ValueError, TypeError):
-                    pass
+                except (ValueError, TypeError) as exc:
+                    # Token resolved but UUID conversion failed. Log at
+                    # debug so we notice if tokens start landing here,
+                    # but don't block logout — the cookie gets cleared
+                    # regardless so the browser session is gone.
+                    _log.debug(
+                        "logout: could not revoke token cleanly (%s)", exc,
+                    )
 
         resp = RedirectResponse("/login", status_code=303)
         _clear_session_cookie(resp)
@@ -532,12 +547,22 @@ def register_routes(mcp) -> None:
         form = await request.form()
         # getlist is the multi-value accessor in Starlette's FormData.
         raw_ids = form.getlist("ids")
+        if len(raw_ids) > _BULK_DELETE_LIMIT:
+            _log.debug(
+                "bulk_delete: truncating %d ids to cap %d",
+                len(raw_ids), _BULK_DELETE_LIMIT,
+            )
+            raw_ids = raw_ids[:_BULK_DELETE_LIMIT]
+
         valid_ids = []
         for raw in raw_ids:
             try:
                 valid_ids.append(UUID(raw))
-            except (ValueError, TypeError):
-                continue
+            except (ValueError, TypeError) as exc:
+                _log.debug(
+                    "bulk_delete: skipping unparseable id %r (%s)",
+                    raw, exc,
+                )
 
         deleted = await db.admin_bulk_delete(valid_ids, uid)
 

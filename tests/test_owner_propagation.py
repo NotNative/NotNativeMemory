@@ -37,14 +37,20 @@ async def run() -> int:
             print(f"  FAIL  {label}")
             failed += 1
 
-    # Clean the users table so this test is reproducible.
-    pool = await db.get_pool()
-    await pool.execute("TRUNCATE users CASCADE")
+    # Use a uniquely-named test user so running this against a live
+    # DB doesn't collide with (or destroy) real data. The previous
+    # version of this test called TRUNCATE users CASCADE which
+    # deleted every user's memories, projects, tokens, and facts.
+    # Never truncate a shared table from a test.
+    import secrets
+    test_username = f"owner-test-{secrets.token_hex(4)}"
+    test_project_dir = f"/tmp/owner-test-{secrets.token_hex(4)}"
 
-    # 1. Create a user directly via auth_db.
-    user = await auth_db.create_user(
-        "owner-test", "password-1234", is_admin=False,
-    )
+    pool = await db.get_pool()
+
+    # 1. Create a user directly via auth_db. Phase 7 dropped the
+    #    is_admin parameter — every user is a peer now.
+    user = await auth_db.create_user(test_username, "password-1234")
     uid = UUID(user["id"])
     check("created test user", uid is not None)
 
@@ -54,7 +60,7 @@ async def run() -> int:
 
     # 3. Create a project and verify owner_user_id lands.
     project_id = await db.get_or_create_project(
-        "/tmp/owner-test-proj",
+        test_project_dir,
         owner_user_id=uid,
     )
     row = await pool.fetchrow(
@@ -73,8 +79,8 @@ async def run() -> int:
         content="owner-propagation-test memory",
         embedding=zeros,
         project_id=project_id,
-        importance="normal",
         owner_user_id=uid,
+        importance="normal",
     )
     row = await pool.fetchrow(
         "SELECT owner_user_id FROM memories WHERE id = $1", mem_id,
@@ -101,30 +107,26 @@ async def run() -> int:
         row is not None and row["owner_user_id"] == uid,
     )
 
-    # 6. Write with no owner set (simulates stdio / legacy path).
-    set_current_user_id(None)
-    project2_id = await db.get_or_create_project(
-        "/tmp/owner-test-proj-unowned",
-        owner_user_id=None,
-    )
-    mem2_id = await db.store_memory(
-        content="legacy-style unowned memory",
-        embedding=zeros,
-        project_id=project2_id,
-        importance="normal",
-        owner_user_id=None,
-    )
-    row = await pool.fetchrow(
-        "SELECT owner_user_id FROM memories WHERE id = $1", mem2_id,
-    )
-    check(
-        "unowned memory has NULL owner",
-        row is not None and row["owner_user_id"] is None,
-    )
+    # 6. Phase 7 made owner_user_id mandatory — verify the helper
+    #    raises instead of silently creating an unowned row.
+    raised = False
+    try:
+        await db.get_or_create_project(
+            f"{test_project_dir}-unowned",
+            owner_user_id=None,
+        )
+    except ValueError:
+        raised = True
+    check("get_or_create_project rejects owner_user_id=None", raised)
 
-    # Cleanup
-    await pool.execute("DELETE FROM memories WHERE id IN ($1, $2)", mem_id, mem2_id)
-    await pool.execute("DELETE FROM projects WHERE id IN ($1, $2)", project_id, project2_id)
+    # Cleanup: deleting the test user cascades to their rows
+    # (tokens, projects, memories, facts) via the ON DELETE CASCADE
+    # FKs on users. Belt-and-suspenders: explicitly wipe the ones
+    # we know about in case a future schema change weakens that
+    # cascade.
+    await pool.execute("DELETE FROM memories WHERE id = $1", mem_id)
+    await pool.execute("DELETE FROM projects WHERE id = $1", project_id)
+    await pool.execute("DELETE FROM users WHERE id = $1", uid)
     await db.close_pool()
 
     print("---")
