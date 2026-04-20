@@ -251,10 +251,77 @@ def register_routes(mcp) -> None:
         if isinstance(uid, str):
             uid = UUID(uid)
 
-        memories = await db.list_memories(owner_user_id=uid, limit=100)
+        params = request.query_params
+
+        def _str(name: str) -> str | None:
+            value = params.get(name, "").strip()
+            return value or None
+
+        def _int(name: str, default: int) -> int:
+            raw = params.get(name, "")
+            try:
+                return int(raw)
+            except (TypeError, ValueError):
+                return default
+
+        filters = {
+            "project": _str("project"),
+            "scope": _str("scope"),
+            "tag": _str("tag"),
+            "min_importance": _str("min_importance"),
+            "q": _str("q"),
+            "sort": _str("sort") or "created_at",
+            "order": _str("order") or "DESC",
+        }
+        limit = max(1, min(_int("limit", 20), 100))
+        offset = max(0, _int("offset", 0))
+
+        memories, total = await db.admin_list_memories(
+            owner_user_id=uid,
+            project=filters["project"],
+            scope=filters["scope"],
+            tag=filters["tag"],
+            min_importance=filters["min_importance"],
+            q=filters["q"],
+            sort=filters["sort"],
+            order=filters["order"],
+            offset=offset,
+            limit=limit,
+        )
+
+        # Build current query string minus offset (for pagination links
+        # to rebuild it themselves). Prev/next just rewrite `offset`.
+        base_qs = []
+        for name in ("project", "scope", "tag", "min_importance",
+                     "q", "sort", "order"):
+            value = filters.get(name)
+            if value:
+                base_qs.append(f"{name}={value}")
+        base_qs.append(f"limit={limit}")
+        qs_without_offset = "&".join(base_qs)
+
+        prev_offset = max(0, offset - limit) if offset > 0 else None
+        next_offset = offset + limit if offset + limit < total else None
+
+        # HTMX requests want just the list partial for in-place swap;
+        # a full page reload gets the whole template.
+        template = (
+            "_memories_list.html"
+            if request.headers.get("hx-request")
+            else "memories.html"
+        )
+
         return _render_with_csrf(
-            request, "memories.html",
-            memories=memories, count=len(memories),
+            request, template,
+            memories=memories,
+            count=len(memories),
+            total=total,
+            offset=offset,
+            limit=limit,
+            filters=filters,
+            qs_without_offset=qs_without_offset,
+            prev_offset=prev_offset,
+            next_offset=next_offset,
         )
 
     # -- Token management ------------------------------------------------

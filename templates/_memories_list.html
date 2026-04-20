@@ -1,0 +1,36 @@
+{# Partial: memory list + paging. Rendered either inside memories.html
+   (full page) or directly (HTMX in-place swap). #}
+<p>
+  {% if total == 0 %}
+    No memories match.
+  {% else %}
+    Showing {{ offset + 1 }}-{{ offset + count }} of {{ total }}.
+  {% endif %}
+</p>
+
+<div id="memory-list">
+  {% for m in memories %}
+    {% include "_memory_row.html" %}
+  {% else %}
+    <p>No memories match the current filters. Clear filters to see all.</p>
+  {% endfor %}
+</div>
+
+{% if total > limit %}
+<div class="paging">
+  {% if prev_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ prev_offset }}"
+       hx-get="?{{ qs_without_offset }}&offset={{ prev_offset }}"
+       hx-target="#memory-panel" hx-push-url="true">&larr; Prev</a>
+  {% else %}
+    <span class="disabled">&larr; Prev</span>
+  {% endif %}
+  {% if next_offset is not none %}
+    <a href="?{{ qs_without_offset }}&offset={{ next_offset }}"
+       hx-get="?{{ qs_without_offset }}&offset={{ next_offset }}"
+       hx-target="#memory-panel" hx-push-url="true">Next &rarr;</a>
+  {% else %}
+    <span class="disabled">Next &rarr;</span>
+  {% endif %}
+</div>
+{% endif %}

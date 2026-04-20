@@ -880,6 +880,148 @@ async def forget_memory(memory_id: UUID, owner_user_id: UUID) -> bool:
 
 # -- List -------------------------------------------------------------------
 
+# Whitelist of columns the admin UI is allowed to sort by. Any column
+# outside this set gets rejected; prevents SQL injection via a hostile
+# `sort` query-string value.
+_ADMIN_SORT_COLUMNS = {
+    "created_at", "last_accessed", "temperature", "access_count",
+    "importance",
+}
+
+
+async def admin_list_memories(
+    owner_user_id: UUID,
+    *,
+    project: Optional[str] = None,
+    scope: Optional[str] = None,
+    tag: Optional[str] = None,
+    min_importance: Optional[str] = None,
+    q: Optional[str] = None,
+    sort: str = "created_at",
+    order: str = "DESC",
+    offset: int = 0,
+    limit: int = 20,
+) -> tuple:
+    """
+    Rich list query for the admin UI. Scoped to the caller's rows.
+
+    Filters all compose with AND. The return value is
+    (memory_dicts, total_count_before_paging) so the caller can
+    render "showing X-Y of N" + paging controls without a second
+    query.
+
+    Args:
+        owner_user_id: caller identity (required).
+        project: exact directory to filter to, or a reserved scope
+            name ("_global", "_domain_<name>"). None means "any
+            project owned by this user."
+        scope: filter by project scope; 'local' | 'global' | 'domain'.
+        tag: require this tag to be present on the memory.
+        min_importance: 'low' | 'normal' | 'high' | 'critical'; acts
+            as a floor (critical-only, high+, normal+, low+).
+        q: content substring (case-insensitive ILIKE).
+        sort: column from _ADMIN_SORT_COLUMNS.
+        order: 'ASC' or 'DESC'.
+        offset: pagination offset.
+        limit: page size (clamped to 1..100).
+
+    Returns:
+        (list_of_memory_dicts, total_count_int).
+    """
+    if sort not in _ADMIN_SORT_COLUMNS:
+        sort = "created_at"
+    order = "ASC" if order.upper() == "ASC" else "DESC"
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+    if offset < 0:
+        offset = 0
+
+    pool = await get_pool()
+
+    conditions = ["m.owner_user_id = $1"]
+    params: List[Any] = [owner_user_id]
+    param_idx = 2
+
+    if project:
+        conditions.append(f"p.directory = ${param_idx}")
+        params.append(project)
+        param_idx += 1
+
+    if scope in ("local", "global", "domain"):
+        conditions.append(f"p.scope = ${param_idx}")
+        params.append(scope)
+        param_idx += 1
+
+    if tag:
+        conditions.append(f"${param_idx} = ANY(m.tags)")
+        params.append(tag)
+        param_idx += 1
+
+    if min_importance:
+        importance_order = ["low", "normal", "high", "critical"]
+        if min_importance in importance_order:
+            idx = importance_order.index(min_importance)
+            allowed = importance_order[idx:]
+            conditions.append(f"m.importance = ANY(${param_idx})")
+            params.append(allowed)
+            param_idx += 1
+
+    if q:
+        conditions.append(f"m.content ILIKE ${param_idx}")
+        params.append(f"%{q}%")
+        param_idx += 1
+
+    where = "WHERE " + " AND ".join(conditions)
+
+    count_row = await pool.fetchrow(
+        f"""SELECT COUNT(*) AS n FROM memories m
+            JOIN projects p ON p.id = m.project_id
+            {where}""",
+        *params,
+    )
+    total = int(count_row["n"] or 0)
+
+    # Append limit + offset as the last two parameters. $N numbering
+    # picks up where the filter block left off.
+    limit_placeholder = param_idx
+    offset_placeholder = param_idx + 1
+    params.append(limit)
+    params.append(offset)
+
+    # Importance ORDER BY uses a CASE to respect low<normal<high<critical;
+    # other columns sort directly.
+    if sort == "importance":
+        order_clause = (
+            "CASE m.importance "
+            "WHEN 'critical' THEN 3 "
+            "WHEN 'high' THEN 2 "
+            "WHEN 'normal' THEN 1 "
+            "WHEN 'low' THEN 0 "
+            f"END {order}"
+        )
+    else:
+        order_clause = f"m.{sort} {order}"
+
+    rows = await pool.fetch(
+        f"""SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+                   m.created_at, m.last_accessed, m.access_count,
+                   m.project_id,
+                   p.scope AS project_scope,
+                   p.name AS project_name,
+                   p.directory AS project_directory
+            FROM memories m
+            JOIN projects p ON p.id = m.project_id
+            {where}
+            ORDER BY {order_clause}, m.created_at DESC
+            LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
+        *params,
+    )
+
+    return [_format_memory_row(r) for r in rows], total
+
+
 async def list_memories(
     owner_user_id: UUID,
     project_id: Optional[UUID] = None,
