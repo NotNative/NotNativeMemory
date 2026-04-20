@@ -479,6 +479,91 @@ def register_routes(mcp) -> None:
         )
         return HTMLResponse("", status_code=200)
 
+    @mcp.custom_route("/admin/users/{user_id}/password", methods=["GET"])
+    async def admin_users_password_page(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+        try:
+            target = UUID(request.path_params["user_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid user id", status_code=400)
+        user = await auth_db.get_user_by_id(target)
+        if user is None:
+            return HTMLResponse("user not found", status_code=404)
+        return _render_with_csrf(
+            request, "admin_user_password.html", target_user=user,
+        )
+
+    @mcp.custom_route("/admin/users/{user_id}/password", methods=["POST"])
+    async def admin_users_password_submit(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        try:
+            target = UUID(request.path_params["user_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid user id", status_code=400)
+
+        user = await auth_db.get_user_by_id(target)
+        if user is None:
+            return HTMLResponse("user not found", status_code=404)
+
+        form = await request.form()
+        new_password = form.get("new_password") or ""
+        confirm = form.get("password_confirm") or ""
+
+        if not new_password:
+            return _render_with_csrf(
+                request, "admin_user_password.html",
+                target_user=user, status_code=400,
+                error="New password is required.",
+            )
+        if new_password != confirm:
+            return _render_with_csrf(
+                request, "admin_user_password.html",
+                target_user=user, status_code=400,
+                error="Passwords do not match.",
+            )
+
+        policy_err = await password_policy.validate_new_password(new_password)
+        if policy_err:
+            return _render_with_csrf(
+                request, "admin_user_password.html",
+                target_user=user, status_code=400, error=policy_err,
+            )
+
+        try:
+            await auth_db.set_password(target, new_password)
+        except ValueError as exc:
+            return _render_with_csrf(
+                request, "admin_user_password.html",
+                target_user=user, status_code=400, error=str(exc),
+            )
+
+        # Always kill existing sessions after an admin-triggered reset.
+        # The user must log in with the new password to get a fresh token.
+        await auth_db.bump_token_generation(target)
+
+        acting = request.state.user_id
+        if isinstance(acting, str):
+            acting = UUID(acting)
+        await audit.log_event(
+            "user.password_reset_by_admin",
+            actor_user_id=acting,
+            target_id=target,
+            detail=audit.request_detail(request),
+        )
+
+        return _render_with_csrf(
+            request, "admin_user_password.html",
+            target_user=user, flash="Password reset. All existing sessions invalidated.",
+        )
+
     @mcp.custom_route("/admin/users/{user_id}/offboard", methods=["POST"])
     async def admin_users_offboard(request: Request):
         reject = _require_admin(request)

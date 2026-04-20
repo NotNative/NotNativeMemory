@@ -58,6 +58,9 @@
         <td class="num">{{ u.active_token_count }}</td>
         <td class="ts">{{ u.created_at[:10] }}</td>
         <td class="actions">
+          <a class="action-link" href="/admin/users/{{ u.id }}/password">
+            Reset password
+          </a>
           <button class="secondary"
                   hx-post="/admin/users/{{ u.id }}/force-logout"
                   hx-target="#user-{{ u.id }}"
@@ -102,8 +105,13 @@
   .users-table th { color: var(--muted-fg); font-weight: 600; }
   .users-table .num { text-align: right; font-variant-numeric: tabular-nums; }
   .users-table .ts { white-space: nowrap; color: var(--muted-fg); font-size: 0.9em; }
-  .users-table .actions { display: flex; gap: 0.4em; }
+  .users-table .actions { display: flex; gap: 0.4em; align-items: center; flex-wrap: wrap; }
   .users-table .actions button { padding: 0.3em 0.7em; font-size: 0.9em; }
+  .users-table .actions .action-link {
+      color: var(--link); text-decoration: none;
+      font-size: 0.9em; padding: 0.3em 0.5em;
+  }
+  .users-table .actions .action-link:hover { text-decoration: underline; }
   .paging { margin: 1em 0; display: flex; gap: 1em; align-items: center; color: var(--muted-fg); }
   .paging a { color: var(--link); text-decoration: none; padding: 0.3em 0.8em;
               border: 1px solid var(--border-strong); border-radius: 3px; }
