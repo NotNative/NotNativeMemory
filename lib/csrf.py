@@ -40,8 +40,9 @@ Usage:
 
 from __future__ import annotations
 
+import os
 import secrets
-from typing import Optional
+from typing import Optional, Tuple
 
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
@@ -57,30 +58,57 @@ def _gen_token() -> str:
     return secrets.token_urlsafe(_TOKEN_BYTES)
 
 
-def ensure_csrf(request: Request, response: Response) -> str:
-    """
-    Return the CSRF token for this request, minting one if the cookie
-    is missing. Writes the cookie onto the response so the browser
-    keeps it.
+def _cookie_secure() -> bool:
+    return os.environ.get("MEMORY_COOKIE_SECURE", "") in ("1", "true", "yes")
 
-    Not HttpOnly because HTMX reads the value to send as a header.
-    SameSite=Lax matches the session cookie.
+
+def get_or_mint_csrf(request: Request) -> Tuple[str, bool]:
+    """
+    Read-and-maybe-mint helper. Returns `(token, is_new)`.
+
+    When `is_new` is True the caller MUST call `set_csrf_cookie` on the
+    response it is about to return, or the browser will never store the
+    token and subsequent form submits will 403. Splitting read from
+    write lets a view handler render its template with the same token
+    value it puts in the cookie, instead of the prior bug where the
+    template and cookie could carry different tokens on a cold visit.
     """
     existing = request.cookies.get(CSRF_COOKIE)
     if existing:
-        return existing
+        return existing, False
+    return _gen_token(), True
 
-    token = _gen_token()
-    import os
-    secure = os.environ.get("MEMORY_COOKIE_SECURE", "") in ("1", "true", "yes")
+
+def set_csrf_cookie(response: Response, token: str) -> None:
+    """
+    Write the CSRF cookie onto a response. Not HttpOnly because HTMX
+    reads it to send as the X-CSRF-Token header. SameSite=Lax matches
+    the session cookie. Secure is on when MEMORY_COOKIE_SECURE=1.
+    """
     response.set_cookie(
         key=CSRF_COOKIE,
         value=token,
         httponly=False,
         samesite="lax",
-        secure=secure,
+        secure=_cookie_secure(),
         path="/",
     )
+
+
+def ensure_csrf(request: Request, response: Response) -> str:
+    """
+    Convenience wrapper for views that aren't rendering a template
+    (e.g. bare JSON endpoints that still want to mint a cookie for a
+    follow-up form render). Returns the token; sets the cookie on the
+    response if a fresh one was minted.
+
+    Template-rendering paths should use get_or_mint_csrf + set_csrf_cookie
+    directly so the token the template embeds is the same one the
+    cookie carries.
+    """
+    token, is_new = get_or_mint_csrf(request)
+    if is_new:
+        set_csrf_cookie(response, token)
     return token
 
 

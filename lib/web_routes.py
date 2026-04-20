@@ -22,7 +22,7 @@ from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.templating import Jinja2Templates
 
 from lib import auth, auth_db
-from lib.csrf import ensure_csrf, check_csrf
+from lib.csrf import check_csrf, get_or_mint_csrf, set_csrf_cookie
 
 
 _log = logging.getLogger("notnative.web")
@@ -74,18 +74,13 @@ def _clear_session_cookie(response) -> None:
 # -- View helpers -----------------------------------------------------------
 
 
-def _context_for(request: Request, **extra) -> dict:
-    """Base template context. Adds the authenticated identity so nav renders.
-
-    CSRF token is not populated here because the cookie is set on the
-    response, which the view handler hasn't built yet. View handlers
-    that render a form call `_render_with_csrf` instead.
-    """
+def _context_for(request: Request, csrf_token: str, **extra) -> dict:
+    """Base template context. Adds the authenticated identity so nav renders."""
     ctx = {
         "request": request,
         "username": getattr(request.state, "username", None),
         "user_id": getattr(request.state, "user_id", None),
-        "csrf_token": request.cookies.get("nnm_csrf", ""),
+        "csrf_token": csrf_token,
     }
     ctx.update(extra)
     return ctx
@@ -96,23 +91,17 @@ def _render_with_csrf(
 ):
     """
     Render a template with a guaranteed-present csrf_token in context.
-    Mints the cookie onto the response if missing.
+    Mints the CSRF cookie once and renders once with the same value,
+    so the token the form carries always matches the cookie the browser
+    receives (even on a cold visit).
     """
-    ctx = _context_for(request, **extra)
+    token, is_new = get_or_mint_csrf(request)
+    ctx = _context_for(request, csrf_token=token, **extra)
     response = templates.TemplateResponse(
         template, ctx, status_code=status_code,
     )
-    token = ensure_csrf(request, response)
-    # Jinja already rendered with whatever was in the cookie at read
-    # time. If we just minted a fresh token, rewrite the rendered body
-    # so the form carries the new value that the browser is about to
-    # receive.
-    if not ctx["csrf_token"]:
-        ctx["csrf_token"] = token
-        response = templates.TemplateResponse(
-            template, ctx, status_code=status_code,
-        )
-        ensure_csrf(request, response)
+    if is_new:
+        set_csrf_cookie(response, token)
     return response
 
 
