@@ -87,19 +87,26 @@ async def log_event(
     Detail is serialized as JSON. Keep it small and free of secrets.
     """
     from lib.db import get_pool
+    from lib import rls
 
     try:
         pool = await get_pool()
-        await pool.execute(
-            """
-            INSERT INTO audit_events (actor_user_id, event_type, target_id, detail)
-            VALUES ($1, $2, $3, $4::jsonb)
-            """,
-            actor_user_id,
-            event_type,
-            target_id,
-            json.dumps(dict(detail or {})),
-        )
+        # admin_conn because actor_user_id may be NULL (pre-auth events)
+        # and because audit_events is not logically owned by a single
+        # user — the trail is a system-wide record. Under FORCE RLS on
+        # audit_events (currently not enabled) the admin sentinel keeps
+        # writes landing regardless of caller identity.
+        async with rls.admin_conn(pool) as conn:
+            await conn.execute(
+                """
+                INSERT INTO audit_events (actor_user_id, event_type, target_id, detail)
+                VALUES ($1, $2, $3, $4::jsonb)
+                """,
+                actor_user_id,
+                event_type,
+                target_id,
+                json.dumps(dict(detail or {})),
+            )
     except Exception as exc:
         # Forensic gap is visible in application logs; the caller's
         # primary operation is not aborted.
@@ -146,6 +153,7 @@ async def list_events(
     """
     import json
     from lib.db import get_pool
+    from lib import rls
 
     pool = await get_pool()
 
@@ -162,30 +170,31 @@ async def list_events(
         args.append(since)
     where_sql = " AND ".join(where) if where else "true"
 
-    total_row = await pool.fetchrow(
-        f"""
-        SELECT COUNT(*)::bigint AS n
-        FROM audit_events a
-        LEFT JOIN users u ON u.id = a.actor_user_id
-        WHERE {where_sql}
-        """,
-        *args,
-    )
-    total = int(total_row["n"] or 0)
+    async with rls.admin_conn(pool) as conn:
+        total_row = await conn.fetchrow(
+            f"""
+            SELECT COUNT(*)::bigint AS n
+            FROM audit_events a
+            LEFT JOIN users u ON u.id = a.actor_user_id
+            WHERE {where_sql}
+            """,
+            *args,
+        )
+        total = int(total_row["n"] or 0)
 
-    rows = await pool.fetch(
-        f"""
-        SELECT a.id, a.actor_user_id, u.username AS actor_username,
-               a.event_type, a.target_id,
-               a.detail::text AS detail_json, a.at
-        FROM audit_events a
-        LEFT JOIN users u ON u.id = a.actor_user_id
-        WHERE {where_sql}
-        ORDER BY a.at DESC
-        LIMIT ${len(args) + 1} OFFSET ${len(args) + 2}
-        """,
-        *args, limit, offset,
-    )
+        rows = await conn.fetch(
+            f"""
+            SELECT a.id, a.actor_user_id, u.username AS actor_username,
+                   a.event_type, a.target_id,
+                   a.detail::text AS detail_json, a.at
+            FROM audit_events a
+            LEFT JOIN users u ON u.id = a.actor_user_id
+            WHERE {where_sql}
+            ORDER BY a.at DESC
+            LIMIT ${len(args) + 1} OFFSET ${len(args) + 2}
+            """,
+            *args, limit, offset,
+        )
 
     events = []
     for r in rows:
@@ -210,8 +219,10 @@ async def list_event_types():
     """Return the distinct set of event_type values currently in the table,
     alphabetically. Used to populate the event-type filter dropdown."""
     from lib.db import get_pool
+    from lib import rls
     pool = await get_pool()
-    rows = await pool.fetch(
-        "SELECT DISTINCT event_type FROM audit_events ORDER BY event_type"
-    )
+    async with rls.admin_conn(pool) as conn:
+        rows = await conn.fetch(
+            "SELECT DISTINCT event_type FROM audit_events ORDER BY event_type"
+        )
     return [r["event_type"] for r in rows]
