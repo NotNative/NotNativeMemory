@@ -80,6 +80,7 @@ def _context_for(request: Request, csrf_token: str, **extra) -> dict:
         "request": request,
         "username": getattr(request.state, "username", None),
         "user_id": getattr(request.state, "user_id", None),
+        "is_admin": bool(getattr(request.state, "is_admin", False)),
         "csrf_token": csrf_token,
     }
     ctx.update(extra)
@@ -406,6 +407,65 @@ def register_routes(mcp) -> None:
         # Redirect to login rather than auto-login: forces the user to
         # confirm they remember the password they just typed.
         return RedirectResponse("/login", status_code=303)
+
+    # -- Admin: audit log --------------------------------------------------
+
+    @mcp.custom_route("/admin/audit", methods=["GET"])
+    async def admin_audit_page(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+
+        params = request.query_params
+
+        def _str(name: str):
+            v = params.get(name, "").strip()
+            return v or None
+
+        def _int(name: str, default: int) -> int:
+            try:
+                return int(params.get(name, ""))
+            except (TypeError, ValueError):
+                return default
+
+        since_preset = _str("since") or ""
+        filters = {
+            "actor_username": _str("actor_username"),
+            "event_type": _str("event_type"),
+            "since": since_preset,
+        }
+
+        limit = max(1, min(_int("limit", 50), 200))
+        offset = max(0, _int("offset", 0))
+
+        events, total = await audit.list_events(
+            offset=offset,
+            limit=limit,
+            actor_username=filters["actor_username"],
+            event_type=filters["event_type"],
+            since=audit.parse_since_preset(since_preset),
+        )
+        event_types = await audit.list_event_types()
+
+        base_qs = []
+        for name in ("actor_username", "event_type", "since"):
+            v = filters.get(name)
+            if v:
+                base_qs.append(f"{name}={v}")
+        base_qs.append(f"limit={limit}")
+        qs_without_offset = "&".join(base_qs)
+
+        prev_offset = max(0, offset - limit) if offset > 0 else None
+        next_offset = offset + limit if offset + limit < total else None
+
+        return _render_with_csrf(
+            request, "admin_audit.html",
+            events=events, count=len(events), total=total,
+            offset=offset, limit=limit,
+            filters=filters, event_types=event_types,
+            qs_without_offset=qs_without_offset,
+            prev_offset=prev_offset, next_offset=next_offset,
+        )
 
     # -- Logout -----------------------------------------------------------
 
