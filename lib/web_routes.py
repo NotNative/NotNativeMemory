@@ -112,6 +112,29 @@ def _require_login(request: Request) -> RedirectResponse | None:
     return None
 
 
+def _require_admin(request: Request) -> HTMLResponse | RedirectResponse | None:
+    """
+    Guard for /admin/* pages. Returns:
+      - RedirectResponse to /login when the caller isn't logged in.
+      - HTMLResponse 403 when the caller is logged in but not admin.
+      - None when the caller is an authenticated admin.
+
+    Usage pattern in handlers:
+
+        reject = _require_admin(request)
+        if reject:
+            return reject
+    """
+    redirect = _require_login(request)
+    if redirect:
+        return redirect
+    if not getattr(request.state, "is_admin", False):
+        return HTMLResponse(
+            "Forbidden: admin role required.", status_code=403,
+        )
+    return None
+
+
 # -- Routes -----------------------------------------------------------------
 
 

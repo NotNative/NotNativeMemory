@@ -71,6 +71,23 @@ def _current_user_id(request: Request) -> UUID | None:
         return None
 
 
+def _require_admin_json(request: Request) -> JSONResponse | None:
+    """
+    JSON equivalent of lib/web_routes.py::_require_admin. Returns:
+      - 401 when unauthenticated.
+      - 403 when authenticated but not admin.
+      - None when authenticated admin.
+    """
+    uid = _current_user_id(request)
+    if uid is None:
+        return JSONResponse(
+            {"error": "authenticated user required"}, status_code=401,
+        )
+    if not getattr(request.state, "is_admin", False):
+        return JSONResponse({"error": "admin only"}, status_code=403)
+    return None
+
+
 def register_routes(mcp) -> None:
     """Attach all /auth/* routes to the FastMCP instance."""
 
