@@ -43,7 +43,7 @@
     h1 { margin-top: 0.3em; }
   </style>
 </head>
-<body>
+<body hx-headers='{"X-CSRF-Token": "{{ csrf_token }}"}'>
   <nav>
     <strong>NotNativeMemory</strong>
     {% if username %}
@@ -55,6 +55,7 @@
       <a href="/tokens">Tokens</a>
       <span class="sep">|</span>
       <form class="inline" method="post" action="/logout">
+        <input type="hidden" name="_csrf" value="{{ csrf_token }}">
         <button class="secondary" type="submit">Log out</button>
       </form>
     {% else %}

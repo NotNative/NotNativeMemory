@@ -21,6 +21,7 @@ from starlette.responses import HTMLResponse, RedirectResponse
 from starlette.templating import Jinja2Templates
 
 from lib import auth, auth_db
+from lib.csrf import ensure_csrf, check_csrf
 
 
 # -- Template loader --------------------------------------------------------
@@ -65,14 +66,45 @@ def _clear_session_cookie(response) -> None:
 
 
 def _context_for(request: Request, **extra) -> dict:
-    """Base template context. Adds the authenticated identity so nav renders."""
+    """Base template context. Adds the authenticated identity so nav renders.
+
+    CSRF token is not populated here because the cookie is set on the
+    response, which the view handler hasn't built yet. View handlers
+    that render a form call `_render_with_csrf` instead.
+    """
     ctx = {
         "request": request,
         "username": getattr(request.state, "username", None),
         "user_id": getattr(request.state, "user_id", None),
+        "csrf_token": request.cookies.get("nnm_csrf", ""),
     }
     ctx.update(extra)
     return ctx
+
+
+def _render_with_csrf(
+    request: Request, template: str, status_code: int = 200, **extra,
+):
+    """
+    Render a template with a guaranteed-present csrf_token in context.
+    Mints the cookie onto the response if missing.
+    """
+    ctx = _context_for(request, **extra)
+    response = templates.TemplateResponse(
+        template, ctx, status_code=status_code,
+    )
+    token = ensure_csrf(request, response)
+    # Jinja already rendered with whatever was in the cookie at read
+    # time. If we just minted a fresh token, rewrite the rendered body
+    # so the form carries the new value that the browser is about to
+    # receive.
+    if not ctx["csrf_token"]:
+        ctx["csrf_token"] = token
+        response = templates.TemplateResponse(
+            template, ctx, status_code=status_code,
+        )
+        ensure_csrf(request, response)
+    return response
 
 
 def _require_login(request: Request) -> RedirectResponse | None:
@@ -100,22 +132,24 @@ def register_routes(mcp) -> None:
     async def login_page(request: Request):
         if getattr(request.state, "user_id", None):
             return RedirectResponse("/memories", status_code=302)
-        return templates.TemplateResponse(
-            "login.html", _context_for(request),
-        )
+        return _render_with_csrf(request, "login.html")
 
     @mcp.custom_route("/login", methods=["POST"])
     async def login_submit(request: Request):
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
         form = await request.form()
         username = (form.get("username") or "").strip()
         password = form.get("password") or ""
 
         record = await auth_db.get_user_by_username(username)
         if record is None or not auth.verify_secret(password, record["password_hash"]):
-            return templates.TemplateResponse(
-                "login.html",
-                _context_for(request, error="Invalid username or password."),
+            return _render_with_csrf(
+                request, "login.html",
                 status_code=401,
+                error="Invalid username or password.",
             )
 
         token = await auth_db.create_token(record["id"], label="web-session")
@@ -129,43 +163,45 @@ def register_routes(mcp) -> None:
     async def register_page(request: Request):
         if getattr(request.state, "user_id", None):
             return RedirectResponse("/memories", status_code=302)
-        return templates.TemplateResponse(
-            "register.html", _context_for(request),
-        )
+        return _render_with_csrf(request, "register.html")
 
     @mcp.custom_route("/register", methods=["POST"])
     async def register_submit(request: Request):
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
         form = await request.form()
         username = (form.get("username") or "").strip()
         password = form.get("password") or ""
         confirm = form.get("password_confirm") or ""
 
         if not username or not password:
-            return templates.TemplateResponse(
-                "register.html",
-                _context_for(request, error="Username and password are required."),
+            return _render_with_csrf(
+                request, "register.html",
                 status_code=400,
+                error="Username and password are required.",
             )
         if password != confirm:
-            return templates.TemplateResponse(
-                "register.html",
-                _context_for(request, error="Passwords do not match."),
+            return _render_with_csrf(
+                request, "register.html",
                 status_code=400,
+                error="Passwords do not match.",
             )
 
         try:
             await auth_db.create_user(username, password)
         except asyncpg.UniqueViolationError:
-            return templates.TemplateResponse(
-                "register.html",
-                _context_for(request, error="That username is taken."),
+            return _render_with_csrf(
+                request, "register.html",
                 status_code=409,
+                error="That username is taken.",
             )
         except ValueError as exc:
-            return templates.TemplateResponse(
-                "register.html",
-                _context_for(request, error=str(exc)),
+            return _render_with_csrf(
+                request, "register.html",
                 status_code=400,
+                error=str(exc),
             )
 
         # Redirect to login rather than auto-login: forces the user to
@@ -176,6 +212,10 @@ def register_routes(mcp) -> None:
 
     @mcp.custom_route("/logout", methods=["POST"])
     async def logout_submit(request: Request):
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
         # Best-effort token revocation: find the cookie's token, resolve
         # it to a token row, mark revoked. If any step fails, we still
         # clear the cookie so the user is functionally logged out.
@@ -212,9 +252,9 @@ def register_routes(mcp) -> None:
             uid = UUID(uid)
 
         memories = await db.list_memories(owner_user_id=uid, limit=100)
-        return templates.TemplateResponse(
-            "memories.html",
-            _context_for(request, memories=memories, count=len(memories)),
+        return _render_with_csrf(
+            request, "memories.html",
+            memories=memories, count=len(memories),
         )
 
     @mcp.custom_route("/memories/{memory_id}", methods=["DELETE"])
@@ -224,6 +264,10 @@ def register_routes(mcp) -> None:
             # HTMX DELETE to an unauthed endpoint: return 401 and let
             # the client decide. Redirects wouldn't be followed by HTMX.
             return HTMLResponse("unauthorized", status_code=401)
+
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
 
         from lib import db
 

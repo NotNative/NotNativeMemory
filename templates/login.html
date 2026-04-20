@@ -4,6 +4,7 @@
 <h1>Login</h1>
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
 <form class="stacked" method="post" action="/login">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
   <label>
     Username
     <input name="username" required autofocus autocomplete="username">
