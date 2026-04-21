@@ -819,7 +819,9 @@ def _build_search_query(
                      WHEN 'normal' THEN 0.0
                      WHEN 'low' THEN -0.05
                      ELSE 0.0
-                 END DESC
+                 END DESC,
+                 m.created_at DESC,
+                 m.id ASC
         LIMIT ${param_idx}
     """
     return sql, params
@@ -1090,7 +1092,7 @@ async def admin_list_facts(
                 FROM facts f
                 JOIN projects p ON p.id = f.project_id
                 {where}
-                ORDER BY f.valid_from DESC, f.created_at DESC
+                ORDER BY f.valid_from DESC, f.created_at DESC, f.id ASC
                 LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
             *params,
         )
@@ -1314,7 +1316,7 @@ async def admin_list_memories(
                 FROM memories m
                 JOIN projects p ON p.id = m.project_id
                 {where}
-                ORDER BY {order_clause}, m.created_at DESC
+                ORDER BY {order_clause}, m.created_at DESC, m.id ASC
                 LIMIT ${limit_placeholder} OFFSET ${offset_placeholder}""",
             *params,
         )
@@ -1372,7 +1374,7 @@ async def list_memories(
             f"""SELECT id, content, tags, importance, temperature, created_at,
                        last_accessed, access_count
                 FROM memories {where}
-                ORDER BY created_at DESC
+                ORDER BY created_at DESC, id ASC
                 LIMIT ${param_idx}""",
             *params,
         )
@@ -1434,7 +1436,9 @@ async def get_context_memories(
                        WHEN 'normal' THEN 1
                        WHEN 'low' THEN 0
                    END DESC,
-                   m.temperature DESC
+                   m.temperature DESC,
+                   m.created_at DESC,
+                   m.id ASC
                LIMIT 50""",
             visible_ids, owner_user_id,
         )
@@ -1569,7 +1573,7 @@ async def query_facts(
                        valid_from, valid_to, source_memory_id, created_at
                 FROM facts
                 {where}
-                ORDER BY predicate, valid_from DESC""",
+                ORDER BY predicate, valid_from DESC, id ASC""",
             *params,
         )
 
