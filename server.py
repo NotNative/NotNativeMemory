@@ -34,6 +34,8 @@ load_dotenv()
 
 _log = logging.getLogger("notnative.server")
 
+from lib.observability import instrumented
+
 # Default port for HTTP transport mode
 _DEFAULT_HTTP_PORT = 9500
 
@@ -51,17 +53,29 @@ def _tool_error(tool_name: str, exc: Exception, empty: dict) -> dict:
     (e.g. {"results": [], "count": 0} for memory_search), so callers
     that iterate results[...] do not crash on the error path. The
     exception is logged once with traceback so operators can find it.
+
+    The returned dict carries a private `_exception_type` key that the
+    @instrumented decorator uses to populate the tool_errors counter
+    label and the exception_type field in the structured event log.
+    The decorator strips this key before the dict reaches the MCP
+    client, so it is purely an internal channel.
     """
     _log.exception("%s failed: %s", tool_name, exc)
-    return {**empty, "error": f"{type(exc).__name__}: {exc}"}
+    return {
+        **empty,
+        "error": f"{type(exc).__name__}: {exc}",
+        "_exception_type": type(exc).__name__,
+    }
 
 # Register the /auth/* and /health routes on the FastMCP instance.
 # Runs at import time so the routes are present by the time anyone
 # calls streamable_http_app() in either stdio-warmup or HTTP mode.
 from lib.auth_routes import register_routes as _register_auth_routes
 from lib.web_routes import register_routes as _register_web_routes
+from lib.observability import register_routes as _register_observability_routes
 _register_auth_routes(mcp)
 _register_web_routes(mcp)
+_register_observability_routes(mcp)
 
 
 # Set to True when running in HTTP mode. In HTTP mode, the server's
@@ -178,6 +192,7 @@ def _validate_writable_scope(project: str) -> Optional[str]:
 
 
 @mcp.tool()
+@instrumented("memory_store")
 async def memory_store(
     content: str,
     tags: Optional[list[str]] = None,
@@ -316,6 +331,7 @@ async def memory_store(
 
 
 @mcp.tool()
+@instrumented("memory_search")
 async def memory_search(
     query: str,
     limit: int = 10,
@@ -390,6 +406,7 @@ async def memory_search(
 
 
 @mcp.tool()
+@instrumented("memory_forget")
 async def memory_forget(memory_id: str) -> dict:
     """
     Delete a memory that is wrong, outdated, or actively harmful to
@@ -434,6 +451,7 @@ async def memory_forget(memory_id: str) -> dict:
 
 
 @mcp.tool()
+@instrumented("memory_list")
 async def memory_list(
     project: Optional[str] = None,
     tags: Optional[list[str]] = None,
@@ -486,6 +504,7 @@ async def memory_list(
 
 
 @mcp.tool()
+@instrumented("memory_fact_add")
 async def memory_fact_add(
     subject: str,
     predicate: str,
@@ -578,6 +597,7 @@ async def memory_fact_add(
 
 
 @mcp.tool()
+@instrumented("memory_fact_query")
 async def memory_fact_query(
     subject: str,
     as_of: Optional[str] = None,
@@ -645,6 +665,7 @@ async def memory_fact_query(
 
 
 @mcp.tool()
+@instrumented("memory_project_configure")
 async def memory_project_configure(
     domains: list[str],
     project: Optional[str] = None,
@@ -714,6 +735,7 @@ async def memory_project_configure(
 
 
 @mcp.tool()
+@instrumented("memory_context")
 async def memory_context(
     project: Optional[str] = None,
     max_tokens: int = 500,

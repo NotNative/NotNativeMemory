@@ -58,6 +58,7 @@ _WHITELIST_PREFIXES = (
     "/auth/login",
     "/auth/claim-admin",
     "/health",
+    "/metrics",
     "/login",
     "/register",
     "/claim-admin",

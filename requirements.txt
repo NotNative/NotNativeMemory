@@ -17,3 +17,8 @@ numpy==2.4.2
 # clean install is reproducible regardless of upstream changes.
 jinja2==3.1.6
 python-multipart==0.0.22
+
+# Observability: in-memory metric counters/histograms/gauges and the
+# Prometheus exposition format for the /metrics endpoint. Small, pure
+# Python, no native build.
+prometheus-client==0.23.1
