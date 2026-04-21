@@ -705,16 +705,11 @@ async def _enforce_cap(conn: asyncpg.Connection, project_id: UUID) -> int:
 
     excess = total - PROJECT_MEMORY_CAP
     result = await conn.execute(
-        """DELETE FROM memories WHERE id IN (
+        f"""DELETE FROM memories WHERE id IN (
                SELECT id FROM memories
                WHERE project_id = $1
                ORDER BY
-                   CASE importance
-                       WHEN 'critical' THEN 3
-                       WHEN 'high' THEN 2
-                       WHEN 'normal' THEN 1
-                       WHEN 'low' THEN 0
-                   END ASC,
+                   {_importance_rank_sql()} ASC,
                    temperature ASC,
                    last_accessed ASC
                LIMIT $2
@@ -880,6 +875,24 @@ def _build_search_query(
         LIMIT ${param_idx}
     """
     return sql, params
+
+
+def _importance_rank_sql(col: str = "importance") -> str:
+    """
+    SQL fragment mapping ``importance`` to a 0..3 integer rank, suitable
+    for ORDER BY. Pair with ``DESC`` for critical-first, ``ASC`` to pick
+    the least-important rows first (e.g., cap-enforcement eviction).
+
+    ``col`` lets callers pass the correct table alias (e.g. ``m.importance``).
+    """
+    return (
+        f"CASE {col} "
+        "WHEN 'critical' THEN 3 "
+        "WHEN 'high' THEN 2 "
+        "WHEN 'normal' THEN 1 "
+        "WHEN 'low' THEN 0 "
+        "END"
+    )
 
 
 def _format_memory_row(row: Any) -> Dict[str, Any]:
@@ -1350,14 +1363,7 @@ async def admin_list_memories(
         # Importance ORDER BY uses a CASE to respect low<normal<high<critical;
         # other columns sort directly.
         if sort == "importance":
-            order_clause = (
-                "CASE m.importance "
-                "WHEN 'critical' THEN 3 "
-                "WHEN 'high' THEN 2 "
-                "WHEN 'normal' THEN 1 "
-                "WHEN 'low' THEN 0 "
-                f"END {order}"
-            )
+            order_clause = f"{_importance_rank_sql('m.importance')} {order}"
         else:
             order_clause = f"m.{sort} {order}"
 
@@ -1475,7 +1481,7 @@ async def get_context_memories(
 
     async with rls.app_conn(pool, owner_user_id) as conn:
         rows = await conn.fetch(
-            """SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+            f"""SELECT m.id, m.content, m.tags, m.importance, m.temperature,
                       m.created_at, m.last_accessed, m.access_count,
                       m.project_id,
                       p.scope AS project_scope,
@@ -1485,12 +1491,7 @@ async def get_context_memories(
                WHERE m.project_id = ANY($1)
                  AND m.owner_user_id = $2
                ORDER BY
-                   CASE m.importance
-                       WHEN 'critical' THEN 3
-                       WHEN 'high' THEN 2
-                       WHEN 'normal' THEN 1
-                       WHEN 'low' THEN 0
-                   END DESC,
+                   {_importance_rank_sql('m.importance')} DESC,
                    m.temperature DESC,
                    m.created_at DESC,
                    m.id ASC
