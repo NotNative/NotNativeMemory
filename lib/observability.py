@@ -26,13 +26,41 @@ Overhead:
 import functools
 import json
 import logging
+import threading
 import time
-from typing import Any, Callable, Optional
+from collections import deque
+from typing import Any, Callable, Deque, Dict, List, Optional
 from uuid import UUID
 
 from prometheus_client import Counter, Gauge, Histogram
 
 _event_log = logging.getLogger("notnative.events")
+
+
+# -- Recent-events ring buffer ----------------------------------------------
+#
+# Small in-memory deque that stores the last N tool-call events for the
+# admin dashboard. Separate from the 'notnative.events' logger (which
+# can be routed to stdout, a file, or syslog) so the dashboard never
+# has to parse log output to show "what just happened".
+#
+# Capacity is small so the memory footprint is bounded. Operators who
+# want more history configure the logger.
+_RECENT_EVENTS_CAPACITY = 100
+_recent_events: Deque[Dict[str, Any]] = deque(maxlen=_RECENT_EVENTS_CAPACITY)
+_recent_events_lock = threading.Lock()
+
+
+def recent_events(limit: Optional[int] = None) -> List[Dict[str, Any]]:
+    """Return a snapshot of the most recent tool-call events, newest
+    first. Safe to call from any thread; returns a copy so callers
+    can't mutate the live buffer."""
+    with _recent_events_lock:
+        snapshot = list(_recent_events)
+    snapshot.reverse()
+    if limit is not None:
+        snapshot = snapshot[:limit]
+    return snapshot
 
 
 # -- Metrics ----------------------------------------------------------------
@@ -93,6 +121,78 @@ pool_connections_active.set_function(_pool_active_value)
 pool_connections_idle.set_function(_pool_idle_value)
 
 
+# -- Snapshot for the admin dashboard ---------------------------------------
+
+def metrics_snapshot() -> Dict[str, Any]:
+    """
+    Assemble a point-in-time view of our metrics, shaped for rendering
+    in a Jinja template. Not Prometheus format; that is what /metrics
+    already does. This is human-dashboard-shaped.
+
+    Returns a dict with:
+        tool_calls:   {tool_name: {"ok": int, "error": int, "total": int}}
+        tool_latency: {tool_name: {"count": int, "sum_s": float, "avg_ms": float}}
+        tool_errors:  {tool_name: {exception_type: int}}
+        pool:         {"active": int, "idle": int}
+    """
+    from prometheus_client import REGISTRY
+
+    snap: Dict[str, Any] = {
+        "tool_calls": {},
+        "tool_latency": {},
+        "tool_errors": {},
+        "pool": {"active": 0, "idle": 0},
+    }
+
+    for family in REGISTRY.collect():
+        if not family.name.startswith("nnm_"):
+            continue
+        for sample in family.samples:
+            labels = sample.labels or {}
+            value = float(sample.value)
+
+            if sample.name == "nnm_tool_calls_total":
+                tool = labels.get("tool", "?")
+                outcome = labels.get("outcome", "?")
+                row = snap["tool_calls"].setdefault(
+                    tool, {"ok": 0, "error": 0, "total": 0},
+                )
+                if outcome in row:
+                    row[outcome] = int(value)
+                row["total"] = row["ok"] + row["error"]
+
+            elif sample.name == "nnm_tool_latency_seconds_count":
+                tool = labels.get("tool", "?")
+                row = snap["tool_latency"].setdefault(
+                    tool, {"count": 0, "sum_s": 0.0, "avg_ms": 0.0},
+                )
+                row["count"] = int(value)
+
+            elif sample.name == "nnm_tool_latency_seconds_sum":
+                tool = labels.get("tool", "?")
+                row = snap["tool_latency"].setdefault(
+                    tool, {"count": 0, "sum_s": 0.0, "avg_ms": 0.0},
+                )
+                row["sum_s"] = value
+
+            elif sample.name == "nnm_tool_errors_total":
+                tool = labels.get("tool", "?")
+                exc = labels.get("exception_type", "?")
+                snap["tool_errors"].setdefault(tool, {})[exc] = int(value)
+
+            elif sample.name == "nnm_pool_connections_active":
+                snap["pool"]["active"] = int(value)
+
+            elif sample.name == "nnm_pool_connections_idle":
+                snap["pool"]["idle"] = int(value)
+
+    for row in snap["tool_latency"].values():
+        if row["count"] > 0:
+            row["avg_ms"] = round((row["sum_s"] / row["count"]) * 1000, 2)
+
+    return snap
+
+
 # -- HTTP route registration ------------------------------------------------
 
 def register_routes(mcp) -> None:
@@ -120,7 +220,8 @@ def register_routes(mcp) -> None:
 # -- Event-log helpers ------------------------------------------------------
 
 def _log_event(**fields: Any) -> None:
-    """Emit one structured JSON line to the events logger.
+    """Emit one structured JSON line to the events logger and append
+    the same dict to the in-memory ring buffer.
 
     Defensive against unserializable types: any value that fails
     json.dumps falls back to its repr. We never want a telemetry
@@ -131,6 +232,13 @@ def _log_event(**fields: Any) -> None:
     except Exception:
         line = json.dumps({"ts": time.time(), "event_log_error": True})
     _event_log.info(line)
+
+    try:
+        with _recent_events_lock:
+            _recent_events.append(dict(fields))
+    except Exception:
+        # Ring-buffer append must never break a tool call.
+        pass
 
 
 # -- Tool instrumentation decorator -----------------------------------------

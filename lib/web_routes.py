@@ -662,6 +662,34 @@ def register_routes(mcp) -> None:
             prev_offset=prev_offset, next_offset=next_offset,
         )
 
+    # -- Admin: metrics dashboard ------------------------------------------
+
+    @mcp.custom_route("/admin/metrics", methods=["GET"])
+    async def admin_metrics_page(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+
+        from lib import observability
+
+        try:
+            events_limit = max(1, min(int(
+                request.query_params.get("events_limit", "50")
+            ), observability._RECENT_EVENTS_CAPACITY))
+        except (TypeError, ValueError):
+            events_limit = 50
+
+        snapshot = observability.metrics_snapshot()
+        events = observability.recent_events(limit=events_limit)
+
+        return _render_with_csrf(
+            request, "admin_metrics.html",
+            snapshot=snapshot,
+            events=events,
+            events_limit=events_limit,
+            events_capacity=observability._RECENT_EVENTS_CAPACITY,
+        )
+
     # -- Logout -----------------------------------------------------------
 
     @mcp.custom_route("/logout", methods=["POST"])

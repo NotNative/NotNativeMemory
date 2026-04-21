@@ -1,0 +1,158 @@
+{% extends "base.html" %}
+{% block title %}Metrics | NotNativeMemory{% endblock %}
+{% block content %}
+<meta http-equiv="refresh" content="5">
+
+<h1>Metrics</h1>
+
+<p style="color:var(--muted-fg);font-size:0.9em;">
+  Point-in-time snapshot of the process-local counters, histograms,
+  and gauges. Auto-refreshes every 5 seconds. For historical trends,
+  scrape <a href="/metrics"><code>/metrics</code></a> with Prometheus
+  or any other compatible collector.
+</p>
+
+<h2>Tool calls</h2>
+{% if snapshot.tool_calls %}
+<table class="users-table">
+  <thead>
+    <tr>
+      <th>Tool</th>
+      <th style="text-align:right;">Total</th>
+      <th style="text-align:right;">OK</th>
+      <th style="text-align:right;">Error</th>
+      <th style="text-align:right;">Error %</th>
+      <th style="text-align:right;">Count</th>
+      <th style="text-align:right;">Avg latency</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for tool, row in snapshot.tool_calls.items()|sort %}
+      {% set lat = snapshot.tool_latency.get(tool, {"count": 0, "avg_ms": 0.0}) %}
+      <tr>
+        <td><code>{{ tool }}</code></td>
+        <td style="text-align:right;">{{ row.total }}</td>
+        <td style="text-align:right;">{{ row.ok }}</td>
+        <td style="text-align:right;">{{ row.error }}</td>
+        <td style="text-align:right;">
+          {% if row.total > 0 %}
+            {{ "%.1f"|format((row.error / row.total) * 100) }}%
+          {% else %}
+            -
+          {% endif %}
+        </td>
+        <td style="text-align:right;">{{ lat.count }}</td>
+        <td style="text-align:right;">
+          {% if lat.count > 0 %}
+            {{ lat.avg_ms }} ms
+          {% else %}
+            -
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p style="color:var(--muted-fg);">No tool calls observed yet.</p>
+{% endif %}
+
+<h2>Errors by exception class</h2>
+{% if snapshot.tool_errors %}
+<table class="users-table">
+  <thead>
+    <tr>
+      <th>Tool</th>
+      <th>Exception</th>
+      <th style="text-align:right;">Count</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for tool, buckets in snapshot.tool_errors.items()|sort %}
+      {% for exc, count in buckets.items()|sort %}
+        <tr>
+          <td><code>{{ tool }}</code></td>
+          <td><code>{{ exc }}</code></td>
+          <td style="text-align:right;">{{ count }}</td>
+        </tr>
+      {% endfor %}
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p style="color:var(--muted-fg);">No exceptions recorded.</p>
+{% endif %}
+
+<h2>Connection pool</h2>
+<table class="users-table">
+  <tbody>
+    <tr>
+      <td>Active (checked out)</td>
+      <td style="text-align:right;">{{ snapshot.pool.active }}</td>
+    </tr>
+    <tr>
+      <td>Idle</td>
+      <td style="text-align:right;">{{ snapshot.pool.idle }}</td>
+    </tr>
+  </tbody>
+</table>
+
+<h2>Recent events
+  <small style="color:var(--muted-fg);font-weight:normal;font-size:0.7em;">
+    (last {{ events|length }} of up to {{ events_capacity }}, newest first)
+  </small>
+</h2>
+{% if events %}
+<table class="users-table">
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Tool</th>
+      <th>Outcome</th>
+      <th>Latency</th>
+      <th>User</th>
+      <th>Exception</th>
+    </tr>
+  </thead>
+  <tbody>
+    {% for e in events %}
+      <tr>
+        <td><code>{{ "%.2f"|format(e.ts) }}</code></td>
+        <td><code>{{ e.tool }}</code></td>
+        <td>
+          {% if e.outcome == "error" %}
+            <span style="color:var(--error-fg);">error</span>
+          {% else %}
+            ok
+          {% endif %}
+        </td>
+        <td style="text-align:right;">{{ e.latency_ms }} ms</td>
+        <td>
+          {% if e.user %}
+            <code title="{{ e.user }}">{{ e.user[:8] }}</code>
+          {% else %}
+            <span style="color:var(--faint-fg);">-</span>
+          {% endif %}
+        </td>
+        <td>
+          {% if e.exception_type %}
+            <code>{{ e.exception_type }}</code>
+          {% else %}
+            <span style="color:var(--faint-fg);">-</span>
+          {% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% else %}
+<p style="color:var(--muted-fg);">No events in buffer.</p>
+{% endif %}
+
+<p style="color:var(--muted-fg);font-size:0.85em;margin-top:2em;">
+  Counters are cumulative since server start. Averages cover every
+  call since start. Pool gauges reflect the state at the moment this
+  page was rendered.
+</p>
+
+{% endblock %}
