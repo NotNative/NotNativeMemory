@@ -688,8 +688,9 @@ async def store_memory(
     Store a new memory with deduplication, displacement cooling, and cap
     enforcement.
 
-    If a semantically similar memory exists (cosine similarity > 0.92),
-    the existing memory is updated instead of creating a duplicate.
+    If a semantically similar memory exists (cosine similarity
+    >= DEDUP_SIMILARITY_THRESHOLD, currently 0.92), the existing memory
+    is updated instead of creating a duplicate.
     Storing a new memory applies displacement cooling to the project -
     existing memories cool slightly, creating thermal pressure that
     eventually evicts irrelevant ones.
