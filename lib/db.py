@@ -290,21 +290,25 @@ async def get_pool() -> asyncpg.Pool:
         dual_role = app_user != mig_user
 
         # Run migrations over a one-shot connection as the migration role.
+        # Any failure here (bad SQL in a migration file, DB unreachable,
+        # auth, insufficient privilege) is fatal: starting the server
+        # with a half-applied or missing schema only produces cryptic
+        # runtime errors on the first user-facing tool call. Refusing
+        # to start surfaces the real cause at boot where an operator
+        # will see it. The cross-process advisory lock inside
+        # _run_migrations_on_conn means concurrent cold starts no longer
+        # trip DDL-conflict errors that previously motivated the
+        # swallow, so real errors are the only errors that land here.
+        mig_conn = await asyncpg.connect(
+            host=host, port=port, database=database,
+            user=mig_user, password=mig_password,
+        )
         try:
-            mig_conn = await asyncpg.connect(
-                host=host, port=port, database=database,
-                user=mig_user, password=mig_password,
-            )
-            try:
-                applied = await _run_migrations_on_conn(mig_conn)
-                if applied:
-                    _log.info("Applied %d pending migration(s)", applied)
-            finally:
-                await mig_conn.close()
-        except Exception as exc:
-            _log.error("Migration check failed: %s", exc)
-            # Don't prevent startup. The server can still work with
-            # existing schema. Missing tables will error on first use.
+            applied = await _run_migrations_on_conn(mig_conn)
+            if applied:
+                _log.info("Applied %d pending migration(s)", applied)
+        finally:
+            await mig_conn.close()
 
         # Create the app pool. In single-role setups this is the same
         # role that ran migrations. In dual-role setups it's the
