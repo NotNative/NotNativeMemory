@@ -191,6 +191,38 @@ def _validate_writable_scope(project: str) -> Optional[str]:
     )
 
 
+def _tool_auth_and_project(
+    project: Optional[str],
+    empty_shape: dict,
+    *,
+    writable: bool = False,
+):
+    """
+    Shared preamble for MCP tool handlers that take a ``project`` arg.
+
+    Returns ``(owner, project_dir, None)`` on success or
+    ``(None, None, error_dict)`` when auth or scope validation fails.
+    ``error_dict`` already folds in ``empty_shape`` so the handler can
+    return it verbatim. On scope-validation failure the dict also
+    carries the normalized ``project`` so the caller sees which scope
+    was rejected.
+    """
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return None, None, {"error": "authentication required", **empty_shape}
+
+    project_dir = _normalize_project(project)
+    if writable:
+        scope_err = _validate_writable_scope(project_dir)
+        if scope_err:
+            return None, None, {
+                "error": scope_err, **empty_shape, "project": project_dir,
+            }
+    return owner, project_dir, None
+
+
 @mcp.tool()
 @instrumented("memory_store")
 async def memory_store(
@@ -284,7 +316,6 @@ async def memory_store(
 
     from lib.embeddings import embed
     from lib.db import store_memory, get_or_create_project
-    from lib.auth_context import current_user_id
     from lib.limits import (
         MAX_MEMORY_CONTENT_BYTES,
         MAX_TAG_BYTES,
@@ -300,18 +331,15 @@ async def memory_store(
     except PayloadTooLarge as exc:
         return {"error": str(exc), "stored": False}
 
-    owner = current_user_id()
-    if owner is None:
-        return {"error": "authentication required", "stored": False}
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"stored": False}, writable=True,
+    )
+    if err:
+        return err
 
     store_tags = list(tags or [])
     if verbatim and "verbatim" not in store_tags:
         store_tags.append("verbatim")
-
-    project_dir = _normalize_project(project)
-    scope_err = _validate_writable_scope(project_dir)
-    if scope_err:
-        return {"error": scope_err, "stored": False, "project": project_dir}
 
     try:
         project_id = await get_or_create_project(project_dir, owner)
@@ -380,13 +408,13 @@ async def memory_search(
 
     from lib.embeddings import embed
     from lib.db import search_memories, get_or_create_project
-    from lib.auth_context import current_user_id
 
-    owner = current_user_id()
-    if owner is None:
-        return {"error": "authentication required", "results": [], "count": 0}
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"results": [], "count": 0},
+    )
+    if err:
+        return err
 
-    project_dir = _normalize_project(project)
     try:
         project_id = await get_or_create_project(project_dir, owner)
         query_embedding = embed(query)
@@ -481,13 +509,13 @@ async def memory_list(
         limit: Max results (1-100, default 20).
     """
     from lib.db import list_memories, get_or_create_project
-    from lib.auth_context import current_user_id
 
-    owner = current_user_id()
-    if owner is None:
-        return {"memories": [], "count": 0, "error": "authentication required"}
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"memories": [], "count": 0},
+    )
+    if err:
+        return err
 
-    project_dir = _normalize_project(project)
     try:
         project_id = await get_or_create_project(project_dir, owner)
         results = await list_memories(
@@ -557,7 +585,6 @@ async def memory_fact_add(
         return {"error": "Object cannot be empty", "stored": False}
 
     from lib.db import add_fact, get_or_create_project
-    from lib.auth_context import current_user_id
     from lib.limits import (
         MAX_FACT_FIELD_BYTES,
         PayloadTooLarge,
@@ -571,14 +598,11 @@ async def memory_fact_add(
     except PayloadTooLarge as exc:
         return {"error": str(exc), "stored": False}
 
-    owner = current_user_id()
-    if owner is None:
-        return {"error": "authentication required", "stored": False}
-
-    project_dir = _normalize_project(project)
-    scope_err = _validate_writable_scope(project_dir)
-    if scope_err:
-        return {"error": scope_err, "stored": False, "project": project_dir}
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"stored": False}, writable=True,
+    )
+    if err:
+        return err
 
     try:
         project_id = await get_or_create_project(project_dir, owner)
@@ -705,13 +729,13 @@ async def memory_project_configure(
     from lib.db import (
         get_or_create_project, get_project_info, set_project_domains,
     )
-    from lib.auth_context import current_user_id
 
-    owner = current_user_id()
-    if owner is None:
-        return {"configured": False, "error": "authentication required"}
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"configured": False},
+    )
+    if err:
+        return err
 
-    project_dir = _normalize_project(project)
     try:
         project_id = await get_or_create_project(project_dir, owner)
         info = await get_project_info(project_id, owner)
@@ -775,13 +799,13 @@ async def memory_context(
             max 2000). Keeps injection lightweight.
     """
     from lib.db import get_context_memories, get_or_create_project
-    from lib.auth_context import current_user_id
 
-    owner = current_user_id()
-    if owner is None:
-        return {"context": [], "count": 0, "error": "authentication required"}
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"context": [], "count": 0},
+    )
+    if err:
+        return err
 
-    project_dir = _normalize_project(project)
     try:
         project_id = await get_or_create_project(project_dir, owner)
         results = await get_context_memories(
