@@ -136,6 +136,20 @@ def _require_admin(request: Request) -> HTMLResponse | RedirectResponse | None:
     return None
 
 
+def _qs_str(params, name: str) -> str | None:
+    """Return trimmed query-param ``name``, or None if missing/blank."""
+    value = params.get(name, "").strip()
+    return value or None
+
+
+def _qs_int(params, name: str, default: int) -> int:
+    """Return query-param ``name`` coerced to int, else ``default``."""
+    try:
+        return int(params.get(name, ""))
+    except (TypeError, ValueError):
+        return default
+
+
 # -- Routes -----------------------------------------------------------------
 
 
@@ -417,16 +431,9 @@ def register_routes(mcp) -> None:
             return reject
 
         params = request.query_params
-
-        def _int(name: str, default: int) -> int:
-            try:
-                return int(params.get(name, ""))
-            except (TypeError, ValueError):
-                return default
-
         search = (params.get("search") or "").strip() or None
-        limit = max(1, min(_int("limit", 50), 200))
-        offset = max(0, _int("offset", 0))
+        limit = max(1, min(_qs_int(params, "limit", 50), 200))
+        offset = max(0, _qs_int(params, "offset", 0))
 
         users, total = await auth_db.list_users_overview(
             offset=offset, limit=limit, search=search,
@@ -612,26 +619,15 @@ def register_routes(mcp) -> None:
             return reject
 
         params = request.query_params
-
-        def _str(name: str):
-            v = params.get(name, "").strip()
-            return v or None
-
-        def _int(name: str, default: int) -> int:
-            try:
-                return int(params.get(name, ""))
-            except (TypeError, ValueError):
-                return default
-
-        since_preset = _str("since") or ""
+        since_preset = _qs_str(params, "since") or ""
         filters = {
-            "actor_username": _str("actor_username"),
-            "event_type": _str("event_type"),
+            "actor_username": _qs_str(params, "actor_username"),
+            "event_type": _qs_str(params, "event_type"),
             "since": since_preset,
         }
 
-        limit = max(1, min(_int("limit", 50), 200))
-        offset = max(0, _int("offset", 0))
+        limit = max(1, min(_qs_int(params, "limit", 50), 200))
+        offset = max(0, _qs_int(params, "offset", 0))
 
         events, total = await audit.list_events(
             offset=offset,
@@ -751,29 +747,17 @@ def register_routes(mcp) -> None:
             uid = UUID(uid)
 
         params = request.query_params
-
-        def _str(name: str) -> str | None:
-            value = params.get(name, "").strip()
-            return value or None
-
-        def _int(name: str, default: int) -> int:
-            raw = params.get(name, "")
-            try:
-                return int(raw)
-            except (TypeError, ValueError):
-                return default
-
         filters = {
-            "project": _str("project"),
-            "scope": _str("scope"),
-            "tag": _str("tag"),
-            "min_importance": _str("min_importance"),
-            "q": _str("q"),
-            "sort": _str("sort") or "created_at",
-            "order": _str("order") or "DESC",
+            "project": _qs_str(params, "project"),
+            "scope": _qs_str(params, "scope"),
+            "tag": _qs_str(params, "tag"),
+            "min_importance": _qs_str(params, "min_importance"),
+            "q": _qs_str(params, "q"),
+            "sort": _qs_str(params, "sort") or "created_at",
+            "order": _qs_str(params, "order") or "DESC",
         }
-        limit = max(1, min(_int("limit", 20), 100))
-        offset = max(0, _int("offset", 0))
+        limit = max(1, min(_qs_int(params, "limit", 20), 100))
+        offset = max(0, _qs_int(params, "offset", 0))
 
         memories, total = await db.admin_list_memories(
             owner_user_id=uid,
@@ -838,26 +822,15 @@ def register_routes(mcp) -> None:
             uid = UUID(uid)
 
         params = request.query_params
-
-        def _str(name: str):
-            v = params.get(name, "").strip()
-            return v or None
-
-        def _int(name: str, default: int) -> int:
-            try:
-                return int(params.get(name, ""))
-            except (TypeError, ValueError):
-                return default
-
         filters = {
-            "subject": _str("subject"),
-            "predicate": _str("predicate"),
-            "scope": _str("scope"),
-            "q": _str("q"),
+            "subject": _qs_str(params, "subject"),
+            "predicate": _qs_str(params, "predicate"),
+            "scope": _qs_str(params, "scope"),
+            "q": _qs_str(params, "q"),
             "include_history": params.get("include_history") in ("1", "on", "true"),
         }
-        limit = max(1, min(_int("limit", 50), 200))
-        offset = max(0, _int("offset", 0))
+        limit = max(1, min(_qs_int(params, "limit", 50), 200))
+        offset = max(0, _qs_int(params, "offset", 0))
 
         facts, total = await db.admin_list_facts(
             owner_user_id=uid,
