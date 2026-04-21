@@ -317,6 +317,10 @@ async def get_pool() -> asyncpg.Pool:
             host=host, port=port, database=database,
             user=app_user, password=app_password,
             min_size=1, max_size=_MAX_POOL_SIZE,
+            # Fail fast instead of hanging on a saturated pool or a
+            # DB that vanished mid-flight. asyncpg's default of 60s is
+            # too long for an interactive coding-agent tool call.
+            timeout=10.0,
         )
         if dual_role:
             _log.info(

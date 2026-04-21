@@ -7,12 +7,20 @@ No GPU needed, no external API calls.
 """
 
 import os
+import threading
 from typing import List, Optional
 
 # Lazy-loaded model instance. Stays in memory after first embed() call
 # so subsequent calls are fast (no reload).
 _model = None
 _model_path: Optional[str] = None
+
+# Guards concurrent first-callers of _load_model(). SentenceTransformer
+# instantiation takes seconds; without this, two threads racing on a
+# cold cache would both load, one would overwrite the other, and the
+# loser's instance would leak until GC. threading.Lock (not asyncio)
+# because embed() is a synchronous, potentially-cross-thread API.
+_model_lock = threading.Lock()
 
 
 def _get_model_path() -> str:
@@ -32,22 +40,33 @@ def _get_model_path() -> str:
 
 
 def _load_model():
-    """Load the sentence-transformers model. Called once on first embed()."""
+    """Load the sentence-transformers model. Called once on first embed().
+
+    Thread-safe: the fast path is lock-free (module-level _model read),
+    and the slow path acquires _model_lock with a double-check so only
+    one thread runs SentenceTransformer().
+    """
     global _model
     if _model is not None:
         return _model
 
-    from sentence_transformers import SentenceTransformer
+    with _model_lock:
+        # Re-check under the lock: a thread that was blocked here may
+        # have already loaded the model.
+        if _model is not None:
+            return _model
 
-    path = _get_model_path()
-    if not os.path.isdir(path):
-        raise FileNotFoundError(
-            f"Embedding model not found at {path}. "
-            f"Run the install script to download it."
-        )
+        from sentence_transformers import SentenceTransformer
 
-    _model = SentenceTransformer(path, trust_remote_code=True)
-    return _model
+        path = _get_model_path()
+        if not os.path.isdir(path):
+            raise FileNotFoundError(
+                f"Embedding model not found at {path}. "
+                f"Run the install script to download it."
+            )
+
+        _model = SentenceTransformer(path, trust_remote_code=True)
+        return _model
 
 
 def embed(text: str) -> List[float]:

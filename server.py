@@ -21,6 +21,7 @@ Tools:
     memory_list    - List memories with optional filters
 """
 
+import logging
 import os
 import sys
 from typing import Optional
@@ -31,6 +32,8 @@ from mcp.server.fastmcp import FastMCP
 
 load_dotenv()
 
+_log = logging.getLogger("notnative.server")
+
 # Default port for HTTP transport mode
 _DEFAULT_HTTP_PORT = 9500
 
@@ -39,6 +42,18 @@ mcp = FastMCP(
     json_response=True,
     stateless_http=True,
 )
+
+
+def _tool_error(tool_name: str, exc: Exception, empty: dict) -> dict:
+    """
+    Convert an unexpected tool-handler exception into a structured
+    response. Each tool returns its own happy-path shape on success
+    (e.g. {"results": [], "count": 0} for memory_search), so callers
+    that iterate results[...] do not crash on the error path. The
+    exception is logged once with traceback so operators can find it.
+    """
+    _log.exception("%s failed: %s", tool_name, exc)
+    return {**empty, "error": f"{type(exc).__name__}: {exc}"}
 
 # Register the /auth/* and /health routes on the FastMCP instance.
 # Runs at import time so the routes are present by the time anyone
@@ -283,17 +298,19 @@ async def memory_store(
     if scope_err:
         return {"error": scope_err, "stored": False, "project": project_dir}
 
-    project_id = await get_or_create_project(project_dir, owner)
-
-    embedding = embed(content)
-    memory_id = await store_memory(
-        content=content,
-        embedding=embedding,
-        project_id=project_id,
-        owner_user_id=owner,
-        tags=store_tags,
-        importance=importance,
-    )
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        embedding = embed(content)
+        memory_id = await store_memory(
+            content=content,
+            embedding=embedding,
+            project_id=project_id,
+            owner_user_id=owner,
+            tags=store_tags,
+            importance=importance,
+        )
+    except Exception as exc:
+        return _tool_error("memory_store", exc, {"stored": False})
 
     return {"id": str(memory_id), "stored": True}
 
@@ -354,17 +371,20 @@ async def memory_search(
         return {"error": "authentication required", "results": [], "count": 0}
 
     project_dir = _normalize_project(project)
-    project_id = await get_or_create_project(project_dir, owner)
-
-    query_embedding = embed(query)
-    results = await search_memories(
-        query_embedding=query_embedding,
-        project_id=project_id,
-        owner_user_id=owner,
-        tags=tags,
-        min_importance=min_importance,
-        limit=limit,
-    )
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        query_embedding = embed(query)
+        results = await search_memories(
+            query_embedding=query_embedding,
+            project_id=project_id,
+            owner_user_id=owner,
+            tags=tags,
+            min_importance=min_importance,
+            limit=limit,
+        )
+    except Exception as exc:
+        return _tool_error("memory_search", exc,
+                           {"results": [], "count": 0})
 
     return {"results": results, "count": len(results)}
 
@@ -405,7 +425,11 @@ async def memory_forget(memory_id: str) -> dict:
     except ValueError:
         return {"forgotten": False, "error": "Invalid memory ID format"}
 
-    deleted = await forget_memory(uid, owner)
+    try:
+        deleted = await forget_memory(uid, owner)
+    except Exception as exc:
+        return _tool_error("memory_forget", exc, {"forgotten": False})
+
     return {"forgotten": deleted}
 
 
@@ -446,14 +470,17 @@ async def memory_list(
         return {"memories": [], "count": 0, "error": "authentication required"}
 
     project_dir = _normalize_project(project)
-    project_id = await get_or_create_project(project_dir, owner)
-
-    results = await list_memories(
-        owner_user_id=owner,
-        project_id=project_id,
-        tags=tags,
-        limit=limit,
-    )
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        results = await list_memories(
+            owner_user_id=owner,
+            project_id=project_id,
+            tags=tags,
+            limit=limit,
+        )
+    except Exception as exc:
+        return _tool_error("memory_list", exc,
+                           {"memories": [], "count": 0})
 
     return {"memories": results, "count": len(results)}
 
@@ -534,16 +561,18 @@ async def memory_fact_add(
     if scope_err:
         return {"error": scope_err, "stored": False, "project": project_dir}
 
-    project_id = await get_or_create_project(project_dir, owner)
-
-    result = await add_fact(
-        project_id=project_id,
-        subject=subject.strip(),
-        predicate=predicate.strip(),
-        obj=object.strip(),
-        owner_user_id=owner,
-        confidence=max(0.0, min(1.0, confidence)),
-    )
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        result = await add_fact(
+            project_id=project_id,
+            subject=subject.strip(),
+            predicate=predicate.strip(),
+            obj=object.strip(),
+            owner_user_id=owner,
+            confidence=max(0.0, min(1.0, confidence)),
+        )
+    except Exception as exc:
+        return _tool_error("memory_fact_add", exc, {"stored": False})
 
     return {"stored": True, **result}
 
@@ -589,11 +618,6 @@ async def memory_fact_query(
     if owner is None:
         return {"error": "authentication required", "facts": [], "count": 0}
 
-    project_id = None
-    if project is not None and project.strip():
-        project_dir = _normalize_project(project)
-        project_id = await get_or_create_project(project_dir, owner)
-
     as_of_dt = None
     if as_of:
         try:
@@ -601,12 +625,21 @@ async def memory_fact_query(
         except ValueError:
             return {"error": f"Invalid as_of timestamp: {as_of}", "facts": [], "count": 0}
 
-    facts = await query_facts(
-        owner_user_id=owner,
-        subject=subject.strip(),
-        project_id=project_id,
-        as_of=as_of_dt,
-    )
+    try:
+        project_id = None
+        if project is not None and project.strip():
+            project_dir = _normalize_project(project)
+            project_id = await get_or_create_project(project_dir, owner)
+
+        facts = await query_facts(
+            owner_user_id=owner,
+            subject=subject.strip(),
+            project_id=project_id,
+            as_of=as_of_dt,
+        )
+    except Exception as exc:
+        return _tool_error("memory_fact_query", exc,
+                           {"facts": [], "count": 0})
 
     return {"facts": facts, "count": len(facts)}
 
@@ -658,17 +691,21 @@ async def memory_project_configure(
         return {"configured": False, "error": "authentication required"}
 
     project_dir = _normalize_project(project)
-    project_id = await get_or_create_project(project_dir, owner)
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        info = await get_project_info(project_id, owner)
+        if info and info["scope"] != "local":
+            return {
+                "error": f"Cannot set domains on a {info['scope']}-scope project",
+                "configured": False,
+                "project": info["name"],
+                "scope": info["scope"],
+            }
+        updated = await set_project_domains(project_id, owner, domains)
+    except Exception as exc:
+        return _tool_error("memory_project_configure", exc,
+                           {"configured": False})
 
-    info = await get_project_info(project_id, owner)
-    if info and info["scope"] != "local":
-        return {
-            "error": f"Cannot set domains on a {info['scope']}-scope project",
-            "project": info["name"],
-            "scope": info["scope"],
-        }
-
-    updated = await set_project_domains(project_id, owner, domains)
     return {
         "configured": True,
         "project": info["name"] if info else project_dir,
@@ -723,13 +760,16 @@ async def memory_context(
         return {"context": [], "count": 0, "error": "authentication required"}
 
     project_dir = _normalize_project(project)
-    project_id = await get_or_create_project(project_dir, owner)
-
-    results = await get_context_memories(
-        project_id=project_id,
-        owner_user_id=owner,
-        max_tokens=max_tokens,
-    )
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        results = await get_context_memories(
+            project_id=project_id,
+            owner_user_id=owner,
+            max_tokens=max_tokens,
+        )
+    except Exception as exc:
+        return _tool_error("memory_context", exc,
+                           {"context": [], "count": 0})
 
     return {"context": results, "count": len(results)}
 
