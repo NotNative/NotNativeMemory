@@ -32,6 +32,7 @@ Thermal model (activity-driven, not time-based):
         - Importance is the primary tiebreaker (low evicted before critical)
 """
 
+import asyncio
 import os
 import logging
 from datetime import datetime, timezone, timedelta
@@ -44,6 +45,12 @@ _log = logging.getLogger("notnative.memory")
 
 # Connection pool - created once, reused across calls.
 _pool: Optional[asyncpg.Pool] = None
+
+# Guards concurrent first-callers of get_pool() in the same process so
+# only one coroutine runs the migration check + create_pool branch.
+# Without this, two coroutines racing past the `_pool is None` check
+# would both apply migrations and both create a pool (leaking one).
+_pool_lock = asyncio.Lock()
 
 # -- Thermal constants ------------------------------------------------------
 
@@ -113,6 +120,13 @@ _MAX_TRACKED_PROJECTS = 100
 # Resolved once on first call to _get_migrations_dir()
 _MIGRATIONS_DIR: Optional[str] = None
 
+# Postgres advisory-lock ID used to serialize migration runs across
+# processes that share the same database. The value is arbitrary but
+# stable: as long as every process that runs migrations uses the same
+# int, only one holds the lock at a time. int64, picked to be distinct
+# from anything a sibling tool might use.
+_MIGRATION_ADVISORY_LOCK_ID = 0x4E4E4D5F4D494752  # "NNM_MIGR" in ASCII hex
+
 
 def _get_migrations_dir() -> str:
     """Resolve the migrations directory relative to project root."""
@@ -138,55 +152,74 @@ async def _run_migrations_on_conn(conn: asyncpg.Connection) -> int:
     Creates the schema_migrations tracking table if missing, scans
     *.sql files sorted by name, skips already-applied, applies the
     rest in order. Returns the number applied.
+
+    Concurrency: acquires a Postgres advisory lock at the start so
+    that two processes racing on a cold-start database will serialize
+    behind each other instead of both trying to apply the same
+    migrations and tripping DDL conflicts. The lock is session-scoped
+    and released before return. An in-process asyncio lock in
+    get_pool() prevents the same race between coroutines in one
+    process.
     """
-    await conn.execute("""
-        CREATE TABLE IF NOT EXISTS schema_migrations (
-            filename TEXT PRIMARY KEY,
-            applied_at TIMESTAMPTZ DEFAULT now()
+    # Advisory lock: blocks until the other holder releases. Safe to
+    # call even when nobody else wants the lock — we just acquire and
+    # release it around the migration check.
+    await conn.execute(
+        "SELECT pg_advisory_lock($1)", _MIGRATION_ADVISORY_LOCK_ID,
+    )
+    try:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                filename TEXT PRIMARY KEY,
+                applied_at TIMESTAMPTZ DEFAULT now()
+            )
+        """)
+
+        migrations_dir = _get_migrations_dir()
+        if not os.path.isdir(migrations_dir):
+            _log.debug("No migrations directory at %s", migrations_dir)
+            return 0
+
+        migration_files = sorted(
+            f for f in os.listdir(migrations_dir)
+            if f.endswith(".sql")
         )
-    """)
+        if not migration_files:
+            return 0
 
-    migrations_dir = _get_migrations_dir()
-    if not os.path.isdir(migrations_dir):
-        _log.debug("No migrations directory at %s", migrations_dir)
-        return 0
+        applied_rows = await conn.fetch(
+            "SELECT filename FROM schema_migrations"
+        )
+        applied = {row["filename"] for row in applied_rows}
 
-    migration_files = sorted(
-        f for f in os.listdir(migrations_dir)
-        if f.endswith(".sql")
-    )
-    if not migration_files:
-        return 0
+        pending = [f for f in migration_files if f not in applied]
+        if not pending:
+            return 0
 
-    applied_rows = await conn.fetch(
-        "SELECT filename FROM schema_migrations"
-    )
-    applied = {row["filename"] for row in applied_rows}
+        applied_count = 0
+        for filename in pending:
+            filepath = os.path.join(migrations_dir, filename)
+            with open(filepath, "r", encoding="utf-8") as f:
+                sql = f.read()
 
-    pending = [f for f in migration_files if f not in applied]
-    if not pending:
-        return 0
+            try:
+                async with conn.transaction():
+                    await conn.execute(sql)
+                    await conn.execute(
+                        "INSERT INTO schema_migrations (filename) VALUES ($1)",
+                        filename,
+                    )
+                applied_count += 1
+                _log.info("Applied migration: %s", filename)
+            except Exception as exc:
+                _log.error("Migration %s failed: %s", filename, exc)
+                raise
 
-    applied_count = 0
-    for filename in pending:
-        filepath = os.path.join(migrations_dir, filename)
-        with open(filepath, "r", encoding="utf-8") as f:
-            sql = f.read()
-
-        try:
-            async with conn.transaction():
-                await conn.execute(sql)
-                await conn.execute(
-                    "INSERT INTO schema_migrations (filename) VALUES ($1)",
-                    filename,
-                )
-            applied_count += 1
-            _log.info("Applied migration: %s", filename)
-        except Exception as exc:
-            _log.error("Migration %s failed: %s", filename, exc)
-            raise
-
-    return applied_count
+        return applied_count
+    finally:
+        await conn.execute(
+            "SELECT pg_advisory_unlock($1)", _MIGRATION_ADVISORY_LOCK_ID,
+        )
 
 
 # -- Connection pool --------------------------------------------------------
@@ -215,66 +248,79 @@ async def get_pool() -> asyncpg.Pool:
 
     On first call, migrations run BEFORE the app pool is created,
     so the app pool is guaranteed to see a fully-migrated schema.
+
+    Concurrency: the fast path (pool already built) is lock-free.
+    The slow path acquires _pool_lock and re-checks _pool inside it
+    (double-checked locking) so concurrent first-callers in the same
+    process only run migrations and create_pool once. Cross-process
+    safety is handled by the pg_advisory_lock in
+    _run_migrations_on_conn.
     """
     global _pool
     if _pool is not None:
         return _pool
 
-    from dotenv import load_dotenv
-    load_dotenv()
+    async with _pool_lock:
+        # Re-check under the lock: another coroutine that was blocked
+        # here may have already built the pool.
+        if _pool is not None:
+            return _pool
 
-    host = os.environ.get("MEMORY_DB_HOST", "localhost")
-    port = int(os.environ.get("MEMORY_DB_PORT", "5433"))
-    database = os.environ.get("MEMORY_DB_NAME", "notnative_memory")
+        from dotenv import load_dotenv
+        load_dotenv()
 
-    mig_user = os.environ.get("MEMORY_DB_USER", "memory")
-    mig_password = os.environ.get("MEMORY_DB_PASSWORD", "")
-    if not mig_password:
-        raise ValueError(
-            "MEMORY_DB_PASSWORD not set. Run the install script or check .env"
+        host = os.environ.get("MEMORY_DB_HOST", "localhost")
+        port = int(os.environ.get("MEMORY_DB_PORT", "5433"))
+        database = os.environ.get("MEMORY_DB_NAME", "notnative_memory")
+
+        mig_user = os.environ.get("MEMORY_DB_USER", "memory")
+        mig_password = os.environ.get("MEMORY_DB_PASSWORD", "")
+        if not mig_password:
+            raise ValueError(
+                "MEMORY_DB_PASSWORD not set. Run the install script or check .env"
+            )
+
+        # App-role credentials default to the migration role so existing
+        # installs keep working without touching .env.
+        app_user = os.environ.get("MEMORY_APP_DB_USER", "").strip() or mig_user
+        app_password = (
+            os.environ.get("MEMORY_APP_DB_PASSWORD", "").strip()
+            or mig_password
         )
+        dual_role = app_user != mig_user
 
-    # App-role credentials default to the migration role so existing
-    # installs keep working without touching .env.
-    app_user = os.environ.get("MEMORY_APP_DB_USER", "").strip() or mig_user
-    app_password = (
-        os.environ.get("MEMORY_APP_DB_PASSWORD", "").strip()
-        or mig_password
-    )
-    dual_role = app_user != mig_user
-
-    # Run migrations over a one-shot connection as the migration role.
-    try:
-        mig_conn = await asyncpg.connect(
-            host=host, port=port, database=database,
-            user=mig_user, password=mig_password,
-        )
+        # Run migrations over a one-shot connection as the migration role.
         try:
-            applied = await _run_migrations_on_conn(mig_conn)
-            if applied:
-                _log.info("Applied %d pending migration(s)", applied)
-        finally:
-            await mig_conn.close()
-    except Exception as exc:
-        _log.error("Migration check failed: %s", exc)
-        # Don't prevent startup — the server can still work with
-        # existing schema. Missing tables will error on first use.
+            mig_conn = await asyncpg.connect(
+                host=host, port=port, database=database,
+                user=mig_user, password=mig_password,
+            )
+            try:
+                applied = await _run_migrations_on_conn(mig_conn)
+                if applied:
+                    _log.info("Applied %d pending migration(s)", applied)
+            finally:
+                await mig_conn.close()
+        except Exception as exc:
+            _log.error("Migration check failed: %s", exc)
+            # Don't prevent startup. The server can still work with
+            # existing schema. Missing tables will error on first use.
 
-    # Create the app pool. In single-role setups this is the same role
-    # that ran migrations. In dual-role setups it's the non-superuser
-    # app role.
-    _pool = await asyncpg.create_pool(
-        host=host, port=port, database=database,
-        user=app_user, password=app_password,
-        min_size=1, max_size=_MAX_POOL_SIZE,
-    )
-    if dual_role:
-        _log.info(
-            "DB dual-role: migrations ran as %r, app pool as %r",
-            mig_user, app_user,
+        # Create the app pool. In single-role setups this is the same
+        # role that ran migrations. In dual-role setups it's the
+        # non-superuser app role.
+        _pool = await asyncpg.create_pool(
+            host=host, port=port, database=database,
+            user=app_user, password=app_password,
+            min_size=1, max_size=_MAX_POOL_SIZE,
         )
+        if dual_role:
+            _log.info(
+                "DB dual-role: migrations ran as %r, app pool as %r",
+                mig_user, app_user,
+            )
 
-    return _pool
+        return _pool
 
 
 async def close_pool() -> None:
