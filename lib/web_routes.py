@@ -12,6 +12,7 @@ management. Edit, rescope, bulk ops, and filters come in later slices.
 
 from __future__ import annotations
 
+import functools
 import logging
 import os
 from uuid import UUID
@@ -181,6 +182,82 @@ def _pagination_ctx(
         "next_offset": offset + limit if offset + limit < total else None,
         "qs_without_offset": "&".join(parts),
     }
+
+
+# -- Route guards -----------------------------------------------------------
+#
+# Each of these wraps the handler's preamble. The five variants exist
+# because unauthed requests on GET/form-POST routes get a redirect (the
+# user's browser will follow it), while XHR DELETEs get a 401 (HTMX
+# won't follow redirects).
+
+
+def require_login(handler):
+    """GET page guard: redirect unauthenticated users to /login."""
+    @functools.wraps(handler)
+    async def wrapper(request: Request):
+        redirect = _require_login(request)
+        if redirect:
+            return redirect
+        return await handler(request)
+    return wrapper
+
+
+def require_admin(handler):
+    """GET page guard: 403 for non-admins, redirect for anonymous users."""
+    @functools.wraps(handler)
+    async def wrapper(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+        return await handler(request)
+    return wrapper
+
+
+def require_login_csrf(handler):
+    """Form-POST guard: login + CSRF; redirect on unauth."""
+    @functools.wraps(handler)
+    async def wrapper(request: Request):
+        redirect = _require_login(request)
+        if redirect:
+            return redirect
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+        return await handler(request)
+    return wrapper
+
+
+def require_admin_csrf(handler):
+    """Form-POST guard: admin + CSRF; 403/redirect on unauth."""
+    @functools.wraps(handler)
+    async def wrapper(request: Request):
+        reject = _require_admin(request)
+        if reject:
+            return reject
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+        return await handler(request)
+    return wrapper
+
+
+def require_login_csrf_xhr(handler):
+    """XHR/DELETE guard: login + CSRF; 401 plain response on unauth.
+
+    HTMX won't follow a 302 on a DELETE, so returning a redirect is
+    useless. 401 lets the client decide whether to reload.
+    """
+    @functools.wraps(handler)
+    async def wrapper(request: Request):
+        redirect = _require_login(request)
+        if redirect:
+            return HTMLResponse("unauthorized", status_code=401)
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+        return await handler(request)
+    return wrapper
 
 
 # -- Routes -----------------------------------------------------------------
@@ -458,11 +535,8 @@ def register_routes(mcp) -> None:
     # -- Admin: users ------------------------------------------------------
 
     @mcp.custom_route("/admin/users", methods=["GET"])
+    @require_admin
     async def admin_users_page(request: Request):
-        reject = _require_admin(request)
-        if reject:
-            return reject
-
         params = request.query_params
         search = (params.get("search") or "").strip() or None
         limit = max(1, min(_qs_int(params, "limit", 50), 200))
@@ -485,15 +559,8 @@ def register_routes(mcp) -> None:
         )
 
     @mcp.custom_route("/admin/users/{user_id}/force-logout", methods=["POST"])
+    @require_admin_csrf
     async def admin_users_force_logout(request: Request):
-        reject = _require_admin(request)
-        if reject:
-            return reject
-
-        csrf_err = await check_csrf(request)
-        if csrf_err is not None:
-            return csrf_err
-
         try:
             target = UUID(request.path_params["user_id"])
         except (ValueError, KeyError):
@@ -516,10 +583,8 @@ def register_routes(mcp) -> None:
         return HTMLResponse("", status_code=200)
 
     @mcp.custom_route("/admin/users/{user_id}/password", methods=["GET"])
+    @require_admin
     async def admin_users_password_page(request: Request):
-        reject = _require_admin(request)
-        if reject:
-            return reject
         try:
             target = UUID(request.path_params["user_id"])
         except (ValueError, KeyError):
@@ -532,14 +597,8 @@ def register_routes(mcp) -> None:
         )
 
     @mcp.custom_route("/admin/users/{user_id}/password", methods=["POST"])
+    @require_admin_csrf
     async def admin_users_password_submit(request: Request):
-        reject = _require_admin(request)
-        if reject:
-            return reject
-        csrf_err = await check_csrf(request)
-        if csrf_err is not None:
-            return csrf_err
-
         try:
             target = UUID(request.path_params["user_id"])
         except (ValueError, KeyError):
@@ -601,15 +660,8 @@ def register_routes(mcp) -> None:
         )
 
     @mcp.custom_route("/admin/users/{user_id}/offboard", methods=["POST"])
+    @require_admin_csrf
     async def admin_users_offboard(request: Request):
-        reject = _require_admin(request)
-        if reject:
-            return reject
-
-        csrf_err = await check_csrf(request)
-        if csrf_err is not None:
-            return csrf_err
-
         try:
             target = UUID(request.path_params["user_id"])
         except (ValueError, KeyError):
@@ -642,11 +694,8 @@ def register_routes(mcp) -> None:
     # -- Admin: audit log --------------------------------------------------
 
     @mcp.custom_route("/admin/audit", methods=["GET"])
+    @require_admin
     async def admin_audit_page(request: Request):
-        reject = _require_admin(request)
-        if reject:
-            return reject
-
         params = request.query_params
         since_preset = _qs_str(params, "since") or ""
         filters = {
@@ -684,11 +733,8 @@ def register_routes(mcp) -> None:
     # -- Admin: metrics dashboard ------------------------------------------
 
     @mcp.custom_route("/admin/metrics", methods=["GET"])
+    @require_admin
     async def admin_metrics_page(request: Request):
-        reject = _require_admin(request)
-        if reject:
-            return reject
-
         from lib import observability
 
         try:
@@ -758,11 +804,8 @@ def register_routes(mcp) -> None:
     # -- Memories list ----------------------------------------------------
 
     @mcp.custom_route("/memories", methods=["GET"])
+    @require_login
     async def memories_page(request: Request):
-        redirect = _require_login(request)
-        if redirect:
-            return redirect
-
         from lib import db
 
         uid = request.state.user_id
@@ -824,11 +867,8 @@ def register_routes(mcp) -> None:
     # -- Facts ------------------------------------------------------------
 
     @mcp.custom_route("/facts", methods=["GET"])
+    @require_login
     async def facts_page(request: Request):
-        redirect = _require_login(request)
-        if redirect:
-            return redirect
-
         from lib import db
 
         uid = request.state.user_id
@@ -882,15 +922,8 @@ def register_routes(mcp) -> None:
         )
 
     @mcp.custom_route("/facts/{fact_id}", methods=["DELETE"])
+    @require_login_csrf_xhr
     async def fact_delete(request: Request):
-        redirect = _require_login(request)
-        if redirect:
-            return HTMLResponse("unauthorized", status_code=401)
-
-        csrf_err = await check_csrf(request)
-        if csrf_err is not None:
-            return csrf_err
-
         from lib import db
 
         uid = request.state.user_id
@@ -910,11 +943,8 @@ def register_routes(mcp) -> None:
     # -- Token management ------------------------------------------------
 
     @mcp.custom_route("/tokens", methods=["GET"])
+    @require_login
     async def tokens_page(request: Request):
-        redirect = _require_login(request)
-        if redirect:
-            return redirect
-
         uid = request.state.user_id
         if isinstance(uid, str):
             uid = UUID(uid)
@@ -926,15 +956,8 @@ def register_routes(mcp) -> None:
         )
 
     @mcp.custom_route("/tokens", methods=["POST"])
+    @require_login_csrf
     async def tokens_create(request: Request):
-        redirect = _require_login(request)
-        if redirect:
-            return redirect
-
-        csrf_err = await check_csrf(request)
-        if csrf_err is not None:
-            return csrf_err
-
         uid = request.state.user_id
         if isinstance(uid, str):
             uid = UUID(uid)
@@ -962,15 +985,8 @@ def register_routes(mcp) -> None:
         )
 
     @mcp.custom_route("/tokens/{token_id}", methods=["DELETE"])
+    @require_login_csrf_xhr
     async def tokens_revoke(request: Request):
-        redirect = _require_login(request)
-        if redirect:
-            return HTMLResponse("unauthorized", status_code=401)
-
-        csrf_err = await check_csrf(request)
-        if csrf_err is not None:
-            return csrf_err
-
         uid = request.state.user_id
         if isinstance(uid, str):
             uid = UUID(uid)
@@ -998,6 +1014,7 @@ def register_routes(mcp) -> None:
         return HTMLResponse("", status_code=200)
 
     @mcp.custom_route("/memories/bulk-delete", methods=["POST"])
+    @require_login_csrf
     async def memories_bulk_delete(request: Request):
         """
         Delete a set of selected memories in one call. The form posts
@@ -1005,14 +1022,6 @@ def register_routes(mcp) -> None:
         to UUIDs, and delete owner-scoped. Returns the refreshed
         /memories panel on HX-Request (HTMX), or redirects otherwise.
         """
-        redirect = _require_login(request)
-        if redirect:
-            return redirect
-
-        csrf_err = await check_csrf(request)
-        if csrf_err is not None:
-            return csrf_err
-
         from lib import db
 
         uid = request.state.user_id
@@ -1061,11 +1070,8 @@ def register_routes(mcp) -> None:
         )
 
     @mcp.custom_route("/memories/{memory_id}", methods=["GET"])
+    @require_login
     async def memory_detail(request: Request):
-        redirect = _require_login(request)
-        if redirect:
-            return redirect
-
         from lib import db
 
         uid = request.state.user_id
@@ -1087,6 +1093,7 @@ def register_routes(mcp) -> None:
         )
 
     @mcp.custom_route("/memories/{memory_id}", methods=["POST"])
+    @require_login_csrf
     async def memory_update(request: Request):
         """
         Edit a memory. POST rather than PATCH so the HTML form can
@@ -1095,14 +1102,6 @@ def register_routes(mcp) -> None:
         of those fields gets updated. Content change triggers a
         re-embed.
         """
-        redirect = _require_login(request)
-        if redirect:
-            return redirect
-
-        csrf_err = await check_csrf(request)
-        if csrf_err is not None:
-            return csrf_err
-
         from lib import db
         from lib.embeddings import embed
 
@@ -1191,17 +1190,8 @@ def register_routes(mcp) -> None:
         )
 
     @mcp.custom_route("/memories/{memory_id}", methods=["DELETE"])
+    @require_login_csrf_xhr
     async def memory_delete(request: Request):
-        redirect = _require_login(request)
-        if redirect:
-            # HTMX DELETE to an unauthed endpoint: return 401 and let
-            # the client decide. Redirects wouldn't be followed by HTMX.
-            return HTMLResponse("unauthorized", status_code=401)
-
-        csrf_err = await check_csrf(request)
-        if csrf_err is not None:
-            return csrf_err
-
         from lib import db
 
         uid = request.state.user_id
