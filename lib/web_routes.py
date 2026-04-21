@@ -150,6 +150,39 @@ def _qs_int(params, name: str, default: int) -> int:
         return default
 
 
+def _pagination_ctx(
+    *,
+    offset: int,
+    limit: int,
+    total: int,
+    filters: dict,
+    filter_names,
+    extra_pairs=(),
+) -> dict:
+    """
+    Compute prev/next offsets and the querystring-minus-offset that
+    every paginated admin/user page passes to its template.
+
+    `filter_names` is the ordered iterable of filter keys appended when
+    their value is truthy. `extra_pairs` is an iterable of (k, v) tuples
+    appended unconditionally (used for boolean flags that render as k=1).
+    ``limit`` is always appended last.
+    """
+    parts = []
+    for name in filter_names:
+        value = filters.get(name)
+        if value:
+            parts.append(f"{name}={value}")
+    for k, v in extra_pairs:
+        parts.append(f"{k}={v}")
+    parts.append(f"limit={limit}")
+    return {
+        "prev_offset": max(0, offset - limit) if offset > 0 else None,
+        "next_offset": offset + limit if offset + limit < total else None,
+        "qs_without_offset": "&".join(parts),
+    }
+
+
 # -- Routes -----------------------------------------------------------------
 
 
@@ -439,20 +472,16 @@ def register_routes(mcp) -> None:
             offset=offset, limit=limit, search=search,
         )
 
-        prev_offset = max(0, offset - limit) if offset > 0 else None
-        next_offset = offset + limit if offset + limit < total else None
-        base_qs = []
-        if search:
-            base_qs.append(f"search={search}")
-        base_qs.append(f"limit={limit}")
-        qs_without_offset = "&".join(base_qs)
+        page = _pagination_ctx(
+            offset=offset, limit=limit, total=total,
+            filters={"search": search}, filter_names=("search",),
+        )
 
         return _render_with_csrf(
             request, "admin_users.html",
             users=users, count=len(users), total=total,
             offset=offset, limit=limit, search=search,
-            prev_offset=prev_offset, next_offset=next_offset,
-            qs_without_offset=qs_without_offset,
+            **page,
         )
 
     @mcp.custom_route("/admin/users/{user_id}/force-logout", methods=["POST"])
@@ -638,24 +667,18 @@ def register_routes(mcp) -> None:
         )
         event_types = await audit.list_event_types()
 
-        base_qs = []
-        for name in ("actor_username", "event_type", "since"):
-            v = filters.get(name)
-            if v:
-                base_qs.append(f"{name}={v}")
-        base_qs.append(f"limit={limit}")
-        qs_without_offset = "&".join(base_qs)
-
-        prev_offset = max(0, offset - limit) if offset > 0 else None
-        next_offset = offset + limit if offset + limit < total else None
+        page = _pagination_ctx(
+            offset=offset, limit=limit, total=total,
+            filters=filters,
+            filter_names=("actor_username", "event_type", "since"),
+        )
 
         return _render_with_csrf(
             request, "admin_audit.html",
             events=events, count=len(events), total=total,
             offset=offset, limit=limit,
             filters=filters, event_types=event_types,
-            qs_without_offset=qs_without_offset,
-            prev_offset=prev_offset, next_offset=next_offset,
+            **page,
         )
 
     # -- Admin: metrics dashboard ------------------------------------------
@@ -772,19 +795,12 @@ def register_routes(mcp) -> None:
             limit=limit,
         )
 
-        # Build current query string minus offset (for pagination links
-        # to rebuild it themselves). Prev/next just rewrite `offset`.
-        base_qs = []
-        for name in ("project", "scope", "tag", "min_importance",
-                     "q", "sort", "order"):
-            value = filters.get(name)
-            if value:
-                base_qs.append(f"{name}={value}")
-        base_qs.append(f"limit={limit}")
-        qs_without_offset = "&".join(base_qs)
-
-        prev_offset = max(0, offset - limit) if offset > 0 else None
-        next_offset = offset + limit if offset + limit < total else None
+        page = _pagination_ctx(
+            offset=offset, limit=limit, total=total,
+            filters=filters,
+            filter_names=("project", "scope", "tag", "min_importance",
+                          "q", "sort", "order"),
+        )
 
         # HTMX requests want just the list partial for in-place swap;
         # a full page reload gets the whole template.
@@ -802,9 +818,7 @@ def register_routes(mcp) -> None:
             offset=offset,
             limit=limit,
             filters=filters,
-            qs_without_offset=qs_without_offset,
-            prev_offset=prev_offset,
-            next_offset=next_offset,
+            **page,
         )
 
     # -- Facts ------------------------------------------------------------
@@ -843,18 +857,12 @@ def register_routes(mcp) -> None:
             limit=limit,
         )
 
-        base_qs = []
-        for name in ("subject", "predicate", "scope", "q"):
-            v = filters.get(name)
-            if v:
-                base_qs.append(f"{name}={v}")
-        if filters["include_history"]:
-            base_qs.append("include_history=1")
-        base_qs.append(f"limit={limit}")
-        qs_without_offset = "&".join(base_qs)
-
-        prev_offset = max(0, offset - limit) if offset > 0 else None
-        next_offset = offset + limit if offset + limit < total else None
+        page = _pagination_ctx(
+            offset=offset, limit=limit, total=total,
+            filters=filters,
+            filter_names=("subject", "predicate", "scope", "q"),
+            extra_pairs=(("include_history", 1),) if filters["include_history"] else (),
+        )
 
         template = (
             "_facts_list.html"
@@ -870,9 +878,7 @@ def register_routes(mcp) -> None:
             offset=offset,
             limit=limit,
             filters=filters,
-            qs_without_offset=qs_without_offset,
-            prev_offset=prev_offset,
-            next_offset=next_offset,
+            **page,
         )
 
     @mcp.custom_route("/facts/{fact_id}", methods=["DELETE"])
