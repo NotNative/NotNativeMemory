@@ -56,6 +56,66 @@ mcp = FastMCP(
 )
 
 
+def install_rag_worker_lifespan(app) -> None:
+    """
+    Wrap an existing Starlette app's lifespan so the async ingestion
+    worker starts during ASGI startup and stops cleanly during
+    shutdown. Composes with whatever lifespan FastMCP already set on
+    the app router so the framework's own startup/shutdown hooks
+    still fire.
+
+    Wired via the ``lifespan_context`` attribute rather than the
+    legacy ``add_event_handler("startup", ...)`` API. Starlette 1.0
+    removed ``add_event_handler``; using it here would AttributeError
+    at server start. This helper is its own function so a regression
+    test (tests/test_http_lifespan.py) can drive it without spinning
+    up uvicorn.
+    """
+    import asyncio as _asyncio
+    import contextlib as _contextlib
+
+    state: dict = {"task": None, "stop_event": None}
+    prev_lifespan = app.router.lifespan_context
+
+    async def _start():
+        from lib.db import get_pool
+        from lib.rag.worker import start_worker_task
+        pool = await get_pool()
+        task, stop_event = start_worker_task(pool)
+        state["task"] = task
+        state["stop_event"] = stop_event
+
+    async def _stop():
+        stop_event = state.get("stop_event")
+        task = state.get("task")
+        if stop_event is not None:
+            stop_event.set()
+        if task is not None:
+            try:
+                await task
+            except _asyncio.CancelledError:
+                pass
+
+    @_contextlib.asynccontextmanager
+    async def _lifespan_with_rag_worker(asgi_app):
+        # Enter FastMCP's lifespan first so its startup tasks finish
+        # before we kick the worker. Symmetric on shutdown: worker
+        # stops, then FastMCP's lifespan cleanup runs as we exit the
+        # outer `async with`.
+        async with prev_lifespan(asgi_app):
+            await _start()
+            try:
+                yield
+            finally:
+                await _stop()
+
+    app.router.lifespan_context = _lifespan_with_rag_worker
+    # Stash state on the app so tests (and operators inspecting from
+    # the REPL) can assert the worker is alive without the helper
+    # leaking it via a return value.
+    app.state.rag_worker = state
+
+
 def _tool_error(tool_name: str, exc: Exception, empty: dict) -> dict:
     """
     Convert an unexpected tool-handler exception into a structured
@@ -1530,35 +1590,12 @@ def _start_foreground(port: int) -> None:
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
 
-    # Async ingestion worker. Starts after uvicorn has its event loop
-    # up (startup handler runs inside uvicorn's loop), stops cleanly
-    # on shutdown. stdio mode skips this entirely — per-request
+    # Async ingestion worker. Starts after uvicorn's event loop is up
+    # (lifespan startup phase runs inside uvicorn's loop) and stops
+    # cleanly on shutdown. stdio mode skips this entirely; per-request
     # server lifetimes are too short for a polling loop to earn its
     # keep, and inline ingestion is the right default there.
-    _worker_state: dict = {"task": None, "stop_event": None}
-
-    async def _start_rag_worker():
-        from lib.db import get_pool
-        from lib.rag.worker import start_worker_task
-        pool = await get_pool()
-        task, stop_event = start_worker_task(pool)
-        _worker_state["task"] = task
-        _worker_state["stop_event"] = stop_event
-
-    async def _stop_rag_worker():
-        import asyncio as _asyncio
-        stop_event = _worker_state.get("stop_event")
-        task = _worker_state.get("task")
-        if stop_event is not None:
-            stop_event.set()
-        if task is not None:
-            try:
-                await task
-            except _asyncio.CancelledError:
-                pass
-
-    app.add_event_handler("startup", _start_rag_worker)
-    app.add_event_handler("shutdown", _stop_rag_worker)
+    install_rag_worker_lifespan(app)
 
     # Bootstrap admin token: run before uvicorn so the operator sees
     # the banner in the terminal that started the server. Needs the
