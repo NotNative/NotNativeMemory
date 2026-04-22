@@ -15,6 +15,13 @@ COPY server.py .
 COPY lib/ lib/
 COPY config/ config/
 COPY scripts/ scripts/
+# docker/init/ holds the install-time helper ensure_app_role.py that
+# the installer runs INSIDE this container (`compose run mcp python
+# docker/init/ensure_app_role.py`). Without it the install fails with
+# `python: can't open file '/app/docker/init/ensure_app_role.py'`.
+# Copying just docker/init/ rather than all of docker/ keeps the
+# build context small (no Dockerfile/compose.yml duplication).
+COPY docker/init/ docker/init/
 
 # Embedding model is mounted as a volume at runtime, not baked in.
 # Default MEMORY_MODEL_PATH=models/gte-large-en-v1.5 resolves to
