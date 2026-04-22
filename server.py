@@ -15,10 +15,17 @@ Usage:
     python server.py --http 9500  # HTTP mode on custom port
 
 Tools:
-    memory_store   - Save a memory with tags and importance
-    memory_search  - Find relevant memories by semantic similarity
-    memory_forget  - Remove a memory by ID
-    memory_list    - List memories with optional filters
+    memory_store       - Save a memory with tags and importance
+    memory_search      - Find relevant memories by semantic similarity
+    memory_forget      - Remove a memory by ID
+    memory_list        - List memories with optional filters
+    memory_context     - Pull the hottest + most-critical memories
+    memory_fact_add    - Record a temporal fact triple
+    memory_fact_query  - Look up facts with optional time-travel
+    memory_project_configure - Declare domain memberships
+    rag_ingest_text    - Ingest a text blob for document retrieval
+    rag_ingest_file    - Ingest a UTF-8 text file from disk
+    rag_search         - Semantic search over ingested document chunks
 """
 
 import logging
@@ -818,6 +825,171 @@ async def memory_context(
                            {"context": [], "count": 0})
 
     return {"context": results, "count": len(results)}
+
+
+@mcp.tool()
+@instrumented("rag_ingest_text")
+async def rag_ingest_text(
+    title: str,
+    content: str,
+    project: Optional[str] = None,
+    source_uri: Optional[str] = None,
+    content_type: str = "text/plain",
+) -> dict:
+    """
+    Ingest a text document into the RAG store for later retrieval.
+
+    Chunks the content, embeds each chunk, and stores them alongside a
+    document metadata row. Re-ingesting identical content (same sha256)
+    is a no-op and returns the existing document_id with
+    status="deduplicated".
+
+    Use this for pasted text, scraped prose, or any content you already
+    have as a Python string. Prefer rag_ingest_file when the content
+    lives on disk.
+
+    RAG documents are scoped the same way memories are: pass an
+    absolute path for project-local, "_global" for everywhere, or
+    "_domain_<name>" for a shared domain.
+
+    Args:
+        title: Human-readable name for the document. Required.
+        content: The full document text (UTF-8). Required.
+        project: Scope for the document. Auto-detected if omitted.
+        source_uri: Where the content came from (URL, file path, or
+            None for pasted text). Stored verbatim; not interpreted.
+        content_type: MIME hint (default text/plain).
+    """
+    if not title or not title.strip():
+        return {"error": "title cannot be empty", "stored": False}
+    if not content or not content.strip():
+        return {"error": "content cannot be empty", "stored": False}
+
+    from lib.db import get_or_create_project
+    from lib.rag.ingest import ingest_text
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"stored": False}, writable=True,
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        result = await ingest_text(
+            owner_user_id=owner,
+            project_id=project_id,
+            title=title,
+            content=content,
+            source_uri=source_uri,
+            content_type=content_type,
+        )
+    except Exception as exc:
+        return _tool_error("rag_ingest_text", exc, {"stored": False})
+
+    return {"stored": True, **result}
+
+
+@mcp.tool()
+@instrumented("rag_ingest_file")
+async def rag_ingest_file(
+    path: str,
+    project: Optional[str] = None,
+    title: Optional[str] = None,
+    content_type: Optional[str] = None,
+) -> dict:
+    """
+    Read a UTF-8 text file from disk and ingest it for RAG retrieval.
+
+    Infers the title from the filename and content_type from the
+    extension when not provided. Phase A is plain-text only — PDF,
+    docx, and other binary formats are not yet supported.
+
+    Args:
+        path: Absolute or working-directory-relative path to the file.
+        project: Scope for the document. Auto-detected if omitted.
+        title: Override the auto-detected title (basename of the file).
+        content_type: Override the extension-inferred MIME type.
+    """
+    if not path or not path.strip():
+        return {"error": "path cannot be empty", "stored": False}
+
+    from lib.db import get_or_create_project
+    from lib.rag.ingest import ingest_file
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"stored": False}, writable=True,
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        result = await ingest_file(
+            owner_user_id=owner,
+            project_id=project_id,
+            path=path,
+            title=title,
+            content_type=content_type,
+        )
+    except Exception as exc:
+        return _tool_error("rag_ingest_file", exc, {"stored": False})
+
+    return {"stored": True, **result}
+
+
+@mcp.tool()
+@instrumented("rag_search")
+async def rag_search(
+    query: str,
+    limit: int = 10,
+    project: Optional[str] = None,
+) -> dict:
+    """
+    Retrieve chunks from ingested RAG documents by semantic similarity.
+
+    Complements memory_search: memory_search returns curated insights
+    and decisions; rag_search returns raw document chunks. Use this
+    when you need the primary source text, not a distilled takeaway.
+
+    Scope behavior: same expansion as memory_search. From a local
+    project, hits come from that project plus your globals and any
+    domains the project has declared.
+
+    Each result carries the document title, source_uri, chunk_index,
+    and character offsets so you can cite back to the original text
+    or fetch adjacent chunks for context expansion.
+
+    Args:
+        query: Natural-language query string. Required.
+        limit: Max chunks to return (1-100, default 10).
+        project: Project scope. Auto-detected if omitted.
+    """
+    if not query or not query.strip():
+        return {"error": "query cannot be empty", "results": [], "count": 0}
+
+    from lib.db import get_or_create_project
+    from lib.rag.search import search_docs
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"results": [], "count": 0},
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        results = await search_docs(
+            owner_user_id=owner,
+            project_id=project_id,
+            query=query,
+            limit=limit,
+        )
+    except Exception as exc:
+        return _tool_error("rag_search", exc,
+                           {"results": [], "count": 0})
+
+    return {"results": results, "count": len(results)}
 
 
 _PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mcp-server.pid")
