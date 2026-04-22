@@ -195,6 +195,23 @@
     <button type="button" class="theme-toggle" id="theme-toggle"
             aria-label="Toggle color theme"></button>
   </nav>
+  {% if single_user_mode and request.url.path != "/enable-multiuser" %}
+  <div style="background: var(--imp-high-bg); color: var(--imp-high-fg);
+              padding: 0.6em 0.9em; margin: 0 0 1em 0;
+              border: 1px solid var(--border); border-radius: 4px;
+              display: flex; align-items: center; gap: 0.75em;
+              flex-wrap: wrap;">
+    <strong>Single-user mode.</strong>
+    <span style="flex: 1;">No auth required. Anyone reaching this URL
+      acts as <code>{{ username }}</code>.</span>
+    <a href="/enable-multiuser"
+       style="background: var(--btn-bg); color: var(--btn-fg);
+              padding: 0.4em 0.9em; border-radius: 3px;
+              text-decoration: none; font-weight: bold;">
+      Switch to Multi-User Mode
+    </a>
+  </div>
+  {% endif %}
   <script>
     (function () {
       var btn = document.getElementById("theme-toggle");

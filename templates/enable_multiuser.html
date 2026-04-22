@@ -1,0 +1,68 @@
+{% extends "base.html" %}
+{% block title %}Enable multi-user mode - NotNativeMemory{% endblock %}
+{% block content %}
+<h1>Switch to multi-user mode</h1>
+
+<p>This server is currently in <strong>single-user mode</strong>: every
+  caller is implicitly authenticated as the <code>owner</code> account
+  with no token required. Enable multi-user mode to require Bearer-token
+  auth and add per-user isolation.</p>
+
+<p>How the transition works:</p>
+<ol>
+  <li>A one-time bootstrap token has been written to
+      <code>state/admin_bootstrap.txt</code> on the server filesystem.</li>
+  <li>Read it from disk and paste it below along with the username and
+      password you want for the first admin account.</li>
+  <li>On submit, all data currently owned by <code>owner</code> moves
+      to your new admin account, the sentinel is removed, and the
+      bootstrap file is deleted. Subsequent requests require auth.</li>
+</ol>
+
+<p style="color:var(--muted-fg);font-size:0.9em;">
+  The bootstrap file is intentionally not displayed in the browser.
+  Reading it requires filesystem access to the server (or its bind
+  mount), which is the trust boundary for granting admin.
+</p>
+
+{% if error %}<p class="error">{{ error }}</p>{% endif %}
+
+<form class="stacked" method="post" action="/enable-multiuser">
+  <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+  <label>
+    Bootstrap token
+    <input name="bootstrap_token" required autofocus
+           autocomplete="off" spellcheck="false"
+           style="font-family:ui-monospace,monospace;">
+    <small style="color:var(--muted-fg);">
+      The one-time value from <code>state/admin_bootstrap.txt</code>.
+      Paste the whole line.
+    </small>
+  </label>
+  <label>
+    Admin username
+    <input name="username" required autocomplete="username"
+           pattern="[A-Za-z0-9_.\-]{1,64}"
+           title="Letters, digits, dot, dash, underscore. Up to 64 characters.">
+    <small style="color:var(--muted-fg);">
+      Cannot be <code>owner</code> (reserved for the single-user sentinel).
+    </small>
+  </label>
+  <label>
+    Password
+    <input name="password" type="password" required minlength="8"
+           autocomplete="new-password">
+    <small style="color:var(--muted-fg);">
+      Length beats complexity. A memorable passphrase is harder to
+      crack than a short string of punctuation. Breached passwords
+      are rejected.
+    </small>
+  </label>
+  <label>
+    Confirm password
+    <input name="password_confirm" type="password" required minlength="8"
+           autocomplete="new-password">
+  </label>
+  <button type="submit">Enable multi-user mode</button>
+</form>
+{% endblock %}

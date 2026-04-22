@@ -1597,34 +1597,34 @@ def _start_foreground(port: int) -> None:
     # keep, and inline ingestion is the right default there.
     install_rag_worker_lifespan(app)
 
-    # Bootstrap admin token: run before uvicorn so the operator sees
-    # the banner in the terminal that started the server. Needs the
-    # DB pool to be ready, which triggers the migration runner as a
-    # side effect — so schema is current before we count admins.
+    # Pre-uvicorn schema warm-up. Opening the pool here triggers the
+    # migration runner so the schema is current before any request
+    # lands. We then CLOSE the pool so uvicorn's event loop creates
+    # a fresh one (asyncpg pools are bound to the loop that created
+    # them; reusing the pre-uvicorn pool inside uvicorn's loop would
+    # raise on first use).
     #
-    # We run this in its own asyncio.run() and then CLOSE the pool so
-    # uvicorn's event loop creates a fresh one. asyncpg pools are
-    # bound to the event loop that created them; reusing the pre-
-    # uvicorn pool inside uvicorn's loop would raise on first use.
+    # Note: the legacy admin-bootstrap-on-boot has been removed. A
+    # fresh install is single-user mode; the auth middleware handles
+    # that without a token file. The operator opts into multi-user
+    # via the web GUI, which writes the bootstrap on demand. See
+    # lib/auth_middleware.py and lib/web_routes.py::enable_multiuser.
     import asyncio
-    from lib import admin_bootstrap, db as _db_module
+    from lib import db as _db_module
 
-    async def _bootstrap_check():
+    async def _schema_warmup():
         try:
             await _db_module.get_pool()
-            path = await admin_bootstrap.ensure_bootstrap_if_needed()
-            if path:
-                admin_bootstrap.log_bootstrap_banner(path)
         finally:
             await _db_module.close_pool()
 
     try:
-        asyncio.run(_bootstrap_check())
+        asyncio.run(_schema_warmup())
     except Exception as exc:
-        # Bootstrap check is best-effort: a DB blip here shouldn't
+        # Schema warm-up is best-effort: a DB blip here shouldn't
         # stop the server from starting. Log and continue; the next
-        # restart will retry.
-        print(f"admin bootstrap check skipped: {exc}", file=sys.stderr)
+        # request through the lifespan startup will retry.
+        print(f"schema warm-up skipped: {exc}", file=sys.stderr)
 
     _write_pid(port)
     print(f"NotNativeMemory MCP server starting on http://{bind_host}:{port} (foreground)")

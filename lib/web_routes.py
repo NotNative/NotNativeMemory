@@ -82,6 +82,7 @@ def _context_for(request: Request, csrf_token: str, **extra) -> dict:
         "username": getattr(request.state, "username", None),
         "user_id": getattr(request.state, "user_id", None),
         "is_admin": bool(getattr(request.state, "is_admin", False)),
+        "single_user_mode": bool(getattr(request.state, "single_user_mode", False)),
         "csrf_token": csrf_token,
     }
     ctx.update(extra)
@@ -268,13 +269,16 @@ def register_routes(mcp) -> None:
 
     @mcp.custom_route("/", methods=["GET"])
     async def root(request: Request):
-        # First-run claim path takes priority: if a bootstrap file
-        # exists, the operator has not yet claimed admin, and the
-        # claim form is the intended landing page. Once claimed, the
-        # file is deleted (see admin_bootstrap.delete_bootstrap_file)
-        # and this redirect stops firing.
+        # Single-user mode: middleware has already authenticated as the
+        # owner sentinel, so go straight to the dashboard. The banner
+        # in base.html offers the "Switch to Multi-User Mode" path.
+        if getattr(request.state, "single_user_mode", False):
+            return RedirectResponse("/memories", status_code=302)
+        # Mid-transition: bootstrap file exists but no admin yet means
+        # the operator clicked "enable multi-user" and is in the middle
+        # of the claim form. Send them to the form.
         if admin_bootstrap.bootstrap_file_exists():
-            return RedirectResponse("/claim-admin", status_code=302)
+            return RedirectResponse("/enable-multiuser", status_code=302)
         if getattr(request.state, "user_id", None):
             return RedirectResponse("/memories", status_code=302)
         return RedirectResponse("/login", status_code=302)
@@ -431,6 +435,125 @@ def register_routes(mcp) -> None:
             "admin.claimed",
             actor_user_id=uid,
             detail=audit.request_detail(request),
+        )
+        await audit.log_event(
+            "user.register",
+            actor_user_id=uid,
+            detail={**audit.request_detail(request), "is_admin": True},
+        )
+
+        token = await auth_db.create_token(uid, label="web-session")
+        await audit.log_event(
+            "login.success",
+            actor_user_id=uid,
+            target_id=UUID(token["id"]),
+            detail={**audit.request_detail(request), "label": "web-session"},
+        )
+
+        resp = RedirectResponse("/memories", status_code=303)
+        _set_session_cookie(resp, token["token"])
+        return resp
+
+    # -- Enable multi-user mode (transition out of single-user) -----------
+
+    @mcp.custom_route("/enable-multiuser", methods=["GET"])
+    async def enable_multiuser_page(request: Request):
+        # Multi-user is the absence of single-user. If an admin already
+        # exists, this page has nothing to offer; bounce to login.
+        if not getattr(request.state, "single_user_mode", False):
+            return RedirectResponse("/login", status_code=302)
+        # Lazy-write the bootstrap token. The eager path was removed when
+        # single-user mode landed; this route is the only writer now.
+        path = await admin_bootstrap.ensure_bootstrap_if_needed()
+        if path:
+            admin_bootstrap.log_bootstrap_banner(path)
+        return _render_with_csrf(request, "enable_multiuser.html")
+
+    @mcp.custom_route("/enable-multiuser", methods=["POST"])
+    async def enable_multiuser_submit(request: Request):
+        csrf_err = await check_csrf(request)
+        if csrf_err is not None:
+            return csrf_err
+
+        # Re-check on submit: a concurrent claim from another tab
+        # might have already flipped to multi-user. Treat that as a
+        # success path -> /login.
+        if not getattr(request.state, "single_user_mode", False):
+            return RedirectResponse("/login", status_code=302)
+
+        form = await request.form()
+        bootstrap_token = (form.get("bootstrap_token") or "").strip()
+        username = (form.get("username") or "").strip()
+        password = form.get("password") or ""
+        confirm = form.get("password_confirm") or ""
+
+        if not bootstrap_token or not username or not password:
+            return _render_with_csrf(
+                request, "enable_multiuser.html",
+                status_code=400,
+                error="Bootstrap token, username, and password are required.",
+            )
+        if password != confirm:
+            return _render_with_csrf(
+                request, "enable_multiuser.html",
+                status_code=400,
+                error="Passwords do not match.",
+            )
+        if username == auth_db.OWNER_SENTINEL_USERNAME:
+            return _render_with_csrf(
+                request, "enable_multiuser.html",
+                status_code=400,
+                error=(
+                    f"'{auth_db.OWNER_SENTINEL_USERNAME}' is reserved for "
+                    f"the single-user sentinel. Pick a different admin "
+                    f"username."
+                ),
+            )
+
+        policy_err = await password_policy.validate_new_password(password)
+        if policy_err:
+            return _render_with_csrf(
+                request, "enable_multiuser.html",
+                status_code=400,
+                error=policy_err,
+            )
+
+        try:
+            result = await auth_db.claim_admin_and_transfer_data(
+                bootstrap_token, username, password,
+            )
+        except ValueError as exc:
+            await audit.log_event(
+                "admin.claim_fail",
+                detail={**audit.request_detail(request), "reason": str(exc)},
+            )
+            return _render_with_csrf(
+                request, "enable_multiuser.html",
+                status_code=401,
+                error=str(exc),
+            )
+        except asyncpg.UniqueViolationError:
+            return _render_with_csrf(
+                request, "enable_multiuser.html",
+                status_code=409,
+                error="That username is taken.",
+            )
+
+        # Cutover: the next request should see multi-user mode.
+        from lib import auth_middleware
+        auth_middleware.invalidate_admin_cache()
+
+        admin = result["admin"]
+        uid = UUID(admin["id"])
+
+        await audit.log_event(
+            "admin.claimed",
+            actor_user_id=uid,
+            detail={
+                **audit.request_detail(request),
+                "transferred": result.get("transferred", {}),
+                "via": "enable-multiuser",
+            },
         )
         await audit.log_event(
             "user.register",

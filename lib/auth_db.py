@@ -42,15 +42,174 @@ async def count_users() -> int:
 
 async def count_admins() -> int:
     """
-    Return number of users with is_admin=true. Used by the startup
-    bootstrap path: zero means the server should write an admin-
-    bootstrap token for the operator to claim.
+    Return number of users with is_admin=true. Used by the auth
+    middleware to decide single-user vs multi-user mode: zero admins
+    means the server is still in its single-user default and every
+    caller authenticates as the owner sentinel; one or more admins
+    means the operator has explicitly opted into multi-user and a
+    Bearer token is required.
     """
     pool = await get_pool()
     row = await pool.fetchrow(
         "SELECT COUNT(*) AS n FROM users WHERE is_admin = true",
     )
     return int(row["n"] or 0)
+
+
+# Sentinel username used in single-user mode. Reserved: callers cannot
+# register this name through the web flow (the auth_routes.register
+# handler rejects it). Auto-created on first need by
+# ensure_owner_sentinel and removed by claim_admin_and_transfer_data
+# when the operator goes multi-user.
+OWNER_SENTINEL_USERNAME = "owner"
+
+
+async def ensure_owner_sentinel() -> Dict[str, Any]:
+    """
+    Return the owner-sentinel user, creating it if missing.
+
+    Single-user mode authenticates every request as this user. The
+    password is a random throwaway since the only way to log in as
+    owner is the auth-middleware bypass that fires when no admins
+    exist; the password field exists only so create_user's normal
+    constraints are satisfied.
+
+    Idempotent. The username is uniqueness-constrained so concurrent
+    creators race cleanly: one inserts, the other gets the existing
+    row on retry.
+    """
+    import secrets as _secrets
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT id, username, is_admin, created_at FROM users WHERE username = $1",
+        OWNER_SENTINEL_USERNAME,
+    )
+    if row is not None:
+        return _row_to_user(row)
+
+    # First-create path. Fall back to a fresh SELECT if a concurrent
+    # creator beat us (UniqueViolation).
+    import asyncpg as _asyncpg
+    throwaway = _secrets.token_urlsafe(48)
+    hashed = auth.hash_secret(throwaway)
+    try:
+        row = await pool.fetchrow(
+            """
+            INSERT INTO users (username, password_hash)
+            VALUES ($1, $2)
+            RETURNING id, username, is_admin, created_at
+            """,
+            OWNER_SENTINEL_USERNAME, hashed,
+        )
+    except _asyncpg.UniqueViolationError:
+        row = await pool.fetchrow(
+            "SELECT id, username, is_admin, created_at FROM users WHERE username = $1",
+            OWNER_SENTINEL_USERNAME,
+        )
+    return _row_to_user(row)
+
+
+# Tables that carry owner_user_id and need to follow the user during a
+# single-user -> multi-user data transfer. auth_tokens is owned-but-
+# different (the column is user_id, not owner_user_id) and is handled
+# separately. audit_events deliberately does NOT transfer; historical
+# actions stay attributed to whoever performed them.
+_OWNER_SCOPED_TABLES = (
+    "memories",
+    "facts",
+    "projects",
+    "documents",
+    "doc_chunks",
+    "ingestion_jobs",
+)
+
+
+async def transfer_owned_data(from_uid: UUID, to_uid: UUID) -> Dict[str, int]:
+    """
+    Reassign ownership of every owner_scoped row from one user to
+    another. Returns a per-table count of rows touched. Intended for
+    the single-user -> multi-user transition: when the first admin is
+    claimed, the data the owner sentinel accumulated transfers to the
+    new admin so it feels like "their" stuff.
+
+    Runs under admin_conn so the UPDATEs are not filtered by RLS
+    (which would otherwise see zero rows for the admin's session).
+    """
+    from lib import rls
+    pool = await get_pool()
+    counts: Dict[str, int] = {}
+    async with rls.admin_conn(pool) as conn:
+        for table in _OWNER_SCOPED_TABLES:
+            try:
+                result = await conn.execute(
+                    f"UPDATE {table} SET owner_user_id = $2 WHERE owner_user_id = $1",
+                    from_uid, to_uid,
+                )
+            except Exception:
+                # A table may not exist yet on a partial install; skip
+                # quietly and let the rest proceed.
+                continue
+            try:
+                counts[table] = int(result.split()[-1])
+            except (ValueError, IndexError):
+                counts[table] = 0
+    return counts
+
+
+async def claim_admin_and_transfer_data(
+    bootstrap_token: str,
+    username: str,
+    password: str,
+) -> Dict[str, Any]:
+    """
+    Single-shot transition from single-user mode to multi-user.
+
+    Validates the bootstrap token against the on-disk file, creates a
+    fresh admin user, transfers the owner sentinel's data to that
+    admin, deletes the sentinel, and removes the bootstrap file.
+
+    Returns the new admin's user dict plus a summary of how much data
+    moved. Raises ValueError on any validation failure (bad token,
+    bad credentials, no sentinel to transfer from). Raises
+    asyncpg.UniqueViolationError if the requested admin username is
+    already in use.
+
+    Caller is responsible for invalidating any cached "is multi-user"
+    flag in the auth middleware after this returns.
+    """
+    from lib import admin_bootstrap
+
+    if not admin_bootstrap.validate_bootstrap_token(bootstrap_token):
+        raise ValueError("invalid bootstrap token")
+
+    sentinel = await get_user_by_username(OWNER_SENTINEL_USERNAME)
+    if sentinel is None:
+        # No sentinel means we are not in single-user mode. The web
+        # handler should have caught this and redirected to /login.
+        raise ValueError("no owner sentinel exists; not in single-user mode")
+
+    # Create the admin first. If username clash, the
+    # UniqueViolationError surfaces before any data moves.
+    admin = await create_user(username, password)
+    admin_uid = UUID(admin["id"])
+    await set_admin(admin_uid, True)
+    admin["is_admin"] = True
+
+    # Move every owner_user_id row over.
+    sentinel_uid = sentinel["id"]
+    counts = await transfer_owned_data(sentinel_uid, admin_uid)
+
+    # Delete the sentinel last so the FK cascades have nothing to
+    # cascade (data already moved). audit_events references actor_user_id
+    # ON DELETE SET NULL, so historical sentinel actions become null-
+    # actor entries (acceptable; the sentinel is anonymous by design).
+    await delete_user(sentinel_uid)
+
+    # Delete the bootstrap file. Token should not survive a successful
+    # claim or a future restart could resurrect it for re-use.
+    admin_bootstrap.delete_bootstrap_file()
+
+    return {"admin": admin, "transferred": counts}
 
 
 async def set_admin(user_id: UUID, is_admin: bool) -> None:
