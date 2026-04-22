@@ -19,6 +19,7 @@ Tools:
     memory_search      - Find relevant memories by semantic similarity
     memory_forget      - Remove a memory by ID
     memory_list        - List memories with optional filters
+    memory_update      - Edit a memory in place without losing state
     memory_context     - Pull the hottest + most-critical memories
     memory_fact_add    - Record a temporal fact triple
     memory_fact_query  - Look up facts with optional time-travel
@@ -825,6 +826,137 @@ async def memory_context(
                            {"context": [], "count": 0})
 
     return {"context": results, "count": len(results)}
+
+
+@mcp.tool()
+@instrumented("memory_update")
+async def memory_update(
+    memory_id: str,
+    content: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    importance: Optional[str] = None,
+    project: Optional[str] = None,
+) -> dict:
+    """
+    Edit a stored memory in place without losing its thermal state or
+    access history. Only the fields you pass are changed; omitted
+    fields stay as-is.
+
+    WHEN to use:
+    - A stored memory has a typo or became partially wrong and you want
+      to correct it without losing its access_count / temperature /
+      created_at history. memory_forget + memory_store would reset all
+      of that.
+    - You need to rescope a memory to a different project (for example,
+      promoting a project-local insight to _global).
+    - You want to adjust importance or replace the tag set after
+      learning more about the memory's role.
+
+    WHEN NOT to use:
+    - For facts (mutable state that changes over time), use
+      memory_fact_add instead. It preserves history by superseding
+      rather than overwriting.
+    - For removing a memory entirely, use memory_forget.
+
+    Content handling: passing `content` triggers an automatic re-embed
+    so search results stay consistent with the new text. Omit `content`
+    to keep the existing embedding.
+
+    Rescoping: passing `project` moves the memory into that project.
+    The destination must be a writable scope (absolute path, "_global",
+    or "_domain_<name>"). Omit `project` to keep the memory where it is.
+
+    Tag semantics: `tags` REPLACES the entire tag set. To append one
+    tag, retrieve the memory first, compose the new list, and pass it
+    here.
+
+    Args:
+        memory_id: UUID of the memory to edit. Required.
+        content: Replacement text. Re-embedded automatically.
+        tags: Replacement tag list (full replacement, not merge).
+        importance: One of low, normal, high, critical.
+        project: Destination scope for a rescope. Writable scopes only.
+
+    Returns:
+        {"updated": true, "id": "..."} on success, or
+        {"updated": false, "error": "..."} when nothing was passed to
+        change, the memory does not exist, the memory belongs to
+        another user, or any of the field values are invalid.
+    """
+    if content is None and tags is None and importance is None and project is None:
+        return {
+            "error": "at least one of content/tags/importance/project must be provided",
+            "updated": False,
+        }
+
+    try:
+        mem_uuid = UUID(memory_id)
+    except (ValueError, TypeError, AttributeError):
+        return {"error": f"invalid memory_id: {memory_id!r}", "updated": False}
+
+    from lib.auth_context import current_user_id
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "updated": False}
+
+    destination_dir: Optional[str] = None
+    if project is not None:
+        destination_dir = _normalize_project(project)
+        scope_err = _validate_writable_scope(destination_dir)
+        if scope_err:
+            return {"error": scope_err, "updated": False,
+                    "project": destination_dir}
+
+    if content is not None and not content.strip():
+        return {"error": "content cannot be empty", "updated": False}
+
+    from lib.db import admin_update_memory, get_or_create_project
+    from lib.embeddings import embed
+    from lib.limits import (
+        MAX_MEMORY_CONTENT_BYTES,
+        MAX_TAG_BYTES,
+        PayloadTooLarge,
+        enforce_field_len,
+    )
+
+    # Size caps before we pay for embedding or a DB round trip.
+    try:
+        if content is not None:
+            enforce_field_len(content, MAX_MEMORY_CONTENT_BYTES, "content")
+        for t in (tags or []):
+            enforce_field_len(t, MAX_TAG_BYTES, "tag")
+    except PayloadTooLarge as exc:
+        return {"error": str(exc), "updated": False}
+
+    try:
+        new_embedding = embed(content) if content is not None else None
+        destination_project_id = None
+        if destination_dir is not None:
+            destination_project_id = await get_or_create_project(
+                destination_dir, owner,
+            )
+        updated = await admin_update_memory(
+            memory_id=mem_uuid,
+            owner_user_id=owner,
+            content=content,
+            embedding=new_embedding,
+            tags=tags,
+            importance=importance,
+            project_id=destination_project_id,
+        )
+    except ValueError as exc:
+        # admin_update_memory raises ValueError on invalid importance.
+        return {"error": str(exc), "updated": False}
+    except Exception as exc:
+        return _tool_error("memory_update", exc, {"updated": False})
+
+    if not updated:
+        return {
+            "error": "memory not found or not owned by caller",
+            "updated": False,
+        }
+
+    return {"updated": True, "id": memory_id}
 
 
 @mcp.tool()
