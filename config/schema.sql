@@ -35,6 +35,10 @@ CREATE TABLE IF NOT EXISTS memories (
     project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
     content TEXT NOT NULL,
     embedding vector(1024),
+    -- Generated full-text search column. Auto-updates with content.
+    -- Backs the hybrid (BM25 + vector) retrieval path via the GIN
+    -- index below. See migration 016 for the add-on to doc_chunks.
+    tsv tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
     tags TEXT[] DEFAULT '{}',
     importance TEXT DEFAULT 'normal'
         CHECK (importance IN ('low', 'normal', 'high', 'critical')),
@@ -48,6 +52,10 @@ CREATE TABLE IF NOT EXISTS memories (
 CREATE INDEX IF NOT EXISTS idx_memories_embedding
     ON memories USING ivfflat (embedding vector_cosine_ops)
     WITH (lists = 100);
+
+-- Full-text search (BM25-style via ts_rank_cd over the generated tsv)
+CREATE INDEX IF NOT EXISTS idx_memories_tsv
+    ON memories USING gin (tsv);
 
 -- Tag filtering via GIN index
 CREATE INDEX IF NOT EXISTS idx_memories_tags
