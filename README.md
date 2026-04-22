@@ -3,8 +3,10 @@
 **Multi-user persistent memory for MCP-capable AI agents. Run it solo on localhost, or share one server across a team with per-user auth and full memory isolation.**
 
 - **Persistent semantic memory** — embeddings-backed recall that survives context compaction and session boundaries.
+- **Document RAG** — ingest text blobs or files; chunks are auto-embedded and stored alongside memories. `rag_search` retrieves raw source text, `recall` fuses memory + document hits into one ranked list.
 - **Multi-user by design** — open self-registration, Bearer-token auth, per-user isolation enforced at the database (Postgres RLS). Every user sees only their own memories, including their own global and domain scopes.
 - **Facts with history** — record assertions as triples with automatic supersession and `as_of` time-travel, alongside the free-form memory store.
+- **Hybrid retrieval** — opt-in BM25 + vector fusion via Reciprocal Rank Fusion. Surfaces exact-keyword matches the embedder alone misses (names, acronyms, identifiers).
 - **Ambient via hooks** — shipped hook bundles for **Claude Code** and **NotNativeCoder** inject relevant memory before prompts, tool calls, and compaction. The model doesn't have to remember to search.
 - **Web GUI** — curate memories, facts, and API tokens in a browser; same auth as the MCP.
 
@@ -47,7 +49,7 @@ Depending on the mode, the installer also:
 
 - Starts the Docker stack (full / server-docker) or installs Python deps (server-python).
 - Writes `.env` with your DB credentials.
-- Downloads the embedding model (~130MB, CPU-only).
+- Downloads the embedding model (gte-large-en-v1.5, ~870MB on disk in fp16, ~1GB resident, CPU-only).
 - Applies the schema to your remote DB if server mode.
 - Runs a self-test against the live server.
 - Detects `claude` and/or `nnc` on your PATH and auto-wires the hook bundle and MCP registration for whichever is present.
@@ -265,20 +267,40 @@ You should see the stored memory come back with a similarity score.
 
 ## Available Tools
 
-The server exposes eight MCP tools:
+Fourteen MCP tools grouped by purpose.
+
+### Memory
 
 | Tool | Purpose |
 |------|---------|
 | `memory_store` | Save a memory (with optional `verbatim` flag for unsummarized text) |
-| `memory_search` | Semantic recall by natural-language query |
+| `memory_search` | Semantic recall by natural-language query (opt-in `hybrid=True` adds BM25 fusion) |
 | `memory_list` | Browse stored memories for audit or curation |
 | `memory_forget` | Delete a memory by ID |
+| `memory_update` | Edit a memory in place (content re-embeds, tags/importance/scope change) without resetting thermal state |
 | `memory_context` | Return the hottest/most-critical memories within a token budget, no query needed |
 | `memory_fact_add` | Record a fact triple (subject, predicate, object) with automatic invalidation of superseded values |
 | `memory_fact_query` | Look up current or historical facts about an entity (supports `as_of` time-travel) |
 | `memory_project_configure` | Declare which shared domains the current project pulls from |
 
 Tags are auto-classified from content (decision, preference, gotcha, correction, constraint), so the AI doesn't need to tag perfectly.
+
+### RAG
+
+| Tool | Purpose |
+|------|---------|
+| `rag_ingest_text` | Ingest a text blob; chunked, embedded, stored. Sync by default; pass `async_mode=True` to return immediately and let a background worker fill in embeddings |
+| `rag_ingest_file` | Read a UTF-8 text file from disk and ingest it. Infers title and content type from the filename |
+| `rag_search` | Semantic search over ingested chunks (opt-in `hybrid=True` adds BM25 fusion). Returns document title, source URI, and character offsets for citation |
+| `rag_ingestion_status` | Poll the most recent ingestion_job for a document. Useful after async ingest to check completion |
+
+RAG content is deduplicated per-user by sha256 of the content. Re-ingesting identical content is a no-op that returns the existing document ID.
+
+### Composed
+
+| Tool | Purpose |
+|------|---------|
+| `recall` | Unified retrieval across memories and RAG documents, fused via Reciprocal Rank Fusion. Every returned row carries a `kind` field (`"memory"` or `"doc"`) so downstream code can route. Default `hybrid=True` since fusion is where the BM25 side pays off most |
 
 ## Memory Scoping
 
@@ -290,16 +312,47 @@ Memories live in one of three scopes:
 
 Cross-project knowledge (gotchas, language patterns, style rules) no longer has to be trapped in the project where it was discovered.
 
+## Document RAG
+
+Memories are for curated knowledge; RAG is for raw source text the AI might need to consult verbatim. Typical examples: internal docs, specs, transcripts, markdown files.
+
+**Ingestion:**
+
+```python
+rag_ingest_text(
+    title="Onboarding playbook",
+    content="...",                 # full UTF-8 text
+    project="_global",             # or absolute path / _domain_*
+)
+
+rag_ingest_file(
+    path="/opt/docs/runbook.md",
+    project="/absolute/project/path",
+)
+```
+
+Content is hashed (sha256) per user; ingesting the same bytes twice is a cheap no-op that returns the existing `document_id`. Documents are chunked at 2000 characters with 250 overlap in v1 (no sentence-boundary detection). Binary formats (PDF, docx) are not supported — extract text first.
+
+**Async ingestion** (`async_mode=True`): chunks are persisted immediately with NULL embeddings; a background worker backfills. The tool call returns within milliseconds instead of seconds-to-minutes for large files. Use `rag_ingestion_status(document_id)` to poll completion. The worker starts automatically in HTTP mode; stdio mode ingests inline.
+
+**Retrieval:**
+
+- `rag_search(query)` returns document chunks ranked by cosine similarity. Each hit carries `document_title`, `source_uri`, `chunk_index`, and `char_start/end` for citation.
+- `recall(query)` runs both `memory_search` and `rag_search` under the hood and fuses the results so you don't have to pick. Each row has `kind: "memory"|"doc"` so downstream code can route.
+
+**Hybrid mode (`hybrid=True`):** adds a Postgres full-text ranking (`ts_rank_cd`) alongside the vector similarity and fuses them via Reciprocal Rank Fusion. Better recall on queries with specific tokens (product names, code identifiers, acronyms) that pure cosine similarity can miss. Off by default on `memory_search` and `rag_search`; on by default in `recall` where the fusion payoff is highest.
+
 ## How It Works
 
-- **Storage:** Memories are embedded into 1024-dimensional vectors using a local model (gte-large-en-v1.5) and stored in Postgres with pgvector.
-- **Search:** Queries are embedded the same way, then matched by cosine similarity with importance weighting. Searching from a local project automatically includes globals plus declared domains.
+- **Storage:** Memories are embedded into 1024-dimensional vectors using a local model (gte-large-en-v1.5, fp16) and stored in Postgres with pgvector. Document chunks use the same model and a parallel `doc_chunks` table.
+- **Search:** Queries are embedded the same way, then matched by cosine similarity with importance weighting on memories. Searching from a local project automatically includes globals plus declared domains. Opt-in `hybrid=True` adds a Postgres full-text ranking and fuses both via Reciprocal Rank Fusion (k=60); a generated `tsvector` column backs the full-text side and stays in sync automatically.
 - **Thermal decay:** Each memory carries a temperature. Access reheats it; storing new memories in the same project cools existing ones (displacement cooling). Critical memories never cool.
 - **Eviction:** Each project has a 500-memory cap. When exceeded, the coldest memories are evicted — importance is the primary tiebreaker, so critical memories survive.
-- **Deduplication:** Storing a semantically similar memory (cosine similarity ≥ 0.92) merges into the existing one rather than creating a duplicate.
+- **Deduplication:** Storing a semantically similar memory (cosine similarity ≥ 0.92) merges into the existing one rather than creating a duplicate. RAG documents dedup by sha256 of content per user.
+- **Async ingestion:** `rag_ingest_*(async_mode=True)` persists chunks with NULL embeddings and returns immediately. A background worker (started automatically in HTTP mode) drains the queue, recovers stranded jobs on boot, and marks completion in `ingestion_jobs`.
 - **Facts vs memories:** Memories are observations that were true in their original context (always valid). Facts are assertions about current state that get superseded with timestamps when they change, preserving history.
 - **Migrations:** The server self-bootstraps — pending SQL migrations in `config/migrations/` apply automatically on first tool call after deploy.
-- **No daemons:** The MCP server is stateless between calls. Cleanup piggybacks on normal operations.
+- **No daemons:** The MCP server (in stdio mode) is stateless between calls. HTTP mode runs one long-lived process with the RAG worker attached. Cleanup piggybacks on normal operations.
 
 ## Bulk Import from Transcripts
 
@@ -355,8 +408,14 @@ scripts/
     selftest.py         - Post-install store/search/forget verification
 lib/
     db.py               - Database operations, migration runner, scope resolution
-    embeddings.py       - Local embedding model wrapper
+    embeddings.py       - Local embedding model wrapper (gte-large-en-v1.5, fp16)
     classify.py         - Auto-classification of memory content into tag types
+    retrieval.py        - Composed recall: fuses memory + RAG hits via RRF
+    rag/
+        ingest.py       - Document ingestion (sync + async_mode)
+        search.py       - doc_chunks semantic search (vector + optional hybrid)
+        chunking.py     - Character-based chunker with overlap
+        worker.py       - Background worker that drains the ingestion queue
 config/
     schema.sql          - Fresh-install database schema
     migrations/         - Incremental schema changes, applied on first tool call
