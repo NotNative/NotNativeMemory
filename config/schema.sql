@@ -48,10 +48,11 @@ CREATE TABLE IF NOT EXISTS memories (
     access_count INT DEFAULT 0
 );
 
--- Vector similarity search (cosine distance)
+-- Vector similarity search (cosine distance). HNSW rather than IVFFlat
+-- so small-dataset queries don't get list-miss zero results. See
+-- migration 017 for the full rationale.
 CREATE INDEX IF NOT EXISTS idx_memories_embedding
-    ON memories USING ivfflat (embedding vector_cosine_ops)
-    WITH (lists = 100);
+    ON memories USING hnsw (embedding vector_cosine_ops);
 
 -- Full-text search (BM25-style via ts_rank_cd over the generated tsv)
 CREATE INDEX IF NOT EXISTS idx_memories_tsv
