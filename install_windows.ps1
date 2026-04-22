@@ -324,11 +324,12 @@ if ($installMode -eq "full") {
         exit 1
     }
 
-    # Check Docker is running
-    try {
-        docker info 2>&1 | Out-Null
-    } catch {
-        Write-Err "Docker is not running. Start Docker Desktop and try again."
+    # Check Docker daemon is reachable. Native commands do not throw on
+    # non-zero exit under $ErrorActionPreference = "Continue", so the
+    # previous try/catch here was a no-op. Check $LASTEXITCODE explicitly.
+    docker info 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Docker is not running (or daemon unreachable). Start Docker Desktop and try again."
         exit 1
     }
 
@@ -364,7 +365,15 @@ if ($installMode -eq "full") {
     $env:MEMORY_DB_USER = $DB_USER
     $env:MEMORY_APP_DB_USER = $APP_DB_USER
     $env:MEMORY_APP_DB_PASSWORD = $APP_DB_PASSWORD
-    & docker compose -f docker/docker-compose.yml --profile full up -d postgres 2>&1 | Out-Null
+    # Do NOT swallow compose output. An env-interpolation or image-pull
+    # failure here would otherwise be invisible and the health check
+    # below would burn 30 seconds polling a container that never started.
+    & docker compose -f docker/docker-compose.yml --profile full up -d postgres 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Failed to start Postgres container (docker compose up exited $LASTEXITCODE)."
+        Write-Info "Check the output above for the specific error."
+        exit 1
+    }
 
     # Wait for healthy
     Write-Step "Waiting for Postgres to be ready..."
@@ -603,7 +612,12 @@ asyncio.run(run_schema())
     # 7. Start containers and wait for ready
     # -----------------------------------------------------------------------
     Write-Step "Starting MCP server container..."
-    & docker compose -f docker/docker-compose.yml --profile $composeProfile up -d mcp 2>&1 | Out-Null
+    & docker compose -f docker/docker-compose.yml --profile $composeProfile up -d mcp 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Failed to start MCP server container (docker compose up exited $LASTEXITCODE)."
+        Write-Info "Check the output above and try: docker compose -f docker/docker-compose.yml logs mcp"
+        exit 1
+    }
 
     # Wait for MCP server to be ready (model loading takes 10-30s on first start)
     Write-Step "Waiting for MCP server to be ready..."
@@ -634,6 +648,10 @@ asyncio.run(run_schema())
     # -----------------------------------------------------------------------
     Write-Step "Installing Python dependencies..."
     pip install -r requirements.txt --quiet 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "pip install failed (exit $LASTEXITCODE). See output above."
+        exit 1
+    }
 
     # -----------------------------------------------------------------------
     # 6. Test database connection and run schema (server-only mode)

@@ -8,10 +8,13 @@ services:
     # Only started by the "full" profile (local DB + server). In "server"
     # profile the DB is remote, so this service stays down.
     profiles: ["full"]
-    # Env file lives one level up (project root). Compose resolves relative
-    # to this file's directory, so ../.env is correct. Without this, variable
-    # substitution fails when containers are recreated after a Docker update.
-    env_file: ../.env
+    # Intentionally NOT declaring env_file here. Every variable Postgres
+    # needs is already in the `environment:` block below, interpolated
+    # from the installer's process environment. Pulling it from ../.env
+    # would require .env to exist when the installer first runs `compose
+    # up postgres`, which is a chicken-and-egg: .env is written after
+    # Postgres is healthy. The mcp service DOES need env_file for its
+    # DB-connection values, and by the time it starts .env is present.
     expose:
       - "5432"
     environment:

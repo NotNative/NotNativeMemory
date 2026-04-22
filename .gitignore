@@ -39,6 +39,12 @@ docs/PLANNING.md
 docs/planning-*
 docs/planning/
 
+# Development-notes: raw installer-run captures, debug shell logs,
+# anything of that sort that belongs in the working tree for the
+# user but not in git.
+docs/Development-notes.txt
+docs/dev-*
+
 # IDE & OS
 .vscode/
 .idea/

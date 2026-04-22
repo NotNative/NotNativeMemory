@@ -358,14 +358,20 @@ if [ "$INSTALL_MODE" = "full" ]; then
     fi
 
     # Start Postgres container first (MCP depends on it, started after model download)
+    # Use an explicit `if !` check so a failure here produces a
+    # context-specific error instead of a bare `set -e` abort with the
+    # raw compose output as the only signal.
     step "Starting Postgres + pgvector container..."
-    MEMORY_DB_PASSWORD="$DB_PASSWORD" \
-    MEMORY_DB_PORT="$DB_PORT" \
-    MEMORY_DB_NAME="$DB_NAME" \
-    MEMORY_DB_USER="$DB_USER" \
-    MEMORY_APP_DB_USER="$APP_DB_USER" \
-    MEMORY_APP_DB_PASSWORD="$APP_DB_PASSWORD" \
-    docker compose -f docker/docker-compose.yml --profile full up -d postgres 2>&1
+    if ! MEMORY_DB_PASSWORD="$DB_PASSWORD" \
+         MEMORY_DB_PORT="$DB_PORT" \
+         MEMORY_DB_NAME="$DB_NAME" \
+         MEMORY_DB_USER="$DB_USER" \
+         MEMORY_APP_DB_USER="$APP_DB_USER" \
+         MEMORY_APP_DB_PASSWORD="$APP_DB_PASSWORD" \
+         docker compose -f docker/docker-compose.yml --profile full up -d postgres 2>&1; then
+        err "Failed to start Postgres container. See the compose output above."
+        exit 1
+    fi
 
     # Wait for healthy
     step "Waiting for Postgres to be ready..."
@@ -608,7 +614,11 @@ asyncio.run(run_schema())
     # 7. Start containers and wait for ready
     # -----------------------------------------------------------------------
     step "Starting MCP server container..."
-    docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" up -d mcp 2>&1
+    if ! docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" up -d mcp 2>&1; then
+        err "Failed to start MCP server container. See the compose output above."
+        info "Check logs: docker compose -f docker/docker-compose.yml logs mcp"
+        exit 1
+    fi
 
     # Wait for MCP server to be ready (model loading takes 10-30s on first start)
     step "Waiting for MCP server to be ready..."
@@ -637,7 +647,10 @@ else
     # 5. Install Python dependencies (host python server)
     # -----------------------------------------------------------------------
     step "Installing Python dependencies..."
-    pip install -r requirements.txt --quiet 2>&1
+    if ! pip install -r requirements.txt --quiet 2>&1; then
+        err "pip install failed. See output above."
+        exit 1
+    fi
 
     # -----------------------------------------------------------------------
     # 6. Test database connection and run schema (host python server)
