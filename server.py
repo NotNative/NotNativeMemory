@@ -375,6 +375,7 @@ async def memory_search(
     project: Optional[str] = None,
     tags: Optional[list[str]] = None,
     min_importance: Optional[str] = None,
+    hybrid: bool = False,
 ) -> dict:
     """
     Recall what you've learned before about a specific topic. This is
@@ -401,6 +402,14 @@ async def memory_search(
     matching that project's declared domains. Each result reports its
     scope (local/domain/global) so you can see where it came from.
 
+    Retrieval modes:
+    - Default (hybrid=False): pure cosine similarity plus an
+      importance bonus. Fast, strong on semantic matches.
+    - hybrid=True: fuses vector and full-text rankings via Reciprocal
+      Rank Fusion. Often surfaces exact-keyword hits (names, acronyms,
+      rare terms) that pure vector misses. Slightly more expensive per
+      query but usually worth it when the query has specific tokens.
+
     Args:
         query: Natural language — describe what you're looking for as
             if asking a colleague. "How does auth work in this project"
@@ -411,6 +420,7 @@ async def memory_search(
             of scope.
         tags: Filter to specific memory types (e.g. ["decision"]).
         min_importance: Floor — "high" excludes normal and low memories.
+        hybrid: Enable BM25-style hybrid retrieval (default False).
     """
     if not query or not query.strip():
         return {"error": "Query cannot be empty", "results": [], "count": 0}
@@ -434,6 +444,8 @@ async def memory_search(
             tags=tags,
             min_importance=min_importance,
             limit=limit,
+            hybrid=hybrid,
+            query_text=query,
         )
     except Exception as exc:
         return _tool_error("memory_search", exc,
@@ -1089,6 +1101,7 @@ async def rag_search(
     query: str,
     limit: int = 10,
     project: Optional[str] = None,
+    hybrid: bool = False,
 ) -> dict:
     """
     Retrieve chunks from ingested RAG documents by semantic similarity.
@@ -1105,10 +1118,19 @@ async def rag_search(
     and character offsets so you can cite back to the original text
     or fetch adjacent chunks for context expansion.
 
+    Retrieval modes:
+    - Default (hybrid=False): pure cosine similarity over chunk
+      embeddings.
+    - hybrid=True: fuses vector similarity with a Postgres full-text
+      ranking via Reciprocal Rank Fusion. Better on queries with
+      specific keywords (API names, product terms, identifiers) that
+      pure vector can miss.
+
     Args:
         query: Natural-language query string. Required.
         limit: Max chunks to return (1-100, default 10).
         project: Project scope. Auto-detected if omitted.
+        hybrid: Enable BM25-style hybrid retrieval (default False).
     """
     if not query or not query.strip():
         return {"error": "query cannot be empty", "results": [], "count": 0}
@@ -1129,6 +1151,7 @@ async def rag_search(
             project_id=project_id,
             query=query,
             limit=limit,
+            hybrid=hybrid,
         )
     except Exception as exc:
         return _tool_error("rag_search", exc,

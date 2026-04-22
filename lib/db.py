@@ -877,6 +877,123 @@ def _build_search_query(
     return sql, params
 
 
+_RRF_K = 60  # Standard k for Reciprocal Rank Fusion; rarely worth tuning.
+_HYBRID_CANDIDATE_LIMIT = 100  # Per-signal top-K before RRF fusion.
+
+
+def _build_hybrid_memory_query(
+    query_embedding: List[float],
+    query_text: str,
+    project_ids: List[UUID],
+    owner_user_id: UUID,
+    tags: Optional[List[str]] = None,
+    min_importance: Optional[str] = None,
+    limit: int = 10,
+) -> tuple:
+    """
+    Build the RRF-fused hybrid query for memories.
+
+    Runs a vector ranking (cosine distance, ascending) and a text
+    ranking (ts_rank_cd, descending) in separate CTEs, each capped at
+    _HYBRID_CANDIDATE_LIMIT, then fuses with Reciprocal Rank Fusion:
+
+        rrf_score(d) = sum over rankings R of 1 / (k + rank_R(d))
+
+    Rows that hit only one signal still surface; rows that hit both
+    accumulate the contributions.
+
+    Tiebreakers after rrf_score: importance rank DESC (so a critical
+    memory beats a normal memory at the same fused rank), then
+    created_at DESC, then id ASC.
+
+    Returns (sql, params).
+    """
+    # Shared filter fragment used by both CTEs so the candidate pools
+    # are drawn from the same scope. Param slots: $1 = embedding,
+    # $2 = project_ids, $3 = owner_user_id, $4 = query_text.
+    filters = [
+        "m.project_id = ANY($2)",
+        "m.owner_user_id = $3",
+    ]
+    params: List[Any] = [
+        str(query_embedding),
+        project_ids,
+        owner_user_id,
+        query_text,
+    ]
+    param_idx = 5
+
+    if tags:
+        filters.append(f"m.tags && ${param_idx}")
+        params.append(tags)
+        param_idx += 1
+
+    if min_importance:
+        importance_order = ["low", "normal", "high", "critical"]
+        if min_importance in importance_order:
+            allowed = importance_order[importance_order.index(min_importance):]
+            filters.append(f"m.importance = ANY(${param_idx})")
+            params.append(allowed)
+            param_idx += 1
+
+    filter_sql = " AND ".join(filters)
+    params.append(limit)
+    limit_idx = param_idx
+
+    importance_rank = _importance_rank_sql("m.importance")
+
+    sql = f"""
+        WITH vec_ranked AS (
+            SELECT m.id,
+                   m.embedding <=> $1::vector AS vec_dist,
+                   ROW_NUMBER() OVER (ORDER BY m.embedding <=> $1::vector ASC) AS rnk
+              FROM memories m
+             WHERE {filter_sql}
+               AND m.embedding IS NOT NULL
+             ORDER BY m.embedding <=> $1::vector ASC
+             LIMIT {_HYBRID_CANDIDATE_LIMIT}
+        ),
+        text_ranked AS (
+            SELECT m.id,
+                   ts_rank_cd(m.tsv, plainto_tsquery('english', $4)) AS text_score,
+                   ROW_NUMBER() OVER (ORDER BY ts_rank_cd(m.tsv, plainto_tsquery('english', $4)) DESC) AS rnk
+              FROM memories m
+             WHERE {filter_sql}
+               AND m.tsv @@ plainto_tsquery('english', $4)
+             ORDER BY text_score DESC
+             LIMIT {_HYBRID_CANDIDATE_LIMIT}
+        ),
+        fused AS (
+            SELECT COALESCE(v.id, t.id) AS id,
+                   COALESCE(1.0 / ({_RRF_K} + v.rnk), 0)
+                 + COALESCE(1.0 / ({_RRF_K} + t.rnk), 0) AS rrf_score,
+                   v.vec_dist,
+                   t.text_score
+              FROM vec_ranked v
+              FULL OUTER JOIN text_ranked t USING (id)
+        )
+        SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+               m.created_at, m.last_accessed, m.access_count,
+               m.project_id,
+               p.scope AS project_scope,
+               p.name  AS project_name,
+               CASE WHEN f.vec_dist IS NULL THEN NULL
+                    ELSE 1 - f.vec_dist
+               END AS similarity,
+               f.text_score,
+               f.rrf_score
+          FROM fused f
+          JOIN memories m ON m.id = f.id
+          JOIN projects p ON p.id = m.project_id
+         ORDER BY f.rrf_score DESC,
+                  {importance_rank} DESC,
+                  m.created_at DESC,
+                  m.id ASC
+         LIMIT ${limit_idx}
+    """
+    return sql, params
+
+
 def _importance_rank_sql(col: str = "importance") -> str:
     """
     SQL fragment mapping ``importance`` to a 0..3 integer rank, suitable
@@ -908,8 +1025,15 @@ def _format_memory_row(row: Any) -> Dict[str, Any]:
     }
     if "temperature" in row.keys():
         result["temperature"] = round(float(row["temperature"]), 1)
-    if "similarity" in row.keys():
+    if "similarity" in row.keys() and row["similarity"] is not None:
+        # Hybrid rows where only the text signal matched carry NULL
+        # similarity; omit the key in that case rather than surfacing
+        # a misleading 0.0.
         result["similarity"] = round(float(row["similarity"]), 4)
+    if "text_score" in row.keys() and row["text_score"] is not None:
+        result["text_score"] = round(float(row["text_score"]), 4)
+    if "rrf_score" in row.keys() and row["rrf_score"] is not None:
+        result["rrf_score"] = round(float(row["rrf_score"]), 6)
     # Surface project scope so callers can distinguish local/domain/global hits
     if "project_scope" in row.keys():
         result["scope"] = row["project_scope"]
@@ -925,35 +1049,53 @@ async def search_memories(
     tags: Optional[List[str]] = None,
     min_importance: Optional[str] = None,
     limit: int = 10,
+    *,
+    hybrid: bool = False,
+    query_text: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """
-    Search memories by vector similarity with importance weighting.
+    Search memories by similarity.
 
-    Scope expands from the primary project to (self + caller's globals
-    + caller's matching domains). Ownership filter applies on top so a
-    user never sees another user's memories.
+    Two retrieval modes:
 
-    Results are ranked by: (1 - cosine_distance) + importance_bonus.
-    Returned memories are reheated (temperature increases).
+    - Pure vector (default): ranked by cosine similarity plus a
+      calibrated importance bonus. Fast, captures semantic meaning,
+      can miss exact keyword matches (names, acronyms).
+    - Hybrid (``hybrid=True``, also requires ``query_text``): fuses
+      the vector ranking with a Postgres full-text ranking via
+      Reciprocal Rank Fusion. Often surfaces named entities that
+      pure-vector misses. Slightly more expensive per query.
+
+    Scope expansion and ownership filtering are identical in both
+    modes: caller sees self + their globals + their matching domains.
 
     Args:
-        query_embedding: 1024-dim query vector.
+        query_embedding: 1024-dim query vector. Required.
         project_id: Primary project to search. Required.
-        owner_user_id: Caller identity. Required. Every result row has
-            this owner.
+        owner_user_id: Caller identity. Required.
         tags: Optional tag filter (any match).
         min_importance: Optional floor (e.g. "high" excludes low and
             normal).
         limit: Max results to return.
+        hybrid: Enable BM25-style hybrid retrieval.
+        query_text: Raw query string. Only consulted when
+            ``hybrid=True``; callers pass the same text they embedded.
 
     Returns:
         List of memory dicts with similarity, temperature, scope, and
-        project name so callers can see where each hit came from.
+        project name. When hybrid=True, each dict also carries
+        rrf_score and text_score so callers can inspect ranking.
     """
     if limit < 1:
         limit = 1
     if limit > 100:
         limit = 100
+
+    if hybrid and (not query_text or not query_text.strip()):
+        # Silent fallback: caller asked for hybrid but gave nothing to
+        # match on text-side. Drop back to vector-only rather than
+        # raising, so the overall retrieval still functions.
+        hybrid = False
 
     from lib import rls
 
@@ -962,10 +1104,21 @@ async def search_memories(
     # Expand the primary project to its owner-scoped visible set.
     visible_ids = await get_visible_project_ids(project_id, owner_user_id)
 
-    sql, params = _build_search_query(
-        query_embedding, visible_ids, tags, min_importance, limit,
-        owner_user_id=owner_user_id,
-    )
+    if hybrid:
+        sql, params = _build_hybrid_memory_query(
+            query_embedding=query_embedding,
+            query_text=query_text,
+            project_ids=visible_ids,
+            owner_user_id=owner_user_id,
+            tags=tags,
+            min_importance=min_importance,
+            limit=limit,
+        )
+    else:
+        sql, params = _build_search_query(
+            query_embedding, visible_ids, tags, min_importance, limit,
+            owner_user_id=owner_user_id,
+        )
     async with rls.app_conn(pool, owner_user_id) as conn:
         rows = await conn.fetch(sql, *params)
 
