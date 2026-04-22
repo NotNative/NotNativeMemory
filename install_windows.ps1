@@ -15,6 +15,30 @@ function Write-Warn($msg) { Write-Host "[!] $msg" -ForegroundColor Yellow }
 function Write-Err($msg) { Write-Host "[x] $msg" -ForegroundColor Red }
 function Write-Info($msg) { Write-Host "    $msg" }
 
+# Run a native command and render ALL output (stdout + stderr) as plain
+# text in the default terminal color, with $LASTEXITCODE preserved.
+#
+# Why: in Windows PowerShell 5.1, `2>&1` wraps every stderr line as a
+# NativeCommandError record, which the host renders in red even when
+# the underlying tool is writing benign progress (docker compose,
+# pip, etc.) to stderr. $ErrorActionPreference only governs whether
+# errors halt execution, not how they render. This wrapper unwraps
+# the records so informational stderr no longer looks like a failure.
+#
+# Usage: Invoke-Native docker compose -f docker/docker-compose.yml ...
+function Invoke-Native {
+    if ($args.Count -lt 1) { return }
+    $cmd = $args[0]
+    $cmdArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }
+    & $cmd @cmdArgs 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message
+        } else {
+            Write-Host $_
+        }
+    }
+}
+
 # Detect which supported agent CLIs are on PATH and wire hooks + MCP
 # registration for whichever is present. Returns the list of agents
 # that were configured so the caller can tailor the summary output.
@@ -24,7 +48,7 @@ function Configure-Agents($installPath, $mcpUrl) {
     $claudeInstalled = Get-Command claude -ErrorAction SilentlyContinue
     if ($claudeInstalled) {
         Write-Step "Configuring Claude Code hooks..."
-        python claude/hooks/merge_hooks.py "$installPath" "$mcpUrl" 2>&1
+        Invoke-Native python claude/hooks/merge_hooks.py "$installPath" "$mcpUrl"
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "Claude Code hook configuration failed. You can run this manually later:"
             Write-Info "python claude/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`""
@@ -33,7 +57,7 @@ function Configure-Agents($installPath, $mcpUrl) {
         }
 
         Write-Step "Registering MCP memory server with Claude Code..."
-        & claude mcp add --transport http memory --scope user "$mcpUrl" 2>&1
+        Invoke-Native claude mcp add --transport http memory --scope user "$mcpUrl"
         if ($LASTEXITCODE -eq 0) {
             Write-Info "MCP server registered with Claude Code"
         } else {
@@ -45,7 +69,7 @@ function Configure-Agents($installPath, $mcpUrl) {
     $nncInstalled = Get-Command nnc -ErrorAction SilentlyContinue
     if ($nncInstalled) {
         Write-Step "Configuring NotNativeCoder hooks..."
-        python nnc/hooks/merge_hooks.py "$installPath" "$mcpUrl" 2>&1
+        Invoke-Native python nnc/hooks/merge_hooks.py "$installPath" "$mcpUrl"
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "NotNativeCoder hook configuration failed. You can run this manually later:"
             Write-Info "python nnc/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`""
@@ -368,7 +392,9 @@ if ($installMode -eq "full") {
     # Do NOT swallow compose output. An env-interpolation or image-pull
     # failure here would otherwise be invisible and the health check
     # below would burn 30 seconds polling a container that never started.
-    & docker compose -f docker/docker-compose.yml --profile full up -d postgres 2>&1
+    # Invoke-Native unwraps stderr so compose's progress lines render as
+    # plain text instead of red NativeCommandError records.
+    Invoke-Native docker compose -f docker/docker-compose.yml --profile full up -d postgres
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Failed to start Postgres container (docker compose up exited $LASTEXITCODE)."
         Write-Info "Check the output above for the specific error."
@@ -501,7 +527,7 @@ if ($useDocker) {
     # All Python deps live inside the container - no host pip install needed.
     # -----------------------------------------------------------------------
     Write-Step "Building MCP server Docker image..."
-    & docker compose -f docker/docker-compose.yml --profile $composeProfile build mcp 2>&1
+    Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile build mcp
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Docker image build failed."
         exit 1
@@ -518,7 +544,7 @@ if ($useDocker) {
             Write-Info "Model already exists, skipping download"
         } else {
             if (-not (Test-Path "models")) { New-Item "models" -ItemType Directory | Out-Null }
-            & docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm `
+            Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm `
                 -v "${PWD}/models:/app/models" `
                 mcp python -c "
 from sentence_transformers import SentenceTransformer
@@ -531,7 +557,7 @@ model = SentenceTransformer('Alibaba-NLP/gte-large-en-v1.5', trust_remote_code=T
 model = model.half()
 model.save('models/gte-large-en-v1.5')
 print('Model saved to models/gte-large-en-v1.5 (fp16)')
-" 2>&1
+"
             if ($LASTEXITCODE -ne 0) {
                 Write-Err "Model download failed. Check your internet connection."
                 exit 1
@@ -548,7 +574,7 @@ print('Model saved to models/gte-large-en-v1.5 (fp16)')
     # -----------------------------------------------------------------------
     if ($installMode -eq "server") {
         Write-Step "Testing remote database connection from container..."
-        & docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python -c "
+        Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python -c "
 import asyncio, asyncpg, os, sys
 async def test():
     try:
@@ -566,7 +592,7 @@ async def test():
         print(f'FAIL: {e}', file=sys.stderr)
         sys.exit(1)
 asyncio.run(test())
-" 2>&1
+"
         if ($LASTEXITCODE -ne 0) {
             Write-Err "Cannot connect to remote database from container. Check your settings."
             exit 1
@@ -574,7 +600,7 @@ asyncio.run(test())
         Write-Info "Connection successful"
 
         Write-Step "Applying schema to remote database..."
-        & docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python -c "
+        Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python -c "
 import asyncio, asyncpg, os
 async def run_schema():
     conn = await asyncpg.connect(
@@ -590,7 +616,7 @@ async def run_schema():
     await conn.close()
     print('Schema applied')
 asyncio.run(run_schema())
-" 2>&1
+"
         if ($LASTEXITCODE -ne 0) {
             Write-Err "Schema apply failed."
             exit 1
@@ -603,7 +629,7 @@ asyncio.run(run_schema())
     # that predate 02-roles.sh; for server mode it's the only role-creator.
     # -----------------------------------------------------------------------
     Write-Step "Ensuring memory_app role (RLS enforcement)..."
-    & docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python docker/init/ensure_app_role.py 2>&1
+    Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python docker/init/ensure_app_role.py
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
     }
@@ -612,7 +638,7 @@ asyncio.run(run_schema())
     # 7. Start containers and wait for ready
     # -----------------------------------------------------------------------
     Write-Step "Starting MCP server container..."
-    & docker compose -f docker/docker-compose.yml --profile $composeProfile up -d mcp 2>&1
+    Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile up -d mcp
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Failed to start MCP server container (docker compose up exited $LASTEXITCODE)."
         Write-Info "Check the output above and try: docker compose -f docker/docker-compose.yml logs mcp"
@@ -657,7 +683,7 @@ asyncio.run(run_schema())
     # 6. Test database connection and run schema (server-only mode)
     # -----------------------------------------------------------------------
     Write-Step "Testing database connection..."
-    python -c "
+    Invoke-Native python -c "
 import asyncio, asyncpg, os, sys
 from dotenv import load_dotenv
 load_dotenv()
@@ -679,7 +705,7 @@ async def test():
         sys.exit(1)
 
 asyncio.run(test())
-" 2>&1
+"
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Cannot connect to database. Check your settings."
         exit 1
@@ -687,7 +713,7 @@ asyncio.run(test())
     Write-Info "Connection successful"
 
     Write-Step "Creating database schema..."
-    python -c "
+    Invoke-Native python -c "
 import asyncio, asyncpg, os
 from dotenv import load_dotenv
 load_dotenv()
@@ -707,7 +733,7 @@ async def run_schema():
     print('Schema created successfully')
 
 asyncio.run(run_schema())
-" 2>&1
+"
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Schema creation failed."
         exit 1
@@ -715,7 +741,7 @@ asyncio.run(run_schema())
 
     Write-Step "Ensuring memory_app role (RLS enforcement)..."
     # .env values are loaded by python-dotenv inside the script.
-    python docker/init/ensure_app_role.py 2>&1
+    Invoke-Native python docker/init/ensure_app_role.py
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
     }
@@ -728,7 +754,7 @@ asyncio.run(run_schema())
         if (Test-Path "models/gte-large-en-v1.5") {
             Write-Info "Model already exists, skipping download"
         } else {
-            python -c "
+            Invoke-Native python -c "
 from sentence_transformers import SentenceTransformer
 import os
 os.makedirs('models', exist_ok=True)
@@ -739,7 +765,7 @@ model = SentenceTransformer('Alibaba-NLP/gte-large-en-v1.5', trust_remote_code=T
 model = model.half()
 model.save('models/gte-large-en-v1.5')
 print('Model saved to models/gte-large-en-v1.5 (fp16)')
-" 2>&1
+"
             if ($LASTEXITCODE -ne 0) {
                 Write-Err "Model download failed. Check your internet connection."
                 exit 1
@@ -756,9 +782,9 @@ print('Model saved to models/gte-large-en-v1.5 (fp16)')
 Write-Step "Running self-test..."
 if ($useDocker) {
     # Run selftest inside the MCP container where deps and model are available
-    & docker compose -f docker/docker-compose.yml exec mcp python scripts/selftest.py 2>&1
+    Invoke-Native docker compose -f docker/docker-compose.yml exec mcp python scripts/selftest.py
 } else {
-    python scripts/selftest.py 2>&1
+    Invoke-Native python scripts/selftest.py
 }
 if ($LASTEXITCODE -ne 0) {
     Write-Err "Self-test failed. Check the output above for details."
