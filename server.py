@@ -873,6 +873,22 @@ def _is_process_alive(pid: int) -> bool:
         return False
 
 
+def _probe_existing_server() -> tuple:
+    """
+    Probe the PID file. Returns ``(state, pid, port)`` where state is
+    ``"live"`` (process alive), ``"stale"`` (file present, process
+    dead), or ``"absent"`` (no file). pid and port reflect the file
+    contents on live/stale; both are None on absent. Callers decide
+    when to cleanup so e.g. --status can print before the file goes.
+    """
+    pid, port = _read_pid()
+    if pid is None:
+        return "absent", None, None
+    if _is_process_alive(pid):
+        return "live", pid, port
+    return "stale", pid, port
+
+
 def _cleanup_pid() -> None:
     """Remove the PID file."""
     try:
@@ -934,22 +950,23 @@ def _spawn_background(port: int) -> None:
 
 def _stop_running_server() -> tuple:
     """Stop a running server if one exists. Returns (was_running, port)."""
-    pid, port = _read_pid()
-    if pid and _is_process_alive(pid):
-        import signal
-        try:
-            os.kill(pid, signal.SIGTERM)
-            print(f"Stopped server (PID {pid})")
-        except OSError as exc:
-            print(f"Failed to stop PID {pid}: {exc}")
-            sys.exit(1)
+    state, pid, port = _probe_existing_server()
+    if state == "absent":
+        return False, None
+    if state == "stale":
         _cleanup_pid()
-        import time
-        time.sleep(1)
-        return True, port
-    if pid:
-        _cleanup_pid()
-    return False, port
+        return False, port
+    import signal
+    try:
+        os.kill(pid, signal.SIGTERM)
+        print(f"Stopped server (PID {pid})")
+    except OSError as exc:
+        print(f"Failed to stop PID {pid}: {exc}")
+        sys.exit(1)
+    _cleanup_pid()
+    import time
+    time.sleep(1)
+    return True, port
 
 
 _LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
@@ -1181,11 +1198,11 @@ if __name__ == "__main__":
         sys.exit(asyncio.run(_cli_reset_admin()))
 
     elif "--status" in sys.argv:
-        pid, port = _read_pid()
-        if pid and _is_process_alive(pid):
+        state, pid, port = _probe_existing_server()
+        if state == "live":
             print(f"NotNativeMemory server is running (PID {pid}, port {port})")
             print(f"  Endpoint: http://{_resolve_bind_host()}:{port}/mcp")
-        elif pid:
+        elif state == "stale":
             print(f"PID file exists (PID {pid}) but process is not running.")
             _cleanup_pid()
             print("  Cleaned up stale PID file.")
@@ -1219,8 +1236,8 @@ if __name__ == "__main__":
         # Default: HTTP transport. --http accepted as alias.
         port = _parse_port_from_args()
 
-        existing_pid, _ = _read_pid()
-        if existing_pid and _is_process_alive(existing_pid):
+        state, existing_pid, _ = _probe_existing_server()
+        if state == "live":
             print(f"Server already running (PID {existing_pid})")
             sys.exit(1)
 
