@@ -27,6 +27,7 @@ Tools:
     rag_ingest_text    - Ingest a text blob for document retrieval
     rag_ingest_file    - Ingest a UTF-8 text file from disk
     rag_search         - Semantic search over ingested document chunks
+    rag_ingestion_status - Poll ingestion_job state for a document
 """
 
 import logging
@@ -967,6 +968,7 @@ async def rag_ingest_text(
     project: Optional[str] = None,
     source_uri: Optional[str] = None,
     content_type: str = "text/plain",
+    async_mode: bool = False,
 ) -> dict:
     """
     Ingest a text document into the RAG store for later retrieval.
@@ -991,6 +993,12 @@ async def rag_ingest_text(
         source_uri: Where the content came from (URL, file path, or
             None for pasted text). Stored verbatim; not interpreted.
         content_type: MIME hint (default text/plain).
+        async_mode: If True, return as soon as chunks are persisted
+            (embedding=NULL) and let the background worker fill in the
+            embeddings. Use for large documents or bulk ingestion so
+            the caller is not blocked on embedding. Poll readiness via
+            rag_ingestion_status. Default False embeds inline and
+            returns status="complete".
     """
     if not title or not title.strip():
         return {"error": "title cannot be empty", "stored": False}
@@ -1015,6 +1023,7 @@ async def rag_ingest_text(
             content=content,
             source_uri=source_uri,
             content_type=content_type,
+            async_mode=async_mode,
         )
     except Exception as exc:
         return _tool_error("rag_ingest_text", exc, {"stored": False})
@@ -1029,12 +1038,13 @@ async def rag_ingest_file(
     project: Optional[str] = None,
     title: Optional[str] = None,
     content_type: Optional[str] = None,
+    async_mode: bool = False,
 ) -> dict:
     """
     Read a UTF-8 text file from disk and ingest it for RAG retrieval.
 
     Infers the title from the filename and content_type from the
-    extension when not provided. Phase A is plain-text only — PDF,
+    extension when not provided. Phase A is plain-text only. PDF,
     docx, and other binary formats are not yet supported.
 
     Args:
@@ -1042,6 +1052,8 @@ async def rag_ingest_file(
         project: Scope for the document. Auto-detected if omitted.
         title: Override the auto-detected title (basename of the file).
         content_type: Override the extension-inferred MIME type.
+        async_mode: Same semantics as rag_ingest_text. Large files
+            benefit most.
     """
     if not path or not path.strip():
         return {"error": "path cannot be empty", "stored": False}
@@ -1063,6 +1075,7 @@ async def rag_ingest_file(
             path=path,
             title=title,
             content_type=content_type,
+            async_mode=async_mode,
         )
     except Exception as exc:
         return _tool_error("rag_ingest_file", exc, {"stored": False})
@@ -1122,6 +1135,59 @@ async def rag_search(
                            {"results": [], "count": 0})
 
     return {"results": results, "count": len(results)}
+
+
+@mcp.tool()
+@instrumented("rag_ingestion_status")
+async def rag_ingestion_status(document_id: str) -> dict:
+    """
+    Poll the most recent ingestion_job for a RAG document.
+
+    Use after an async rag_ingest_* call (async_mode=True) to find out
+    whether the background worker has finished embedding. Also useful
+    for diagnosing failed ingestions without re-running the pipeline.
+
+    Returns the document's title, sha256, size, creation time, the
+    ingestion status ("queued" / "running" / "complete" / "failed"),
+    how many chunks were written, any error text, and the finish
+    timestamp when applicable.
+
+    Args:
+        document_id: UUID of the document returned by rag_ingest_text
+            or rag_ingest_file.
+
+    Returns:
+        On success, a dict with the fields above plus ``found=True``.
+        If the document does not exist or belongs to another user,
+        returns ``{"found": False, "error": "..."}`` with no leak
+        about which of the two it was.
+    """
+    try:
+        doc_uuid = UUID(document_id)
+    except (ValueError, TypeError, AttributeError):
+        return {
+            "error": f"invalid document_id: {document_id!r}",
+            "found": False,
+        }
+
+    from lib.auth_context import current_user_id
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "found": False}
+
+    try:
+        from lib.rag.search import get_document_status
+        status = await get_document_status(owner, doc_uuid)
+    except Exception as exc:
+        return _tool_error("rag_ingestion_status", exc, {"found": False})
+
+    if status is None:
+        return {
+            "error": "document not found or not owned by caller",
+            "found": False,
+        }
+
+    return {"found": True, **status}
 
 
 _PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mcp-server.pid")
@@ -1352,6 +1418,36 @@ def _start_foreground(port: int) -> None:
     app.add_middleware(BearerAuthMiddleware)
     app.add_middleware(BodySizeLimitMiddleware)
     app.add_middleware(SecurityHeadersMiddleware)
+
+    # Async ingestion worker. Starts after uvicorn has its event loop
+    # up (startup handler runs inside uvicorn's loop), stops cleanly
+    # on shutdown. stdio mode skips this entirely — per-request
+    # server lifetimes are too short for a polling loop to earn its
+    # keep, and inline ingestion is the right default there.
+    _worker_state: dict = {"task": None, "stop_event": None}
+
+    async def _start_rag_worker():
+        from lib.db import get_pool
+        from lib.rag.worker import start_worker_task
+        pool = await get_pool()
+        task, stop_event = start_worker_task(pool)
+        _worker_state["task"] = task
+        _worker_state["stop_event"] = stop_event
+
+    async def _stop_rag_worker():
+        import asyncio as _asyncio
+        stop_event = _worker_state.get("stop_event")
+        task = _worker_state.get("task")
+        if stop_event is not None:
+            stop_event.set()
+        if task is not None:
+            try:
+                await task
+            except _asyncio.CancelledError:
+                pass
+
+    app.add_event_handler("startup", _start_rag_worker)
+    app.add_event_handler("shutdown", _stop_rag_worker)
 
     # Bootstrap admin token: run before uvicorn so the operator sees
     # the banner in the terminal that started the server. Needs the
