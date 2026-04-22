@@ -10,10 +10,31 @@ param(
 
 $ErrorActionPreference = "Continue"
 
+# Match the installer's clean-output convention. See install_windows.ps1
+# for the rationale (Starlette / docker compose stderr renders in red
+# under the legacy console codepage when wrapped as ErrorRecord).
+$env:BUILDKIT_PROGRESS = "plain"
+
 function Write-Step($msg) { Write-Host "[+] $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "[!] $msg" -ForegroundColor Yellow }
 function Write-Err($msg) { Write-Host "[x] $msg" -ForegroundColor Red }
 function Write-Info($msg) { Write-Host "    $msg" }
+
+# Run a native command and render ALL output (stdout + stderr) as
+# plain text in the default terminal color, with $LASTEXITCODE
+# preserved. Same helper as the installer.
+function Invoke-Native {
+    if ($args.Count -lt 1) { return }
+    $cmd = $args[0]
+    $cmdArgs = if ($args.Count -gt 1) { $args[1..($args.Count - 1)] } else { @() }
+    & $cmd @cmdArgs 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) {
+            Write-Host $_.Exception.Message
+        } else {
+            Write-Host $_
+        }
+    }
+}
 
 $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $SCRIPT_DIR
@@ -26,27 +47,41 @@ Write-Host "+==========================================+"
 Write-Host ""
 
 # -----------------------------------------------------------------------
-# 1. Load manifest
+# 1. Load manifest, or fall back to best-effort cleanup
 # -----------------------------------------------------------------------
-if (-not (Test-Path $MANIFEST_FILE)) {
-    Write-Err "No install manifest found ($MANIFEST_FILE)."
-    Write-Info "Either this was never installed, or the manifest was deleted."
-    Write-Info "You can manually clean up:"
-    Write-Info "  - Remove hooks from ~/.claude/settings.json"
-    Write-Info "  - Stop MCP server: python server.py --stop"
-    Write-Info "  - Stop Docker: docker compose -f docker/docker-compose.yml down"
-    exit 1
+# The "no manifest" path is exactly when uninstall is most needed: an
+# install crashed mid-flow before the manifest got written. Refusing
+# to run there is unhelpful. Fall back to a conservative best-effort
+# cleanup that handles the docker side (always safe, idempotent) and
+# leaves anything we cannot positively identify (hooks in
+# ~/.claude/settings.json, host-python server) alone.
+$missingManifest = $false
+$manifest = $null
+if (Test-Path $MANIFEST_FILE) {
+    try {
+        $manifest = Get-Content $MANIFEST_FILE -Raw | ConvertFrom-Json
+    } catch {
+        Write-Warn "Manifest exists but is corrupt. Treating as missing."
+        $missingManifest = $true
+    }
+} else {
+    $missingManifest = $true
 }
 
-try {
-    $manifest = Get-Content $MANIFEST_FILE -Raw | ConvertFrom-Json
-} catch {
-    Write-Err "Manifest is corrupt. Cannot determine what to uninstall."
-    exit 1
+if ($missingManifest) {
+    Write-Warn "No install manifest. Running best-effort cleanup based on what we can see on disk."
+    Write-Info "Will:    stop docker containers, remove the built mcp image,"
+    Write-Info "         optionally remove docker/postgres/ if -Full is passed."
+    Write-Info "Will NOT touch hooks (~/.claude/settings.json), .env, or any host-python server."
+    Write-Info "Manual cleanup may still be needed for those."
+    # Synthesize the minimum component set so the docker-cleanup branch
+    # below executes. install_mode stays "(unknown)" for the summary.
+    $installMode = "(unknown)"
+    $components = @("docker", "database")
+} else {
+    $installMode = $manifest.install_mode
+    $components = $manifest.components
 }
-
-$installMode = $manifest.install_mode
-$components = $manifest.components
 
 Write-Info "Install mode: $installMode"
 Write-Info "Components: $($components -join ', ')"
@@ -61,9 +96,12 @@ if ($confirm -notin @("y", "Y", "yes", "Yes")) {
 Write-Host ""
 
 # -----------------------------------------------------------------------
-# 2. Stop MCP server (if running)
+# 2. Stop MCP server (if running) - only when manifest tells us it
+# was a host-python install. Without a manifest we cannot tell host
+# from docker, so we skip and let the docker-down step below cover
+# the docker case.
 # -----------------------------------------------------------------------
-if ($components -contains "server") {
+if (-not $missingManifest -and $components -contains "server") {
     if ($components -contains "docker") {
         # Dockerized install - server is a container, stopped in step 4
         Write-Info "MCP server runs in Docker (will be stopped with containers)"
@@ -71,7 +109,7 @@ if ($components -contains "server") {
         # Bare-metal install - server is a Python process
         Write-Step "Stopping MCP server..."
         if (Test-Path ".mcp-server.pid") {
-            python server.py --stop 2>&1
+            Invoke-Native python server.py --stop
             if ($LASTEXITCODE -eq 0) {
                 Write-Info "Server stopped"
             } else {
@@ -84,9 +122,11 @@ if ($components -contains "server") {
 }
 
 # -----------------------------------------------------------------------
-# 3. Remove Claude Code hooks
+# 3. Remove Claude Code hooks - only when we have a manifest to
+# anchor "ours" vs "someone else's". Without it, leave settings.json
+# untouched rather than guessing.
 # -----------------------------------------------------------------------
-if ($components -contains "hooks") {
+if (-not $missingManifest -and $components -contains "hooks") {
     Write-Step "Removing Claude Code hooks..."
     $settingsFile = Join-Path $env:USERPROFILE ".claude\settings.json"
 
@@ -171,22 +211,29 @@ if ($components -contains "hooks") {
 # -----------------------------------------------------------------------
 if ($components -contains "database" -or $components -contains "docker") {
     Write-Step "Stopping Docker containers..."
-    try {
-        # `--profile '*'` matches both full and server profiles so a single
-        # `down` covers either install shape.
-        & docker compose --env-file .env -f docker/docker-compose.yml --profile '*' down 2>&1 | Out-Null
+    # `--env-file .env` only when .env exists (a crashed install may
+    # have left it absent and compose errors on a missing env file).
+    # `--profile '*'` matches both full and server profiles so one
+    # `down` covers either install shape.
+    if (Test-Path ".env") {
+        Invoke-Native docker compose --progress=plain --env-file .env -f docker/docker-compose.yml --profile '*' down
+    } else {
+        Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile '*' down
+    }
+    if ($LASTEXITCODE -eq 0) {
         Write-Info "Containers stopped"
-    } catch {
-        Write-Warn "Could not stop containers (Docker may not be running)"
+    } else {
+        Write-Warn "docker compose down exited $LASTEXITCODE; some containers may still be running."
     }
 
-    # Remove the Docker image if this was a containerized install
+    # Remove the built MCP image. Harmless if missing or if another
+    # container is using it (rmi just returns non-zero in that case).
     if ($components -contains "docker") {
-        try {
-            & docker rmi notnative-memory-mcp 2>&1 | Out-Null
+        Invoke-Native docker rmi notnative-memory-mcp
+        if ($LASTEXITCODE -eq 0) {
             Write-Info "MCP server image removed"
-        } catch {
-            Write-Warn "Could not remove MCP server image"
+        } else {
+            Write-Info "MCP server image not removed (already absent or in use)"
         }
     }
 
@@ -205,7 +252,7 @@ if ($components -contains "database" -or $components -contains "docker") {
         }
     } else {
         Write-Info "Database data preserved in docker/postgres/ (memories are safe)"
-        Write-Info "Use --Full flag to also delete the database data"
+        Write-Info "Use -Full flag to also delete the database data"
     }
 }
 

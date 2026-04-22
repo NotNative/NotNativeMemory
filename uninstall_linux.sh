@@ -38,25 +38,36 @@ echo "+==========================================+"
 echo ""
 
 # -----------------------------------------------------------------------
-# 1. Load manifest
+# 1. Load manifest, or fall back to best-effort cleanup
 # -----------------------------------------------------------------------
-if [ ! -f "$MANIFEST_FILE" ]; then
-    err "No install manifest found ($MANIFEST_FILE)."
-    info "Either this was never installed, or the manifest was deleted."
-    info "You can manually clean up:"
-    info "  - Remove hooks from ~/.claude/settings.json"
-    info "  - Stop MCP server: python3 server.py --stop"
-    info "  - Stop Docker: docker compose -f docker/docker-compose.yml down"
-    exit 1
+# The "no manifest" path is exactly when uninstall is most needed: an
+# install crashed mid-flow before the manifest got written. Refusing
+# to run there is unhelpful. Fall back to a conservative best-effort
+# cleanup that handles the docker side (always safe, idempotent) and
+# leaves anything we cannot positively identify (hooks in
+# ~/.claude/settings.json, host-python server) alone.
+MISSING_MANIFEST=false
+INSTALL_MODE=""
+COMPONENTS=""
+if [ -f "$MANIFEST_FILE" ]; then
+    INSTALL_MODE=$(python3 -c "import json; d=json.load(open('$MANIFEST_FILE')); print(d.get('install_mode',''))" 2>/dev/null || true)
+    COMPONENTS=$(python3 -c "import json; d=json.load(open('$MANIFEST_FILE')); print(' '.join(d.get('components',[])))" 2>/dev/null || true)
+    if [ -z "$INSTALL_MODE" ]; then
+        warn "Manifest exists but is corrupt. Treating as missing."
+        MISSING_MANIFEST=true
+    fi
+else
+    MISSING_MANIFEST=true
 fi
 
-# Parse manifest with python
-INSTALL_MODE=$(python3 -c "import json; d=json.load(open('$MANIFEST_FILE')); print(d.get('install_mode',''))" 2>/dev/null || true)
-COMPONENTS=$(python3 -c "import json; d=json.load(open('$MANIFEST_FILE')); print(' '.join(d.get('components',[])))" 2>/dev/null || true)
-
-if [ -z "$INSTALL_MODE" ]; then
-    err "Manifest is corrupt. Cannot determine what to uninstall."
-    exit 1
+if [ "$MISSING_MANIFEST" = true ]; then
+    warn "No install manifest. Running best-effort cleanup based on what we can see on disk."
+    info "Will:    stop docker containers, remove the built mcp image,"
+    info "         optionally remove docker/postgres/ if --full is passed."
+    info "Will NOT touch hooks (~/.claude/settings.json), .env, or any host-python server."
+    info "Manual cleanup may still be needed for those."
+    INSTALL_MODE="(unknown)"
+    COMPONENTS="docker database"
 fi
 
 info "Install mode: $INSTALL_MODE"
@@ -80,9 +91,12 @@ has_component() {
 }
 
 # -----------------------------------------------------------------------
-# 2. Stop MCP server (if running)
+# 2. Stop MCP server (if running) - only when manifest tells us it
+# was a host-python install. Without a manifest we cannot tell host
+# from docker, so we skip and let the docker-down step below cover
+# the docker case.
 # -----------------------------------------------------------------------
-if has_component "server"; then
+if [ "$MISSING_MANIFEST" = false ] && has_component "server"; then
     if has_component "docker"; then
         info "MCP server runs in Docker (will be stopped with containers)"
     else
@@ -96,9 +110,11 @@ if has_component "server"; then
 fi
 
 # -----------------------------------------------------------------------
-# 3. Remove Claude Code hooks
+# 3. Remove Claude Code hooks - only when we have a manifest to
+# anchor "ours" vs "someone else's". Without it, leave settings.json
+# untouched rather than guessing.
 # -----------------------------------------------------------------------
-if has_component "hooks"; then
+if [ "$MISSING_MANIFEST" = false ] && has_component "hooks"; then
     step "Removing Claude Code hooks..."
     SETTINGS_FILE="$HOME/.claude/settings.json"
 
@@ -165,9 +181,17 @@ fi
 # -----------------------------------------------------------------------
 if has_component "docker"; then
     step "Stopping Docker containers..."
-    # `--profile '*'` matches both the full and server profiles, so a single
+    # `--env-file .env` only when .env exists (a crashed install may
+    # have left it absent and compose errors on missing env file).
+    # `--profile '*'` matches both the full and server profiles so one
     # `down` covers either install shape.
-    docker compose -f docker/docker-compose.yml --profile '*' down 2>&1 || warn "Could not stop containers (Docker may not be running)"
+    if [ -f .env ]; then
+        docker compose --progress=plain --env-file .env -f docker/docker-compose.yml --profile '*' down 2>&1 \
+            || warn "Could not stop containers (Docker may not be running)"
+    else
+        docker compose --progress=plain -f docker/docker-compose.yml --profile '*' down 2>&1 \
+            || warn "Could not stop containers (Docker may not be running)"
+    fi
 
     # Remove the built MCP image (harmless if missing / in use)
     docker rmi notnative-memory-mcp 2>&1 >/dev/null || true
