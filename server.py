@@ -28,6 +28,7 @@ Tools:
     rag_ingest_file    - Ingest a UTF-8 text file from disk
     rag_search         - Semantic search over ingested document chunks
     rag_ingestion_status - Poll ingestion_job state for a document
+    recall             - Unified retrieval across memories + RAG docs
 """
 
 import logging
@@ -1211,6 +1212,93 @@ async def rag_ingestion_status(document_id: str) -> dict:
         }
 
     return {"found": True, **status}
+
+
+@mcp.tool()
+@instrumented("recall")
+async def recall(
+    query: str,
+    limit: int = 10,
+    project: Optional[str] = None,
+    kinds: Optional[list[str]] = None,
+    hybrid: bool = True,
+) -> dict:
+    """
+    Unified retrieval across memories and RAG documents.
+
+    Runs both memory_search and rag_search under the hood and fuses
+    the results via Reciprocal Rank Fusion. Use this when you want
+    "relevant stuff about X" without pre-committing to curated memory
+    vs. raw doc chunks. Every returned row carries ``kind`` so you
+    can route the hits downstream.
+
+    WHEN to use:
+    - You want the broadest signal: curated memories AND primary
+      source text together, ranked by fused relevance.
+    - You don't know in advance whether the answer lives in a
+      decision you stored or a doc you ingested.
+    - Building a Q&A flow that should cite both kinds of context.
+
+    WHEN NOT to use:
+    - You specifically want curated insight only: memory_search.
+    - You specifically want source text only: rag_search.
+    - You need thermal state or importance filtering on memories:
+      memory_search exposes those; recall surfaces them in the row
+      but does not filter on them in v1.
+
+    Scope expansion is identical to the individual tools: local
+    project plus your globals and any declared domains.
+
+    Each row carries:
+        kind: "memory" or "doc"
+        id: memory UUID or chunk UUID
+        content: the text
+        recall_score: fused RRF score (higher is better)
+        scope: local / domain / global
+        project: project display name
+        ... plus kind-specific extras (importance + tags for memory,
+        document_title + source_uri + char offsets for doc).
+
+    Args:
+        query: Natural-language query. Required.
+        limit: Max results to return after fusion (1-100, default 10).
+            Per-source candidate pool is 2x limit internally.
+        project: Project scope. Auto-detected if omitted.
+        kinds: Optional list like ["memory"] or ["docs"] to restrict
+            the sources queried. Omit (or pass both) for full fusion.
+            Accepted values: "memory", "doc".
+        hybrid: Forwarded to both per-source searches. Default True
+            here, unlike memory_search / rag_search, because composed
+            retrieval is the scenario where BM25 + vector fusion pays
+            off most.
+    """
+    if not query or not query.strip():
+        return {"error": "query cannot be empty", "results": [], "count": 0}
+
+    from lib.db import get_or_create_project
+    from lib.retrieval import compose_recall
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"results": [], "count": 0},
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        results = await compose_recall(
+            owner_user_id=owner,
+            project_id=project_id,
+            query=query,
+            limit=limit,
+            kinds=kinds,
+            hybrid=hybrid,
+        )
+    except Exception as exc:
+        return _tool_error("recall", exc,
+                           {"results": [], "count": 0})
+
+    return {"results": results, "count": len(results)}
 
 
 _PID_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".mcp-server.pid")
