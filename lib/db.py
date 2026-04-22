@@ -746,7 +746,7 @@ async def store_memory(
 
     Args:
         content: The memory text.
-        embedding: 768-dim embedding vector.
+        embedding: 1024-dim embedding vector.
         project_id: UUID of the project this memory belongs to.
         tags: Optional categorization tags.
         importance: One of low, normal, high, critical.
@@ -937,7 +937,7 @@ async def search_memories(
     Returned memories are reheated (temperature increases).
 
     Args:
-        query_embedding: 768-dim query vector.
+        query_embedding: 1024-dim query vector.
         project_id: Primary project to search. Required.
         owner_user_id: Caller identity. Required. Every result row has
             this owner.

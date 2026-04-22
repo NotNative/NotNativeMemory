@@ -65,7 +65,7 @@ services:
       # works for local Docker Postgres (MEMORY_DB_HOST=postgres) and remote
       # Postgres (MEMORY_DB_HOST=some.host). The installer writes the right
       # values into .env based on the selected mode.
-      MEMORY_MODEL_PATH: models/gte-base-en-v1.5
+      MEMORY_MODEL_PATH: models/gte-large-en-v1.5
       MEMORY_DEFAULT_PROJECT: ${MEMORY_DEFAULT_PROJECT:-}
     volumes:
       # Embedding model downloaded during install, mounted read-only.

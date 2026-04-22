@@ -292,7 +292,7 @@ Cross-project knowledge (gotchas, language patterns, style rules) no longer has 
 
 ## How It Works
 
-- **Storage:** Memories are embedded into 768-dimensional vectors using a local model (gte-base-en-v1.5) and stored in Postgres with pgvector.
+- **Storage:** Memories are embedded into 1024-dimensional vectors using a local model (gte-large-en-v1.5) and stored in Postgres with pgvector.
 - **Search:** Queries are embedded the same way, then matched by cosine similarity with importance weighting. Searching from a local project automatically includes globals plus declared domains.
 - **Thermal decay:** Each memory carries a temperature. Access reheats it; storing new memories in the same project cools existing ones (displacement cooling). Critical memories never cool.
 - **Eviction:** Each project has a 500-memory cap. When exceeded, the coldest memories are evicted — importance is the primary tiebreaker, so critical memories survive.
@@ -320,7 +320,7 @@ Each user/assistant exchange becomes a memory, auto-classified and deduplicated 
 
 **"Cannot connect to remote database"** - Check the host, port, and credentials. Make sure the Postgres server allows connections from your machine.
 
-**"Model download failed"** - Check your internet connection. The model is downloaded from Hugging Face (~130MB).
+**"Model download failed"** - Check your internet connection. The model is downloaded from Hugging Face (~870MB fp16).
 
 **"Schema creation failed"** - The database might already have the tables (safe to ignore) or the pgvector extension isn't available (make sure you're using the pgvector/pgvector Docker image).
 
@@ -387,7 +387,7 @@ nnc/
         merge_hooks.py          - Idempotent installer for ~/.nnc/settings.json
         hooks-config.json       - Hook registration snippet template
 models/
-    gte-base-en-v1.5/   - Embedding model (downloaded by install script)
+    gte-large-en-v1.5/  - Embedding model (downloaded by install script)
 ```
 
 ## Acknowledgments

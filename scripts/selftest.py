@@ -12,7 +12,7 @@ load_dotenv()
 
 async def test():
     """Run store/search/forget cycle to verify installation."""
-    from lib.embeddings import embed
+    from lib.embeddings import embed, EMBEDDING_DIM
     from lib.db import (
         get_pool, store_memory, search_memories,
         forget_memory, get_or_create_project, close_pool,
@@ -20,10 +20,10 @@ async def test():
 
     # Test embedding
     vec = embed("This is a test memory for NotNativeMemory setup.")
-    if len(vec) != 768:
-        print(f"  Embedding: FAIL (expected 768 dims, got {len(vec)})")
+    if len(vec) != EMBEDDING_DIM:
+        print(f"  Embedding: FAIL (expected {EMBEDDING_DIM} dims, got {len(vec)})")
         sys.exit(1)
-    print("  Embedding: OK (768 dimensions)")
+    print(f"  Embedding: OK ({EMBEDDING_DIM} dimensions)")
 
     # Test DB operations
     project_id = await get_or_create_project("__self_test__", "Self Test")

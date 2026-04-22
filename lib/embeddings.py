@@ -1,14 +1,22 @@
 """
 Local embedding model wrapper for NotNativeMemory.
 
-Loads gte-base-en-v1.5 (768-dim) on first use and keeps it in memory.
-Runs on CPU - the model is ~130MB and fast enough for single queries.
-No GPU needed, no external API calls.
+Loads gte-large-en-v1.5 (1024-dim) on first use and keeps it in memory.
+Runs on CPU in fp16: ~870MB on disk and ~1GB resident after the half()
+cast. Halving the dtype halves both footprints at a negligible quality
+cost for cosine-similarity retrieval. No GPU needed, no external API
+calls.
 """
 
 import os
 import threading
 from typing import List, Optional
+
+# Output dimensionality of the configured embedding model. Used by the
+# DB schema (vector(EMBEDDING_DIM)) and by tests that construct fake
+# vectors with the right shape. Change here + the schema migration +
+# re-embed; nowhere else should hardcode the number.
+EMBEDDING_DIM = 1024
 
 # Lazy-loaded model instance. Stays in memory after first embed() call
 # so subsequent calls are fast (no reload).
@@ -32,7 +40,7 @@ def _get_model_path() -> str:
     from dotenv import load_dotenv
     load_dotenv()
 
-    relative = os.environ.get("MEMORY_MODEL_PATH", "models/gte-base-en-v1.5")
+    relative = os.environ.get("MEMORY_MODEL_PATH", "models/gte-large-en-v1.5")
     # Resolve relative to project root (parent of lib/)
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     _model_path = os.path.join(project_root, relative)
@@ -66,18 +74,23 @@ def _load_model():
             )
 
         _model = SentenceTransformer(path, trust_remote_code=True)
+        # Cast to fp16 unconditionally so RAM stays ~1GB regardless of
+        # on-disk dtype. The install script saves fp16 checkpoints, so
+        # the cast is a no-op there, but defends against an fp32 model
+        # directory left over from a prior install.
+        _model = _model.half()
         return _model
 
 
 def embed(text: str) -> List[float]:
     """
-    Embed a text string into a 768-dimensional vector.
+    Embed a text string into a 1024-dimensional vector.
 
     Args:
         text: The text to embed. Should be non-empty.
 
     Returns:
-        List of 768 floats representing the text embedding.
+        List of 1024 floats representing the text embedding.
 
     Raises:
         ValueError: If text is empty.

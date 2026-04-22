@@ -34,18 +34,20 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 sys.path.insert(0, ROOT)
 
+from lib.embeddings import EMBEDDING_DIM
+
 
 def vec_at_similarity(cos_sim: float) -> list:
     """
-    Construct a 768-dim unit vector whose cosine similarity to the
-    canonical base vector [1, 0, 0, ...] equals cos_sim.
+    Construct a unit vector whose cosine similarity to the canonical
+    base vector [1, 0, 0, ...] equals cos_sim.
 
     The base vector is implied and not constructed here. Callers pair
     this with BASE_VEC below.
     """
     cos_sim = max(-1.0, min(1.0, cos_sim))
     angle = math.acos(cos_sim)
-    v = [0.0] * 768
+    v = [0.0] * EMBEDDING_DIM
     v[0] = math.cos(angle)
     v[1] = math.sin(angle)
     return v

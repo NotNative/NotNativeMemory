@@ -12,7 +12,7 @@
       "MEMORY_DB_NAME": "notnative_memory",
       "MEMORY_DB_USER": "memory",
       "MEMORY_DB_PASSWORD": "{{DB_PASSWORD}}",
-      "MEMORY_MODEL_PATH": "{{INSTALL_PATH}}/models/gte-base-en-v1.5"
+      "MEMORY_MODEL_PATH": "{{INSTALL_PATH}}/models/gte-large-en-v1.5"
     }
   }
 }

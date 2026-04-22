@@ -22,6 +22,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 sys.path.insert(0, ROOT)
 
+from lib.embeddings import EMBEDDING_DIM
+
 
 async def run() -> int:
     from lib import auth_db, db, rls
@@ -80,9 +82,9 @@ async def run() -> int:
         row is not None and row["owner_user_id"] == uid,
     )
 
-    # 4. store_memory with an arbitrary 768-dim zero vector (bypasses
-    #    the embedding model so this test stays self-contained).
-    zeros = [0.0] * 768
+    # 4. store_memory with an arbitrary zero vector (bypasses the
+    #    embedding model so this test stays self-contained).
+    zeros = [0.0] * EMBEDDING_DIM
     mem_id = await db.store_memory(
         content="owner-propagation-test memory",
         embedding=zeros,

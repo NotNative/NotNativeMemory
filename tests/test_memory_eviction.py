@@ -39,9 +39,11 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 sys.path.insert(0, ROOT)
 
+from lib.embeddings import EMBEDDING_DIM
+
 
 def orthogonal_vec(axis: int) -> list:
-    v = [0.0] * 768
+    v = [0.0] * EMBEDDING_DIM
     v[axis] = 1.0
     return v
 

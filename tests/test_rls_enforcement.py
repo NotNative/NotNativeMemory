@@ -34,6 +34,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 sys.path.insert(0, ROOT)
 
+from lib.embeddings import EMBEDDING_DIM
+
 
 TEST_ROLE = "_nnm_rls_test_role"
 # Using an ASCII password since we write it via SQL string literal.
@@ -104,7 +106,7 @@ async def run() -> int:
             "rls-test-bob", bob_uid,
         )
 
-        zeros = "[" + ",".join(["0.0"] * 768) + "]"
+        zeros = "[" + ",".join(["0.0"] * EMBEDDING_DIM) + "]"
         alice_mem = await pool.fetchval(
             "INSERT INTO memories (project_id, content, embedding, owner_user_id) "
             "VALUES ($1, $2, $3::vector, $4) RETURNING id",

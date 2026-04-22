@@ -17,8 +17,8 @@ COPY config/ config/
 COPY scripts/ scripts/
 
 # Embedding model is mounted as a volume at runtime, not baked in.
-# Default MEMORY_MODEL_PATH=models/gte-base-en-v1.5 resolves to
-# /app/models/gte-base-en-v1.5 via lib/embeddings.py path resolution.
+# Default MEMORY_MODEL_PATH=models/gte-large-en-v1.5 resolves to
+# /app/models/gte-large-en-v1.5 via lib/embeddings.py path resolution.
 
 EXPOSE 9500
 

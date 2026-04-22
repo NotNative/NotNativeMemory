@@ -34,7 +34,7 @@ CREATE TABLE IF NOT EXISTS memories (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     project_id UUID REFERENCES projects(id) ON DELETE CASCADE,
     content TEXT NOT NULL,
-    embedding vector(768),
+    embedding vector(1024),
     tags TEXT[] DEFAULT '{}',
     importance TEXT DEFAULT 'normal'
         CHECK (importance IN ('low', 'normal', 'high', 'critical')),

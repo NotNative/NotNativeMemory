@@ -460,7 +460,7 @@ MEMORY_DB_PORT=$ENV_DB_PORT
 MEMORY_DB_NAME=$DB_NAME
 MEMORY_DB_USER=$DB_USER
 MEMORY_DB_PASSWORD=$DB_PASSWORD
-MEMORY_MODEL_PATH=models/gte-base-en-v1.5
+MEMORY_MODEL_PATH=models/gte-large-en-v1.5
 MEMORY_DEFAULT_PROJECT=
 
 # -- Network exposure -----------------------------------------------------
@@ -505,8 +505,8 @@ if [ "$USE_DOCKER" = true ]; then
     # read-write temporarily so the download persists on the host.
     # -----------------------------------------------------------------------
     if [ "${SKIP_MODEL:-}" != "1" ]; then
-        step "Downloading embedding model (gte-base-en-v1.5, ~130MB)..."
-        if [ -d "models/gte-base-en-v1.5" ]; then
+        step "Downloading embedding model (gte-large-en-v1.5, ~870MB)..."
+        if [ -d "models/gte-large-en-v1.5" ]; then
             info "Model already exists, skipping download"
         else
             mkdir -p models
@@ -515,11 +515,14 @@ if [ "$USE_DOCKER" = true ]; then
                 mcp python -c "
 from sentence_transformers import SentenceTransformer
 import os
-os.makedirs('models/gte-base-en-v1.5', exist_ok=True)
-print('Downloading gte-base-en-v1.5...')
-model = SentenceTransformer('Alibaba-NLP/gte-base-en-v1.5', trust_remote_code=True)
-model.save('models/gte-base-en-v1.5')
-print('Model saved to models/gte-base-en-v1.5')
+os.makedirs('models/gte-large-en-v1.5', exist_ok=True)
+print('Downloading gte-large-en-v1.5...')
+model = SentenceTransformer('Alibaba-NLP/gte-large-en-v1.5', trust_remote_code=True)
+# fp16 cast halves both disk and RAM footprint. Quality loss is
+# negligible for cosine-similarity retrieval.
+model = model.half()
+model.save('models/gte-large-en-v1.5')
+print('Model saved to models/gte-large-en-v1.5 (fp16)')
 "
             if [ $? -ne 0 ]; then
                 err "Model download failed. Check your internet connection."
@@ -705,18 +708,21 @@ asyncio.run(run_schema())
     # 7. Download embedding model (host python server)
     # -----------------------------------------------------------------------
     if [ "${SKIP_MODEL:-}" != "1" ]; then
-        step "Downloading embedding model (gte-base-en-v1.5, ~130MB)..."
-        if [ -d "models/gte-base-en-v1.5" ]; then
+        step "Downloading embedding model (gte-large-en-v1.5, ~870MB)..."
+        if [ -d "models/gte-large-en-v1.5" ]; then
             info "Model already exists, skipping download"
         else
             python3 -c "
 from sentence_transformers import SentenceTransformer
 import os
 os.makedirs('models', exist_ok=True)
-print('Downloading gte-base-en-v1.5...')
-model = SentenceTransformer('Alibaba-NLP/gte-base-en-v1.5', trust_remote_code=True)
-model.save('models/gte-base-en-v1.5')
-print('Model saved to models/gte-base-en-v1.5')
+print('Downloading gte-large-en-v1.5...')
+model = SentenceTransformer('Alibaba-NLP/gte-large-en-v1.5', trust_remote_code=True)
+# fp16 cast halves both disk and RAM footprint. Quality loss is
+# negligible for cosine-similarity retrieval.
+model = model.half()
+model.save('models/gte-large-en-v1.5')
+print('Model saved to models/gte-large-en-v1.5 (fp16)')
 "
             if [ $? -ne 0 ]; then
                 err "Model download failed. Check your internet connection."
