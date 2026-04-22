@@ -71,8 +71,14 @@ services:
       MEMORY_MODEL_PATH: models/gte-large-en-v1.5
       MEMORY_DEFAULT_PROJECT: ${MEMORY_DEFAULT_PROJECT:-}
     volumes:
-      # Embedding model downloaded during install, mounted read-only.
-      - ../models:/app/models:ro
+      # Embedding model. Mounted read-write rather than :ro because
+      # the install-time download runs inside this same service via
+      # `docker compose run mcp python -c "..."` and needs to write
+      # the model files into models/. Defense-in-depth :ro on the
+      # runtime container was actively breaking the install path
+      # (Errno 30 Read-only file system) and the runtime mcp code
+      # never writes to /app/models anyway.
+      - ../models:/app/models
       # Writable runtime state: admin bootstrap token on first-run,
       # any future operator-readable artifacts. Bind-mounted to the
       # host so the operator can `cat state/admin_bootstrap.txt`

@@ -10,6 +10,14 @@ param(
 # under "Stop". We check $LASTEXITCODE explicitly after each critical call.
 $ErrorActionPreference = "Continue"
 
+# Force docker buildx and docker compose to use line-based progress
+# output instead of the default fancy renderer with unicode block
+# characters. The legacy Windows console codepage cannot render those
+# glyphs and they show up as garbage like `Gu_` / `GaO`. Plain mode
+# is one log line per step, ASCII-only, much easier to read and to
+# pipe through Invoke-Native without losing context.
+$env:BUILDKIT_PROGRESS = "plain"
+
 function Write-Step($msg) { Write-Host "[+] $msg" -ForegroundColor Green }
 function Write-Warn($msg) { Write-Host "[!] $msg" -ForegroundColor Yellow }
 function Write-Err($msg) { Write-Host "[x] $msg" -ForegroundColor Red }
@@ -25,7 +33,7 @@ function Write-Info($msg) { Write-Host "    $msg" }
 # errors halt execution, not how they render. This wrapper unwraps
 # the records so informational stderr no longer looks like a failure.
 #
-# Usage: Invoke-Native docker compose -f docker/docker-compose.yml ...
+# Usage: Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml ...
 function Invoke-Native {
     if ($args.Count -lt 1) { return }
     $cmd = $args[0]
@@ -394,7 +402,7 @@ if ($installMode -eq "full") {
     # below would burn 30 seconds polling a container that never started.
     # Invoke-Native unwraps stderr so compose's progress lines render as
     # plain text instead of red NativeCommandError records.
-    Invoke-Native docker compose -f docker/docker-compose.yml --profile full up -d postgres
+    Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile full up -d postgres
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Failed to start Postgres container (docker compose up exited $LASTEXITCODE)."
         Write-Info "Check the output above for the specific error."
@@ -515,7 +523,7 @@ MEMORY_COOKIE_SECURE=
 # time and points the app at it, so RLS policies enforce from the
 # first request. Migrations still use MEMORY_DB_USER (needs superuser
 # for DDL). To disable RLS enforcement, blank these two values and
-# restart the server — the app will fall back to MEMORY_DB_USER.
+# restart the server. The app will fall back to MEMORY_DB_USER.
 MEMORY_APP_DB_USER=$APP_DB_USER
 MEMORY_APP_DB_PASSWORD=$APP_DB_PASSWORD
 "@ | Set-Content -Path ".env" -Encoding UTF8
@@ -527,7 +535,7 @@ if ($useDocker) {
     # All Python deps live inside the container - no host pip install needed.
     # -----------------------------------------------------------------------
     Write-Step "Building MCP server Docker image..."
-    Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile build mcp
+    Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile build mcp
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Docker image build failed."
         exit 1
@@ -544,7 +552,7 @@ if ($useDocker) {
             Write-Info "Model already exists, skipping download"
         } else {
             if (-not (Test-Path "models")) { New-Item "models" -ItemType Directory | Out-Null }
-            Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm `
+            Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile run --rm `
                 -v "${PWD}/models:/app/models" `
                 mcp python -c "
 from sentence_transformers import SentenceTransformer
@@ -574,7 +582,7 @@ print('Model saved to models/gte-large-en-v1.5 (fp16)')
     # -----------------------------------------------------------------------
     if ($installMode -eq "server") {
         Write-Step "Testing remote database connection from container..."
-        Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python -c "
+        Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python -c "
 import asyncio, asyncpg, os, sys
 async def test():
     try:
@@ -600,7 +608,7 @@ asyncio.run(test())
         Write-Info "Connection successful"
 
         Write-Step "Applying schema to remote database..."
-        Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python -c "
+        Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python -c "
 import asyncio, asyncpg, os
 async def run_schema():
     conn = await asyncpg.connect(
@@ -625,11 +633,11 @@ asyncio.run(run_schema())
 
     # -----------------------------------------------------------------------
     # 6c. Ensure memory_app role exists (all Docker modes)
-    # Idempotent — safe to re-run. For full mode this heals DB volumes
+    # Idempotent: safe to re-run. For full mode this heals DB volumes
     # that predate 02-roles.sh; for server mode it's the only role-creator.
     # -----------------------------------------------------------------------
     Write-Step "Ensuring memory_app role (RLS enforcement)..."
-    Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python docker/init/ensure_app_role.py
+    Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python docker/init/ensure_app_role.py
     if ($LASTEXITCODE -ne 0) {
         Write-Warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
     }
@@ -638,7 +646,7 @@ asyncio.run(run_schema())
     # 7. Start containers and wait for ready
     # -----------------------------------------------------------------------
     Write-Step "Starting MCP server container..."
-    Invoke-Native docker compose -f docker/docker-compose.yml --profile $composeProfile up -d mcp
+    Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile up -d mcp
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Failed to start MCP server container (docker compose up exited $LASTEXITCODE)."
         Write-Info "Check the output above and try: docker compose -f docker/docker-compose.yml logs mcp"
@@ -782,7 +790,7 @@ print('Model saved to models/gte-large-en-v1.5 (fp16)')
 Write-Step "Running self-test..."
 if ($useDocker) {
     # Run selftest inside the MCP container where deps and model are available
-    Invoke-Native docker compose -f docker/docker-compose.yml exec mcp python scripts/selftest.py
+    Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml exec mcp python scripts/selftest.py
 } else {
     Invoke-Native python scripts/selftest.py
 }

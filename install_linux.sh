@@ -368,7 +368,7 @@ if [ "$INSTALL_MODE" = "full" ]; then
          MEMORY_DB_USER="$DB_USER" \
          MEMORY_APP_DB_USER="$APP_DB_USER" \
          MEMORY_APP_DB_PASSWORD="$APP_DB_PASSWORD" \
-         docker compose -f docker/docker-compose.yml --profile full up -d postgres 2>&1; then
+         docker compose --progress=plain -f docker/docker-compose.yml --profile full up -d postgres 2>&1; then
         err "Failed to start Postgres container. See the compose output above."
         exit 1
     fi
@@ -487,7 +487,7 @@ MEMORY_COOKIE_SECURE=
 # time and points the app at it, so RLS policies enforce from the
 # first request. Migrations still use MEMORY_DB_USER (needs superuser
 # for DDL). To disable RLS enforcement, blank these two values and
-# restart the server — the app will fall back to MEMORY_DB_USER.
+# restart the server. The app will fall back to MEMORY_DB_USER.
 MEMORY_APP_DB_USER=$APP_DB_USER
 MEMORY_APP_DB_PASSWORD=$APP_DB_PASSWORD
 EOF
@@ -499,7 +499,7 @@ if [ "$USE_DOCKER" = true ]; then
     # All Python deps live inside the container - no host pip install needed.
     # -----------------------------------------------------------------------
     step "Building MCP server Docker image..."
-    docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" build mcp 2>&1
+    docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" build mcp 2>&1
     if [ $? -ne 0 ]; then
         err "Docker image build failed."
         exit 1
@@ -516,7 +516,7 @@ if [ "$USE_DOCKER" = true ]; then
             info "Model already exists, skipping download"
         else
             mkdir -p models
-            docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm \
+            docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm \
                 -v "$(pwd)/models:/app/models" \
                 mcp python -c "
 from sentence_transformers import SentenceTransformer
@@ -548,7 +548,7 @@ print('Model saved to models/gte-large-en-v1.5 (fp16)')
     # -----------------------------------------------------------------------
     if [ "$INSTALL_MODE" = "server" ]; then
         step "Testing remote database connection from container..."
-        docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python -c "
+        docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python -c "
 import asyncio, asyncpg, os, sys
 async def test():
     try:
@@ -574,7 +574,7 @@ asyncio.run(test())
         info "Connection successful"
 
         step "Applying schema to remote database..."
-        docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python -c "
+        docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python -c "
 import asyncio, asyncpg, os
 async def run_schema():
     conn = await asyncpg.connect(
@@ -605,7 +605,7 @@ asyncio.run(run_schema())
     # For server mode, this is the only path that creates the role.
     # -----------------------------------------------------------------------
     step "Ensuring memory_app role (RLS enforcement)..."
-    docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python docker/init/ensure_app_role.py
+    docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python docker/init/ensure_app_role.py
     if [ $? -ne 0 ]; then
         warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
     fi
@@ -614,7 +614,7 @@ asyncio.run(run_schema())
     # 7. Start containers and wait for ready
     # -----------------------------------------------------------------------
     step "Starting MCP server container..."
-    if ! docker compose -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" up -d mcp 2>&1; then
+    if ! docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" up -d mcp 2>&1; then
         err "Failed to start MCP server container. See the compose output above."
         info "Check logs: docker compose -f docker/docker-compose.yml logs mcp"
         exit 1
@@ -753,7 +753,7 @@ fi
 step "Running self-test..."
 if [ "$USE_DOCKER" = true ]; then
     # Run selftest inside the MCP container where deps and model are available
-    docker compose -f docker/docker-compose.yml exec mcp python scripts/selftest.py
+    docker compose --progress=plain -f docker/docker-compose.yml exec mcp python scripts/selftest.py
 else
     python3 scripts/selftest.py
 fi
