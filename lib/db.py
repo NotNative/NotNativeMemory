@@ -581,12 +581,15 @@ async def _merge_duplicate(
     new_embedding: List[float],
     new_tags: List[str],
     new_importance: str,
+    new_class: Optional[str] = None,
 ) -> UUID:
     """
     Merge new memory into an existing duplicate.
 
     Updates content, embedding, and tags. Importance is upgraded if the
-    new one is higher. Temperature is reheated. Access count is preserved.
+    new one is higher. Class is adopted if the existing row is NULL and
+    the incoming value is set. Temperature is reheated. Access count is
+    preserved.
     """
     await conn.execute(
         """UPDATE memories SET
@@ -604,6 +607,10 @@ async def _merge_duplicate(
                    ) THEN $5
                    ELSE importance
                END,
+               class = CASE
+                   WHEN class IS NULL THEN $8
+                   ELSE class
+               END,
                temperature = LEAST(temperature + $6, $7),
                last_accessed = now()
            WHERE id = $1""",
@@ -614,6 +621,7 @@ async def _merge_duplicate(
         new_importance,
         REHEAT_DELTA,
         TEMP_MAX,
+        new_class,
     )
     return existing_id
 
@@ -786,6 +794,7 @@ async def store_memory(
             return await _merge_duplicate(
                 conn, duplicate["id"],
                 content.strip(), embedding, clean_tags, importance,
+                new_class=memory_class,
             )
 
         row = await conn.fetchrow(

@@ -180,6 +180,60 @@ async def run() -> int:
     check("list filter class=unclassified returns NULL-class only",
           all(m.get("class") is None for m in result.get("memories", [])))
 
+    # --- Dedup merge propagates class into NULL existing row ---
+
+    dedup_content = "Dedup class propagation test content unique-" + run_id
+    dedup_vec = embed(dedup_content)
+    first_id = await db.store_memory(
+        content=dedup_content,
+        embedding=dedup_vec,
+        project_id=project_id,
+        owner_user_id=user_uid,
+        tags=["dedup-test"],
+        importance="normal",
+        memory_class=None,
+    )
+    # Verify starts unclassified
+    async with rls.admin_conn(pool) as conn:
+        row = await conn.fetchrow(
+            "SELECT class FROM memories WHERE id = $1", first_id,
+        )
+    check("dedup target starts with NULL class", row["class"] is None)
+
+    # Store near-identical content with class=preference -- should dedup
+    dedup_id = await db.store_memory(
+        content=dedup_content,
+        embedding=dedup_vec,
+        project_id=project_id,
+        owner_user_id=user_uid,
+        tags=["dedup-test"],
+        importance="normal",
+        memory_class="preference",
+    )
+    check("dedup merge returned same id", dedup_id == first_id)
+
+    async with rls.admin_conn(pool) as conn:
+        row = await conn.fetchrow(
+            "SELECT class FROM memories WHERE id = $1", first_id,
+        )
+    check("dedup merge propagated class to NULL row", row["class"] == "preference")
+
+    # Store again with class=memory -- should NOT overwrite existing class
+    await db.store_memory(
+        content=dedup_content,
+        embedding=dedup_vec,
+        project_id=project_id,
+        owner_user_id=user_uid,
+        tags=["dedup-test"],
+        importance="normal",
+        memory_class="memory",
+    )
+    async with rls.admin_conn(pool) as conn:
+        row = await conn.fetchrow(
+            "SELECT class FROM memories WHERE id = $1", first_id,
+        )
+    check("dedup merge preserves existing non-NULL class", row["class"] == "preference")
+
     # --- Rules exempt from displacement cooling ---
 
     async with rls.admin_conn(pool) as conn:
