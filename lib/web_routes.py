@@ -1043,6 +1043,69 @@ def register_routes(mcp) -> None:
             **page,
         )
 
+    @mcp.custom_route("/facts/{fact_id}", methods=["POST"])
+    @require_login_csrf_xhr
+    async def fact_update(request: Request):
+        from lib import db
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        try:
+            fid = UUID(request.path_params["fact_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid id", status_code=400)
+
+        form = await request.form()
+        updates = {}
+        for field in ("subject", "predicate", "object"):
+            val = form.get(field)
+            if val is not None and val.strip():
+                updates[field] = val.strip()
+
+        conf_raw = form.get("confidence")
+        if conf_raw:
+            try:
+                updates["confidence"] = max(0.0, min(1.0, float(conf_raw)))
+            except ValueError:
+                pass
+
+        if not updates:
+            return HTMLResponse("no changes", status_code=200)
+
+        ok = await db.update_fact(fid, uid, **updates)
+        if not ok:
+            return HTMLResponse("not found or superseded", status_code=404)
+
+        # Return the updated row as HTML partial for HTMX swap
+        facts, _ = await db.admin_list_facts(
+            owner_user_id=uid, limit=1, offset=0,
+            subject=updates.get("subject"),
+        )
+        # Find the updated fact by ID
+        updated = None
+        for f in facts:
+            if f["id"] == str(fid):
+                updated = f
+                break
+        if not updated:
+            # Re-query without subject filter
+            facts, _ = await db.admin_list_facts(
+                owner_user_id=uid, limit=200, offset=0,
+            )
+            for f in facts:
+                if f["id"] == str(fid):
+                    updated = f
+                    break
+
+        if updated:
+            from jinja2 import Environment, FileSystemLoader
+            env = templates.env
+            tmpl = env.get_template("_fact_row.html")
+            return HTMLResponse(tmpl.render(f=updated, csrf_token=get_or_mint_csrf(request)[0]))
+        return HTMLResponse("saved", status_code=200)
+
     @mcp.custom_route("/facts/{fact_id}", methods=["DELETE"])
     @require_login_csrf_xhr
     async def fact_delete(request: Request):
@@ -1249,6 +1312,7 @@ def register_routes(mcp) -> None:
         new_content = form.get("content")
         new_tags_raw = form.get("tags")
         new_importance = form.get("importance")
+        new_class_raw = form.get("memory_class")
         new_project = (form.get("project") or "").strip()
 
         updates: dict = {}
@@ -1271,6 +1335,11 @@ def register_routes(mcp) -> None:
                 errors.append(f"Invalid importance: {new_importance}")
             else:
                 updates["importance"] = new_importance
+
+        if new_class_raw is not None:
+            new_class = new_class_raw if new_class_raw in ("rule", "preference", "memory") else None
+            if new_class != existing.get("class"):
+                updates["memory_class"] = new_class
 
         if new_project and new_project != existing.get("project_directory"):
             # Normalize + validate the new scope. Same rules as

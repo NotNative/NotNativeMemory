@@ -1380,6 +1380,57 @@ async def forget_fact(fact_id: UUID, owner_user_id: UUID) -> bool:
     return result == "DELETE 1"
 
 
+async def update_fact(
+    fact_id: UUID,
+    owner_user_id: UUID,
+    *,
+    subject: Optional[str] = None,
+    predicate: Optional[str] = None,
+    object: Optional[str] = None,
+    confidence: Optional[float] = None,
+) -> bool:
+    """
+    Update a fact in place. Only provided fields are changed.
+    Returns True if the update hit a row, False if not found or
+    not owned by the caller.
+    """
+    sets = []
+    params: List[Any] = []
+    idx = 1
+
+    if subject is not None:
+        sets.append(f"subject = ${idx}")
+        params.append(subject)
+        idx += 1
+    if predicate is not None:
+        sets.append(f"predicate = ${idx}")
+        params.append(predicate)
+        idx += 1
+    if object is not None:
+        sets.append(f"object = ${idx}")
+        params.append(object)
+        idx += 1
+    if confidence is not None:
+        sets.append(f"confidence = ${idx}")
+        params.append(confidence)
+        idx += 1
+
+    if not sets:
+        return False
+
+    params.extend([fact_id, owner_user_id])
+    from lib import rls
+    pool = await get_pool()
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        result = await conn.execute(
+            f"""UPDATE facts SET {', '.join(sets)}
+                WHERE id = ${idx} AND owner_user_id = ${idx + 1}
+                  AND valid_to IS NULL""",
+            *params,
+        )
+    return result == "UPDATE 1"
+
+
 async def admin_bulk_delete(
     memory_ids: List[UUID], owner_user_id: UUID,
 ) -> int:

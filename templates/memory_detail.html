@@ -37,6 +37,15 @@
         {% endfor %}
       </select>
     </label>
+    <label style="flex:0 1 180px;">
+      Class
+      <select name="memory_class">
+        <option value="" {% if not memory.class %}selected{% endif %}>unclassified</option>
+        <option value="rule" {% if memory.class == 'rule' %}selected{% endif %}>rule</option>
+        <option value="preference" {% if memory.class == 'preference' %}selected{% endif %}>preference</option>
+        <option value="memory" {% if memory.class == 'memory' %}selected{% endif %}>memory</option>
+      </select>
+    </label>
   </div>
 
   <label style="margin-top:0.75em;">

@@ -1,12 +1,20 @@
 <div class="memory" id="fact-{{ f.id }}"
      {% if f.valid_to %}style="opacity:0.65;"{% endif %}>
-  <button
-    hx-delete="/facts/{{ f.id }}"
-    hx-target="#fact-{{ f.id }}"
-    hx-swap="outerHTML"
-    hx-confirm="Hard-delete this fact? If it is superseded, history is lost.">
-    Delete
-  </button>
+  <div style="display:flex;gap:0.5em;">
+    {% if not f.valid_to %}
+    <button type="button"
+      onclick="let el=document.getElementById('edit-{{ f.id }}');el.style.display=el.style.display==='none'?'block':'none';">
+      Edit
+    </button>
+    {% endif %}
+    <button
+      hx-delete="/facts/{{ f.id }}"
+      hx-target="#fact-{{ f.id }}"
+      hx-swap="outerHTML"
+      hx-confirm="Hard-delete this fact? If it is superseded, history is lost.">
+      Delete
+    </button>
+  </div>
   <div class="content" style="font-family:ui-monospace, monospace; font-size:0.95em;">
     <strong>{{ f.subject }}</strong>
     &middot; {{ f.predicate }}
@@ -34,4 +42,31 @@
       </span>
     {% endif %}
   </div>
+  {% if not f.valid_to %}
+  <div id="edit-{{ f.id }}" style="display:none;margin-top:0.5em;padding:0.5em;border:1px solid var(--border-strong);border-radius:3px;">
+    <form style="display:flex;flex-wrap:wrap;gap:0.5em;align-items:end;"
+          hx-post="/facts/{{ f.id }}"
+          hx-target="#fact-{{ f.id }}"
+          hx-swap="outerHTML">
+      <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+      <label style="flex:1 1 150px;">
+        Subject
+        <input name="subject" value="{{ f.subject }}" style="width:100%;">
+      </label>
+      <label style="flex:1 1 150px;">
+        Predicate
+        <input name="predicate" value="{{ f.predicate }}" style="width:100%;">
+      </label>
+      <label style="flex:2 1 200px;">
+        Object
+        <input name="object" value="{{ f.object }}" style="width:100%;">
+      </label>
+      <label style="flex:0 1 80px;">
+        Confidence
+        <input name="confidence" value="{{ '%.2f' % f.confidence }}" type="number" step="0.01" min="0" max="1" style="width:100%;">
+      </label>
+      <button type="submit" style="align-self:end;">Save</button>
+    </form>
+  </div>
+  {% endif %}
 </div>
