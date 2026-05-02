@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS memories (
         CHECK (importance IN ('low', 'normal', 'high', 'critical')),
     class TEXT
         CHECK (class IS NULL OR class IN ('rule', 'preference', 'memory')),
+    source_kind TEXT
+        CHECK (source_kind IS NULL OR source_kind IN ('user-stated', 'tool-result', 'model-inferred')),
+    source_session_id TEXT,
     temperature FLOAT DEFAULT 70.0,
     created_at TIMESTAMPTZ DEFAULT now(),
     last_accessed TIMESTAMPTZ DEFAULT now(),
@@ -80,6 +83,11 @@ CREATE INDEX IF NOT EXISTS idx_memories_importance
 CREATE INDEX IF NOT EXISTS idx_memories_class
     ON memories (class)
     WHERE class IS NOT NULL;
+
+-- Source attribution filtering
+CREATE INDEX IF NOT EXISTS idx_memories_source_kind
+    ON memories (source_kind)
+    WHERE source_kind IS NOT NULL;
 
 -- Temperature-based eviction (find coldest memories per project)
 CREATE INDEX IF NOT EXISTS idx_memories_temperature

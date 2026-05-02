@@ -736,6 +736,7 @@ async def _enforce_cap(conn: asyncpg.Connection, project_id: UUID) -> int:
 # -- Memory storage ---------------------------------------------------------
 
 _VALID_CLASSES = {"rule", "preference", "memory"}
+_VALID_SOURCE_KINDS = {"user-stated", "tool-result", "model-inferred"}
 
 
 async def store_memory(
@@ -746,6 +747,8 @@ async def store_memory(
     tags: Optional[List[str]] = None,
     importance: str = "normal",
     memory_class: Optional[str] = None,
+    source_kind: Optional[str] = None,
+    source_session_id: Optional[str] = None,
 ) -> UUID:
     """
     Store a new memory with deduplication, displacement cooling, and cap
@@ -774,6 +777,8 @@ async def store_memory(
         raise ValueError(f"Invalid importance: {importance}")
     if memory_class is not None and memory_class not in _VALID_CLASSES:
         raise ValueError(f"Invalid class: {memory_class}")
+    if source_kind is not None and source_kind not in _VALID_SOURCE_KINDS:
+        raise ValueError(f"Invalid source_kind: {source_kind}")
 
     from lib.classify import augment_tags
     from lib import rls
@@ -800,12 +805,13 @@ async def store_memory(
         row = await conn.fetchrow(
             """INSERT INTO memories
                    (project_id, content, embedding, tags, importance,
-                    class, temperature, owner_user_id)
-               VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
+                    class, temperature, owner_user_id,
+                    source_kind, source_session_id)
+               VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8, $9, $10)
                RETURNING id""",
             project_id, content.strip(), str(embedding),
             clean_tags, importance, memory_class, TEMP_INITIAL,
-            owner_user_id,
+            owner_user_id, source_kind, source_session_id,
         )
 
         # Displacement cooling: storing new knowledge pressures existing
@@ -872,6 +878,7 @@ def _build_search_query(
 
     sql = f"""
         SELECT m.id, m.content, m.tags, m.importance, m.class,
+               m.source_kind, m.source_session_id,
                m.temperature,
                m.created_at, m.last_accessed, m.access_count,
                m.project_id,
@@ -992,6 +999,7 @@ def _build_hybrid_memory_query(
               FULL OUTER JOIN text_ranked t USING (id)
         )
         SELECT m.id, m.content, m.tags, m.importance, m.class,
+               m.source_kind, m.source_session_id,
                m.temperature,
                m.created_at, m.last_accessed, m.access_count,
                m.project_id,
@@ -1040,6 +1048,8 @@ def _format_memory_row(row: Any) -> Dict[str, Any]:
         "tags": row["tags"],
         "importance": row["importance"],
         "class": row["class"] if "class" in row.keys() else None,
+        "source_kind": row["source_kind"] if "source_kind" in row.keys() else None,
+        "source_session_id": row["source_session_id"] if "source_session_id" in row.keys() else None,
         "created_at": row["created_at"].isoformat(),
         "last_accessed": row["last_accessed"].isoformat(),
         "access_count": row["access_count"],
@@ -1175,6 +1185,7 @@ async def admin_get_memory(
     async with rls.app_conn(pool, owner_user_id) as conn:
         row = await conn.fetchrow(
             """SELECT m.id, m.content, m.tags, m.importance, m.class,
+                      m.source_kind, m.source_session_id,
                       m.temperature,
                       m.created_at, m.last_accessed, m.access_count,
                       m.project_id,
@@ -1202,6 +1213,7 @@ async def admin_update_memory(
     tags: Optional[List[str]] = None,
     importance: Optional[str] = None,
     memory_class: Optional[str] = ...,
+    source_kind: Optional[str] = ...,
     project_id: Optional[UUID] = None,
 ) -> bool:
     """
@@ -1240,6 +1252,12 @@ async def admin_update_memory(
             raise ValueError(f"Invalid class: {memory_class}")
         sets.append(f"class = ${idx}")
         params.append(memory_class)
+        idx += 1
+    if source_kind is not ...:
+        if source_kind is not None and source_kind not in _VALID_SOURCE_KINDS:
+            raise ValueError(f"Invalid source_kind: {source_kind}")
+        sets.append(f"source_kind = ${idx}")
+        params.append(source_kind)
         idx += 1
     if project_id is not None:
         sets.append(f"project_id = ${idx}")
@@ -1602,6 +1620,7 @@ async def admin_list_memories(
 
         rows = await conn.fetch(
             f"""SELECT m.id, m.content, m.tags, m.importance, m.class,
+                       m.source_kind, m.source_session_id,
                        m.temperature,
                        m.created_at, m.last_accessed, m.access_count,
                        m.project_id,
@@ -1727,6 +1746,7 @@ async def get_context_memories(
     async with rls.app_conn(pool, owner_user_id) as conn:
         rows = await conn.fetch(
             f"""SELECT m.id, m.content, m.tags, m.importance, m.class,
+                      m.source_kind, m.source_session_id,
                       m.temperature,
                       m.created_at, m.last_accessed, m.access_count,
                       m.project_id,
@@ -1769,6 +1789,98 @@ async def get_context_memories(
             )
 
     return result
+
+
+async def get_health_stats(
+    owner_user_id: UUID,
+    project_id: Optional[UUID] = None,
+) -> Dict[str, Any]:
+    """
+    Return aggregate health statistics for the memory store.
+    If project_id is given, scopes to that project's visible set;
+    otherwise reports across all of the user's memories.
+    """
+    from lib import rls
+    pool = await get_pool()
+
+    scope_clause = "AND m.owner_user_id = $1"
+    params: list = [owner_user_id]
+
+    if project_id:
+        visible_ids = await get_visible_project_ids(project_id, owner_user_id)
+        scope_clause += " AND m.project_id = ANY($2)"
+        params.append(visible_ids)
+
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        totals = await conn.fetchrow(
+            f"""SELECT
+                    COUNT(*) AS total,
+                    COUNT(*) FILTER (WHERE m.class = 'rule') AS rules,
+                    COUNT(*) FILTER (WHERE m.class = 'preference') AS preferences,
+                    COUNT(*) FILTER (WHERE m.class = 'memory') AS memories,
+                    COUNT(*) FILTER (WHERE m.class IS NULL) AS unclassified,
+                    COUNT(*) FILTER (WHERE m.importance = 'critical') AS critical,
+                    COUNT(*) FILTER (WHERE m.importance = 'high') AS high,
+                    COUNT(*) FILTER (WHERE m.importance = 'normal') AS normal,
+                    COUNT(*) FILTER (WHERE m.importance = 'low') AS low,
+                    COUNT(*) FILTER (WHERE m.source_kind = 'user-stated') AS source_user,
+                    COUNT(*) FILTER (WHERE m.source_kind = 'tool-result') AS source_tool,
+                    COUNT(*) FILTER (WHERE m.source_kind = 'model-inferred') AS source_model,
+                    COUNT(*) FILTER (WHERE m.source_kind IS NULL) AS source_unknown,
+                    COUNT(*) FILTER (WHERE m.access_count = 0) AS never_accessed,
+                    COUNT(*) FILTER (WHERE m.last_accessed < now() - interval '30 days') AS stale_30d,
+                    ROUND(AVG(m.temperature)::numeric, 1) AS avg_temperature,
+                    ROUND(MIN(m.temperature)::numeric, 1) AS min_temperature,
+                    ROUND(MAX(m.temperature)::numeric, 1) AS max_temperature
+                FROM memories m
+                WHERE true {scope_clause}""",
+            *params,
+        )
+
+        fact_stats = await conn.fetchrow(
+            f"""SELECT
+                    COUNT(*) AS total_facts,
+                    COUNT(*) FILTER (WHERE valid_to IS NULL) AS current_facts,
+                    COUNT(*) FILTER (WHERE valid_to IS NOT NULL) AS superseded_facts
+                FROM facts
+                WHERE owner_user_id = $1
+                {"AND project_id = ANY($2)" if project_id else ""}""",
+            *params,
+        )
+
+    return {
+        "total_memories": totals["total"],
+        "by_class": {
+            "rule": totals["rules"],
+            "preference": totals["preferences"],
+            "memory": totals["memories"],
+            "unclassified": totals["unclassified"],
+        },
+        "by_importance": {
+            "critical": totals["critical"],
+            "high": totals["high"],
+            "normal": totals["normal"],
+            "low": totals["low"],
+        },
+        "by_source": {
+            "user-stated": totals["source_user"],
+            "tool-result": totals["source_tool"],
+            "model-inferred": totals["source_model"],
+            "unknown": totals["source_unknown"],
+        },
+        "temperature": {
+            "avg": float(totals["avg_temperature"]) if totals["avg_temperature"] else None,
+            "min": float(totals["min_temperature"]) if totals["min_temperature"] else None,
+            "max": float(totals["max_temperature"]) if totals["max_temperature"] else None,
+        },
+        "never_accessed": totals["never_accessed"],
+        "stale_30d": totals["stale_30d"],
+        "facts": {
+            "total": fact_stats["total_facts"],
+            "current": fact_stats["current_facts"],
+            "superseded": fact_stats["superseded_facts"],
+        },
+    }
 
 
 # -- Facts (temporal knowledge graph) ---------------------------------------

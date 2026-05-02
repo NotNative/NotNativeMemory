@@ -300,6 +300,7 @@ async def memory_store(
     tags: Optional[list[str]] = None,
     importance: str = "normal",
     memory_class: Optional[str] = None,
+    source: Optional[str] = None,
     project: Optional[str] = None,
     verbatim: bool = False,
 ) -> dict:
@@ -385,10 +386,20 @@ async def memory_store(
             Prefer broader scopes when the knowledge is portable —
             gotchas and patterns that apply everywhere shouldn't be
             trapped in one project.
+        source: Provenance of this memory. Helps retrieval weight by
+            reliability. One of:
+            "user-stated" — user explicitly said this.
+            "tool-result" — derived from a tool output (build log, API).
+            "model-inferred" — model's own inference or summary.
+            Omit if unknown.
         verbatim: Set true when the full text matters — reasoning chains,
             user explanations, or conversation context that would lose
             value if you summarized it. Adds a "verbatim" tag.
     """
+    _VALID_SOURCES = {"user-stated", "tool-result", "model-inferred"}
+    if source is not None and source not in _VALID_SOURCES:
+        return {"error": f"Invalid source: must be one of {sorted(_VALID_SOURCES)}", "stored": False}
+
     if not content or not content.strip():
         return {"error": "Content cannot be empty", "stored": False}
 
@@ -430,6 +441,7 @@ async def memory_store(
             tags=store_tags,
             importance=importance,
             memory_class=memory_class,
+            source_kind=source,
         )
     except Exception as exc:
         return _tool_error("memory_store", exc, {"stored": False})
@@ -934,6 +946,50 @@ async def memory_context(
 
 
 @mcp.tool()
+@instrumented("memory_health")
+async def memory_health(
+    project: Optional[str] = None,
+) -> dict:
+    """
+    Get a health dashboard for the memory store. Returns aggregate
+    statistics: counts by class, importance, source provenance,
+    temperature distribution, stale/never-accessed entries, and fact
+    totals.
+
+    WHEN to use:
+    - Debugging why the model thinks something ("where did that come
+      from?") -- check source distribution and stale counts.
+    - Periodic maintenance -- find never-accessed entries to prune,
+      check how many memories lack classification.
+    - Tuning -- temperature stats reveal whether decay is too
+      aggressive or too lenient.
+    - Auditing -- source breakdown shows the mix of user-stated vs.
+      model-inferred knowledge.
+
+    Args:
+        project: Scope to a specific project. If omitted, reports
+            across all of the caller's memories.
+    """
+    from lib.db import get_health_stats, get_or_create_project
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"error": "auth failed"},
+    )
+    if err:
+        return err
+
+    try:
+        project_id = None
+        if project_dir and project_dir != "general":
+            project_id = await get_or_create_project(project_dir, owner)
+        stats = await get_health_stats(owner, project_id)
+    except Exception as exc:
+        return _tool_error("memory_health", exc, {})
+
+    return stats
+
+
+@mcp.tool()
 @instrumented("memory_update")
 async def memory_update(
     memory_id: str,
@@ -941,6 +997,7 @@ async def memory_update(
     tags: Optional[list[str]] = None,
     importance: Optional[str] = None,
     memory_class: Optional[str] = None,
+    source: Optional[str] = None,
     project: Optional[str] = None,
 ) -> dict:
     """
@@ -992,9 +1049,9 @@ async def memory_update(
         change, the memory does not exist, the memory belongs to
         another user, or any of the field values are invalid.
     """
-    if content is None and tags is None and importance is None and memory_class is None and project is None:
+    if content is None and tags is None and importance is None and memory_class is None and source is None and project is None:
         return {
-            "error": "at least one of content/tags/importance/memory_class/project must be provided",
+            "error": "at least one of content/tags/importance/memory_class/source/project must be provided",
             "updated": False,
         }
 
@@ -1022,6 +1079,10 @@ async def memory_update(
     _valid_class_values = {"rule", "preference", "memory", "unclassified"}
     if memory_class is not None and memory_class not in _valid_class_values:
         return {"error": f"invalid memory_class: {memory_class!r}", "updated": False}
+
+    _valid_source_values = {"user-stated", "tool-result", "model-inferred"}
+    if source is not None and source not in _valid_source_values:
+        return {"error": f"invalid source: {source!r}", "updated": False}
 
     from lib.db import admin_update_memory, get_or_create_project
     from lib.embeddings import embed
@@ -1057,6 +1118,9 @@ async def memory_update(
         else:
             db_class = memory_class
 
+        # Source uses same ellipsis sentinel pattern
+        db_source = source if source is not None else ...
+
         updated = await admin_update_memory(
             memory_id=mem_uuid,
             owner_user_id=owner,
@@ -1065,6 +1129,7 @@ async def memory_update(
             tags=tags,
             importance=importance,
             memory_class=db_class,
+            source_kind=db_source,
             project_id=destination_project_id,
         )
     except ValueError as exc:
