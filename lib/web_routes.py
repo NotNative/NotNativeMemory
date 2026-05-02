@@ -78,7 +78,6 @@ def _clear_session_cookie(response) -> None:
 def _context_for(request: Request, csrf_token: str, **extra) -> dict:
     """Base template context. Adds the authenticated identity so nav renders."""
     ctx = {
-        "request": request,
         "username": getattr(request.state, "username", None),
         "user_id": getattr(request.state, "user_id", None),
         "is_admin": bool(getattr(request.state, "is_admin", False)),
@@ -101,7 +100,7 @@ def _render_with_csrf(
     token, is_new = get_or_mint_csrf(request)
     ctx = _context_for(request, csrf_token=token, **extra)
     response = templates.TemplateResponse(
-        template, ctx, status_code=status_code,
+        request, template, context=ctx, status_code=status_code,
     )
     if is_new:
         set_csrf_cookie(response, token)
