@@ -1,6 +1,7 @@
 {
-  "_comment": "NotNativeMemory hooks for Claude Code. Merged into ~/.claude/settings.json by the installer.",
+  "_comment": "Reference snippet showing the shape of NotNativeMemory hook entries written into ~/.claude/settings.json. The installer (merge_hooks.py) is the source of truth — it computes the deployed-script paths at install time. This file is documentation only; nothing reads it programmatically.",
   "_identifier": "notnative-memory",
+  "_deploy_dir": "~/.claude/hooks/notnative-memory",
   "hooks": {
     "UserPromptSubmit": [
       {
@@ -8,7 +9,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python {{INSTALL_PATH}}/claude/hooks/user_prompt_inject.py",
+            "command": "python {{DEPLOY_DIR}}/user_prompt_inject.py",
             "timeout": 10
           }
         ]
@@ -20,7 +21,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python {{INSTALL_PATH}}/claude/hooks/session_start.py",
+            "command": "python {{DEPLOY_DIR}}/session_start.py",
             "timeout": 10
           }
         ]
@@ -32,8 +33,20 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python {{INSTALL_PATH}}/claude/hooks/compact_guard.py",
+            "command": "python {{DEPLOY_DIR}}/compact_guard.py",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python {{DEPLOY_DIR}}/turn_analysis.py",
+            "timeout": 15
           }
         ]
       }

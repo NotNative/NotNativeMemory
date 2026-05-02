@@ -21,16 +21,13 @@ import sys
 import urllib.request
 import urllib.error
 
-# -- Load config from hooks.env alongside this script ----------------------
+# Resolve hooks_shared/ for both deployed and repo layouts.
 _HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
-_ENV_FILE = os.path.join(_HOOK_DIR, "hooks.env")
-if os.path.exists(_ENV_FILE):
-    with open(_ENV_FILE, "r") as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _key, _val = _line.split("=", 1)
-                os.environ.setdefault(_key.strip(), _val.strip())
+sys.path.insert(0, _HOOK_DIR)
+sys.path.insert(0, os.path.dirname(os.path.dirname(_HOOK_DIR)))
+from hooks_shared.env_loader import load_hooks_env  # noqa: E402
+
+load_hooks_env(__file__)
 
 MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://localhost:9500/mcp")
 MAX_MEMORIES = int(os.environ.get("MEMORY_COMPACT_MAX_RESULTS", "5"))

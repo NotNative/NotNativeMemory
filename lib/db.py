@@ -671,7 +671,8 @@ async def _apply_displacement_cooling(
                    temperature = GREATEST(temperature - $1, 0.0)
                WHERE project_id = $2
                  AND importance = $3
-                 AND temperature > 0.0""",
+                 AND temperature > 0.0
+                 AND (class IS DISTINCT FROM 'rule')""",
             delta, project_id, importance,
         )
         cooled += int(result.split()[-1]) if result else 0
@@ -708,6 +709,7 @@ async def _enforce_cap(conn: asyncpg.Connection, project_id: UUID) -> int:
         f"""DELETE FROM memories WHERE id IN (
                SELECT id FROM memories
                WHERE project_id = $1
+                 AND (class IS DISTINCT FROM 'rule')
                ORDER BY
                    {_importance_rank_sql()} ASC,
                    temperature ASC,
@@ -725,6 +727,9 @@ async def _enforce_cap(conn: asyncpg.Connection, project_id: UUID) -> int:
 
 # -- Memory storage ---------------------------------------------------------
 
+_VALID_CLASSES = {"rule", "preference", "memory"}
+
+
 async def store_memory(
     content: str,
     embedding: List[float],
@@ -732,6 +737,7 @@ async def store_memory(
     owner_user_id: UUID,
     tags: Optional[List[str]] = None,
     importance: str = "normal",
+    memory_class: Optional[str] = None,
 ) -> UUID:
     """
     Store a new memory with deduplication, displacement cooling, and cap
@@ -758,6 +764,8 @@ async def store_memory(
         raise ValueError("Memory content cannot be empty")
     if importance not in _IMPORTANCE_WEIGHT:
         raise ValueError(f"Invalid importance: {importance}")
+    if memory_class is not None and memory_class not in _VALID_CLASSES:
+        raise ValueError(f"Invalid class: {memory_class}")
 
     from lib.classify import augment_tags
     from lib import rls
@@ -783,11 +791,12 @@ async def store_memory(
         row = await conn.fetchrow(
             """INSERT INTO memories
                    (project_id, content, embedding, tags, importance,
-                    temperature, owner_user_id)
-               VALUES ($1, $2, $3::vector, $4, $5, $6, $7)
+                    class, temperature, owner_user_id)
+               VALUES ($1, $2, $3::vector, $4, $5, $6, $7, $8)
                RETURNING id""",
             project_id, content.strip(), str(embedding),
-            clean_tags, importance, TEMP_INITIAL, owner_user_id,
+            clean_tags, importance, memory_class, TEMP_INITIAL,
+            owner_user_id,
         )
 
         # Displacement cooling: storing new knowledge pressures existing
@@ -853,7 +862,8 @@ def _build_search_query(
     params.append(limit)
 
     sql = f"""
-        SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+        SELECT m.id, m.content, m.tags, m.importance, m.class,
+               m.temperature,
                m.created_at, m.last_accessed, m.access_count,
                m.project_id,
                p.scope AS project_scope,
@@ -972,7 +982,8 @@ def _build_hybrid_memory_query(
               FROM vec_ranked v
               FULL OUTER JOIN text_ranked t USING (id)
         )
-        SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+        SELECT m.id, m.content, m.tags, m.importance, m.class,
+               m.temperature,
                m.created_at, m.last_accessed, m.access_count,
                m.project_id,
                p.scope AS project_scope,
@@ -1019,6 +1030,7 @@ def _format_memory_row(row: Any) -> Dict[str, Any]:
         "content": row["content"],
         "tags": row["tags"],
         "importance": row["importance"],
+        "class": row["class"] if "class" in row.keys() else None,
         "created_at": row["created_at"].isoformat(),
         "last_accessed": row["last_accessed"].isoformat(),
         "access_count": row["access_count"],
@@ -1153,7 +1165,8 @@ async def admin_get_memory(
     pool = await get_pool()
     async with rls.app_conn(pool, owner_user_id) as conn:
         row = await conn.fetchrow(
-            """SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+            """SELECT m.id, m.content, m.tags, m.importance, m.class,
+                      m.temperature,
                       m.created_at, m.last_accessed, m.access_count,
                       m.project_id,
                       p.scope AS project_scope,
@@ -1179,6 +1192,7 @@ async def admin_update_memory(
     embedding: Optional[List[float]] = None,
     tags: Optional[List[str]] = None,
     importance: Optional[str] = None,
+    memory_class: Optional[str] = ...,
     project_id: Optional[UUID] = None,
 ) -> bool:
     """
@@ -1211,6 +1225,12 @@ async def admin_update_memory(
             raise ValueError(f"Invalid importance: {importance}")
         sets.append(f"importance = ${idx}")
         params.append(importance)
+        idx += 1
+    if memory_class is not ...:
+        if memory_class is not None and memory_class not in _VALID_CLASSES:
+            raise ValueError(f"Invalid class: {memory_class}")
+        sets.append(f"class = ${idx}")
+        params.append(memory_class)
         idx += 1
     if project_id is not None:
         sets.append(f"project_id = ${idx}")
@@ -1521,7 +1541,8 @@ async def admin_list_memories(
             order_clause = f"m.{sort} {order}"
 
         rows = await conn.fetch(
-            f"""SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+            f"""SELECT m.id, m.content, m.tags, m.importance, m.class,
+                       m.temperature,
                        m.created_at, m.last_accessed, m.access_count,
                        m.project_id,
                        p.scope AS project_scope,
@@ -1542,17 +1563,20 @@ async def list_memories(
     owner_user_id: UUID,
     project_id: Optional[UUID] = None,
     tags: Optional[List[str]] = None,
+    memory_class: Optional[str] = ...,
     limit: int = 20,
 ) -> List[Dict[str, Any]]:
     """
     List memories scoped to a specific user, optionally filtered by
-    project and tags.
+    project, tags, and class.
 
     Args:
         owner_user_id: Caller identity. Required.
         project_id: Optional project filter. When None, lists across
             every project the caller owns.
         tags: Optional tag filter.
+        memory_class: Filter by class. Ellipsis = no filter. None =
+            unclassified only. String = exact match.
         limit: Max results.
 
     Returns:
@@ -1580,13 +1604,21 @@ async def list_memories(
         params.append(tags)
         param_idx += 1
 
+    if memory_class is not ...:
+        if memory_class is None:
+            conditions.append("class IS NULL")
+        else:
+            conditions.append(f"class = ${param_idx}")
+            params.append(memory_class)
+            param_idx += 1
+
     where = "WHERE " + " AND ".join(conditions)
     params.append(limit)
 
     async with rls.app_conn(pool, owner_user_id) as conn:
         rows = await conn.fetch(
-            f"""SELECT id, content, tags, importance, temperature, created_at,
-                       last_accessed, access_count
+            f"""SELECT id, content, tags, importance, class, temperature,
+                       created_at, last_accessed, access_count
                 FROM memories {where}
                 ORDER BY created_at DESC, id ASC
                 LIMIT ${param_idx}""",
@@ -1634,7 +1666,8 @@ async def get_context_memories(
 
     async with rls.app_conn(pool, owner_user_id) as conn:
         rows = await conn.fetch(
-            f"""SELECT m.id, m.content, m.tags, m.importance, m.temperature,
+            f"""SELECT m.id, m.content, m.tags, m.importance, m.class,
+                      m.temperature,
                       m.created_at, m.last_accessed, m.access_count,
                       m.project_id,
                       p.scope AS project_scope,

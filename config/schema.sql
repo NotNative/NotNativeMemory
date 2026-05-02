@@ -42,6 +42,8 @@ CREATE TABLE IF NOT EXISTS memories (
     tags TEXT[] DEFAULT '{}',
     importance TEXT DEFAULT 'normal'
         CHECK (importance IN ('low', 'normal', 'high', 'critical')),
+    class TEXT
+        CHECK (class IS NULL OR class IN ('rule', 'preference', 'memory')),
     temperature FLOAT DEFAULT 70.0,
     created_at TIMESTAMPTZ DEFAULT now(),
     last_accessed TIMESTAMPTZ DEFAULT now(),
@@ -73,6 +75,11 @@ CREATE INDEX IF NOT EXISTS idx_memories_last_accessed
 -- Importance filtering
 CREATE INDEX IF NOT EXISTS idx_memories_importance
     ON memories (importance);
+
+-- Class filtering (NULL = unclassified; partial index excludes NULLs)
+CREATE INDEX IF NOT EXISTS idx_memories_class
+    ON memories (class)
+    WHERE class IS NOT NULL;
 
 -- Temperature-based eviction (find coldest memories per project)
 CREATE INDEX IF NOT EXISTS idx_memories_temperature

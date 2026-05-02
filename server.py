@@ -299,6 +299,7 @@ async def memory_store(
     content: str,
     tags: Optional[list[str]] = None,
     importance: str = "normal",
+    memory_class: Optional[str] = None,
     project: Optional[str] = None,
     verbatim: bool = False,
 ) -> dict:
@@ -358,6 +359,13 @@ async def memory_store(
             high = prominent in results, very slow to cool.
             normal = standard memory.
             low = nice to have, first to be evicted under pressure.
+        memory_class: Classification for how the consuming model should
+            treat this memory. NULL (omit) = unclassified.
+            rule = hard invariant, must never be violated.
+            preference = soft guidance, doesn't decay, not load-bearing.
+            memory = standard decaying memory.
+            The user manages classification; models may suggest but the
+            user is the authority on what is a rule vs. a preference.
         project: Where this memory belongs in the scope hierarchy.
             Auto-detected (local project) if omitted.
 
@@ -421,6 +429,7 @@ async def memory_store(
             owner_user_id=owner,
             tags=store_tags,
             importance=importance,
+            memory_class=memory_class,
         )
     except Exception as exc:
         return _tool_error("memory_store", exc, {"stored": False})
@@ -565,6 +574,7 @@ async def memory_forget(memory_id: str) -> dict:
 async def memory_list(
     project: Optional[str] = None,
     tags: Optional[list[str]] = None,
+    memory_class: Optional[str] = None,
     limit: int = 20,
 ) -> dict:
     """
@@ -588,6 +598,10 @@ async def memory_list(
         project: Project scope. Auto-detected if omitted.
             Pass empty string to list across all projects.
         tags: Filter to specific types (e.g. ["decision", "gotcha"]).
+        memory_class: Filter by classification. Omit (or null) for all
+            memories. Pass "unclassified" to see only memories with no
+            class assigned. Pass "rule", "preference", or "memory" to
+            filter to that class.
         limit: Max results (1-100, default 20).
     """
     from lib.db import list_memories, get_or_create_project
@@ -598,12 +612,29 @@ async def memory_list(
     if err:
         return err
 
+    _valid_list_classes = {"rule", "preference", "memory", "unclassified"}
+    if memory_class is not None and memory_class not in _valid_list_classes:
+        return {
+            "error": f"invalid memory_class filter: {memory_class!r}",
+            "memories": [], "count": 0,
+        }
+
     try:
+        # Translate MCP-facing class filter to db-layer sentinel:
+        # None (omitted) = no filter (ellipsis), "unclassified" = NULL only
+        if memory_class is None:
+            db_class = ...
+        elif memory_class == "unclassified":
+            db_class = None
+        else:
+            db_class = memory_class
+
         project_id = await get_or_create_project(project_dir, owner)
         results = await list_memories(
             owner_user_id=owner,
             project_id=project_id,
             tags=tags,
+            memory_class=db_class,
             limit=limit,
         )
     except Exception as exc:
@@ -909,6 +940,7 @@ async def memory_update(
     content: Optional[str] = None,
     tags: Optional[list[str]] = None,
     importance: Optional[str] = None,
+    memory_class: Optional[str] = None,
     project: Optional[str] = None,
 ) -> dict:
     """
@@ -949,6 +981,9 @@ async def memory_update(
         content: Replacement text. Re-embedded automatically.
         tags: Replacement tag list (full replacement, not merge).
         importance: One of low, normal, high, critical.
+        memory_class: Classification. Pass "rule", "preference", or
+            "memory" to set. Pass "unclassified" to clear back to no
+            class. Omit (null) to leave unchanged.
         project: Destination scope for a rescope. Writable scopes only.
 
     Returns:
@@ -957,9 +992,9 @@ async def memory_update(
         change, the memory does not exist, the memory belongs to
         another user, or any of the field values are invalid.
     """
-    if content is None and tags is None and importance is None and project is None:
+    if content is None and tags is None and importance is None and memory_class is None and project is None:
         return {
-            "error": "at least one of content/tags/importance/project must be provided",
+            "error": "at least one of content/tags/importance/memory_class/project must be provided",
             "updated": False,
         }
 
@@ -983,6 +1018,10 @@ async def memory_update(
 
     if content is not None and not content.strip():
         return {"error": "content cannot be empty", "updated": False}
+
+    _valid_class_values = {"rule", "preference", "memory", "unclassified"}
+    if memory_class is not None and memory_class not in _valid_class_values:
+        return {"error": f"invalid memory_class: {memory_class!r}", "updated": False}
 
     from lib.db import admin_update_memory, get_or_create_project
     from lib.embeddings import embed
@@ -1009,6 +1048,15 @@ async def memory_update(
             destination_project_id = await get_or_create_project(
                 destination_dir, owner,
             )
+        # Translate MCP-facing class param to db-layer sentinel:
+        # None (omitted) = don't change (ellipsis), "unclassified" = clear to NULL
+        if memory_class is None:
+            db_class = ...
+        elif memory_class == "unclassified":
+            db_class = None
+        else:
+            db_class = memory_class
+
         updated = await admin_update_memory(
             memory_id=mem_uuid,
             owner_user_id=owner,
@@ -1016,6 +1064,7 @@ async def memory_update(
             embedding=new_embedding,
             tags=tags,
             importance=importance,
+            memory_class=db_class,
             project_id=destination_project_id,
         )
     except ValueError as exc:
