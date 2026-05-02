@@ -15,6 +15,7 @@ COPY server.py .
 COPY lib/ lib/
 COPY config/ config/
 COPY scripts/ scripts/
+COPY templates/ templates/
 # docker/init/ holds the install-time helper ensure_app_role.py that
 # the installer runs INSIDE this container (`compose run mcp python
 # docker/init/ensure_app_role.py`). Without it the install fails with
