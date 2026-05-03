@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Conflicts — NotNativeMemory{% endblock %}
+{% block content %}
+<h1>Memory Conflicts</h1>
+<p style="color:var(--muted-fg);font-size:0.9em;">
+  Pairs of memories that are semantically close but potentially
+  contradictory. Review each pair and decide which is authoritative.
+</p>
+
+<form class="filters" method="get" action="/conflicts"
+      hx-get="/conflicts" hx-target="#conflict-panel" hx-push-url="true"
+      hx-trigger="submit">
+  <div class="filter-row">
+    <label style="display:flex;gap:0.4em;align-items:center;margin:0;">
+      <input type="checkbox" name="include_resolved" value="1"
+             {% if include_resolved %}checked{% endif %}>
+      Include resolved conflicts
+    </label>
+    <button type="submit">Apply</button>
+    <a href="/conflicts" class="clear-link">clear</a>
+  </div>
+</form>
+
+<div id="conflict-panel">
+  {% include "_conflicts_list.html" %}
+</div>
+{% endblock %}

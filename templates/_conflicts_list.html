@@ -1,0 +1,18 @@
+{# Partial: conflict list. Rendered inside conflicts.html (full page)
+   or directly (HTMX in-place swap). #}
+<p>
+  {% if conflicts | length == 0 %}
+    No conflicts{% if not include_resolved %} (unresolved){% endif %}.
+  {% else %}
+    {{ conflicts | length }} conflict{{ 's' if conflicts | length != 1 else '' }}.
+  {% endif %}
+</p>
+
+<div id="conflict-list">
+  {% for c in conflicts %}
+    {% include "_conflict_row.html" %}
+  {% else %}
+    <p>No conflicts detected. Conflicts are flagged automatically when
+       new memories are stored that contradict existing ones.</p>
+  {% endfor %}
+</div>

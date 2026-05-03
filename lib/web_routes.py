@@ -1125,6 +1125,74 @@ def register_routes(mcp) -> None:
             return HTMLResponse("not found", status_code=404)
         return HTMLResponse("", status_code=200)
 
+    # -- Conflicts UI ---------------------------------------------------
+
+    @mcp.custom_route("/conflicts", methods=["GET"])
+    @require_login
+    async def conflicts_page(request: Request):
+        from lib import db
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        include_resolved = request.query_params.get("include_resolved") in ("1", "on", "true")
+
+        conflicts = await db.list_conflicts(
+            uid, include_resolved=include_resolved, limit=50,
+        )
+
+        template = (
+            "_conflicts_list.html"
+            if request.headers.get("hx-request")
+            else "conflicts.html"
+        )
+
+        return _render_with_csrf(
+            request, template,
+            conflicts=conflicts,
+            include_resolved=include_resolved,
+        )
+
+    @mcp.custom_route("/conflicts/{conflict_id}/resolve", methods=["POST"])
+    @require_login_csrf_xhr
+    async def conflict_resolve(request: Request):
+        from lib import db
+
+        uid = request.state.user_id
+        if isinstance(uid, str):
+            uid = UUID(uid)
+
+        try:
+            cid = UUID(request.path_params["conflict_id"])
+        except (ValueError, KeyError):
+            return HTMLResponse("invalid id", status_code=400)
+
+        form = await request.form()
+        resolution = form.get("resolution", "").strip()
+        valid = {"keep_both", "supersede_a", "supersede_b", "merged", "dismissed"}
+        if resolution not in valid:
+            return HTMLResponse("invalid resolution", status_code=400)
+
+        try:
+            ok = await db.resolve_conflict(cid, uid, resolution)
+        except ValueError:
+            return HTMLResponse("invalid resolution", status_code=400)
+
+        if not ok:
+            return HTMLResponse("not found or already resolved", status_code=404)
+
+        # Re-fetch the full conflict list entry to re-render the row
+        all_conflicts = await db.list_conflicts(uid, include_resolved=True, limit=100)
+        resolved_entry = next(
+            (c for c in all_conflicts if c["conflict_id"] == str(cid)), None
+        )
+        if resolved_entry:
+            env = templates.env
+            tmpl = env.get_template("_conflict_row.html")
+            return HTMLResponse(tmpl.render(c=resolved_entry, csrf_token=get_or_mint_csrf(request)[0]))
+        return HTMLResponse("resolved", status_code=200)
+
     # -- Token management ------------------------------------------------
 
     @mcp.custom_route("/tokens", methods=["GET"])

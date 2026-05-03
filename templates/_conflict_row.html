@@ -1,0 +1,61 @@
+<div class="memory" id="conflict-{{ c.conflict_id }}"
+     {% if c.resolved_at %}style="opacity:0.65;"{% endif %}>
+  <div style="display:flex;gap:0.5em;align-items:center;margin-bottom:0.5em;">
+    <span class="badge">similarity {{ '%.2f' % c.similarity }}</span>
+    <span style="color:var(--muted-fg);font-size:0.85em;">
+      detected {{ c.detected_at[:19].replace('T',' ') }}
+    </span>
+    {% if c.resolved_at %}
+      <span class="badge imp-low">{{ c.resolution }}</span>
+    {% else %}
+      <span class="badge" style="background:var(--warn-bg,#a63);color:#fff;">unresolved</span>
+    {% endif %}
+  </div>
+
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:1em;">
+    <div style="border:1px solid var(--border-strong);border-radius:3px;padding:0.75em;">
+      <div style="font-size:0.8em;color:var(--muted-fg);margin-bottom:0.3em;">
+        Memory A
+        {% if c.memory_a.class %}<span class="badge">{{ c.memory_a.class }}</span>{% endif %}
+        <span class="badge">{{ c.memory_a.importance }}</span>
+      </div>
+      <div style="font-family:ui-monospace,monospace;font-size:0.9em;">
+        {{ c.memory_a.content }}
+      </div>
+      <div style="font-size:0.75em;color:var(--muted-fg);margin-top:0.3em;">
+        {{ c.memory_a.id[:8] }}...
+      </div>
+    </div>
+    <div style="border:1px solid var(--border-strong);border-radius:3px;padding:0.75em;">
+      <div style="font-size:0.8em;color:var(--muted-fg);margin-bottom:0.3em;">
+        Memory B
+        {% if c.memory_b.class %}<span class="badge">{{ c.memory_b.class }}</span>{% endif %}
+        <span class="badge">{{ c.memory_b.importance }}</span>
+      </div>
+      <div style="font-family:ui-monospace,monospace;font-size:0.9em;">
+        {{ c.memory_b.content }}
+      </div>
+      <div style="font-size:0.75em;color:var(--muted-fg);margin-top:0.3em;">
+        {{ c.memory_b.id[:8] }}...
+      </div>
+    </div>
+  </div>
+
+  {% if not c.resolved_at %}
+  <form style="display:flex;gap:0.5em;margin-top:0.75em;flex-wrap:wrap;"
+        hx-post="/conflicts/{{ c.conflict_id }}/resolve"
+        hx-target="#conflict-{{ c.conflict_id }}"
+        hx-swap="outerHTML">
+    <input type="hidden" name="_csrf" value="{{ csrf_token }}">
+    <button type="submit" name="resolution" value="keep_both"
+            title="Both are valid, not actually contradictory">Keep both</button>
+    <button type="submit" name="resolution" value="supersede_a"
+            title="B is correct, A is outdated">B wins</button>
+    <button type="submit" name="resolution" value="supersede_b"
+            title="A is correct, B is outdated">A wins</button>
+    <button type="submit" name="resolution" value="dismissed"
+            title="Not important, dismiss this conflict"
+            class="secondary">Dismiss</button>
+  </form>
+  {% endif %}
+</div>
