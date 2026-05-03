@@ -72,11 +72,20 @@
   </div>
 </form>
 
+{% if memory.superseded_by %}
+<div style="margin-top:1.5em;padding:0.75em;border:1px solid var(--border-strong);border-radius:3px;background:var(--warn-bg,#332);">
+  <strong>Superseded</strong> by
+  <a href="/memories/{{ memory.superseded_by }}">{{ memory.superseded_by[:8] }}...</a>
+  <span style="color:var(--muted-fg);">(this memory no longer appears in search results)</span>
+</div>
+{% endif %}
+
 <div style="margin-top:2em;color:var(--muted-fg);font-size:0.9em;">
   <p><strong>Metadata</strong> (read-only):</p>
   <ul style="list-style:none;padding:0;">
     <li>ID: <code>{{ memory.id }}</code></li>
     <li>Scope: {{ memory.scope or '?' }} &middot; Project: {{ memory.project or '?' }}</li>
+    <li>Source: {{ memory.source_kind or 'unknown' }}{% if memory.source_session_id %} (session: {{ memory.source_session_id[:12] }}){% endif %}</li>
     <li>Temperature: {{ memory.temperature }}</li>
     <li>Access count: {{ memory.access_count }}</li>
     <li>Created: {{ memory.created_at[:19].replace('T',' ') }}</li>

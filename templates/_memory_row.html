@@ -1,4 +1,5 @@
-<div class="memory" id="memory-{{ m.id }}">
+<div class="memory" id="memory-{{ m.id }}"
+     {% if m.superseded_by %}style="opacity:0.6;"{% endif %}>
   <input type="checkbox" name="ids" value="{{ m.id }}" form="bulk-form"
          style="float:left;margin-right:0.5em;margin-top:0.2em;">
   <button
@@ -13,10 +14,13 @@
   </div>
   <div class="meta">
     <span class="badge imp-{{ m.importance }}">{{ m.importance }}</span>
+    {% if m.class %}<span class="badge">{{ m.class }}</span>{% endif %}
+    {% if m.superseded_by %}<span class="badge imp-low">superseded</span>{% endif %}
     {% if m.scope %}<span class="badge">{{ m.scope }}</span>{% endif %}
     {% if m.project and m.project != m.scope %}
       <span class="badge">{{ m.project }}</span>
     {% endif %}
+    {% if m.source_kind %}<span class="badge">{{ m.source_kind }}</span>{% endif %}
     {% if m.tags %}
       <span>tags: {{ m.tags | join(", ") }}</span>
     {% endif %}

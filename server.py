@@ -1087,6 +1087,60 @@ async def memory_resolve_conflict(
 
 
 @mcp.tool()
+@instrumented("memory_supersede")
+async def memory_supersede(
+    old_memory_id: str,
+    new_memory_id: str,
+) -> dict:
+    """
+    Explicitly mark one memory as superseded by another. The old memory
+    stops appearing in search and context results but remains in the
+    database for history.
+
+    WHEN to use:
+    - The user says "actually, we changed our mind" or "X is no longer
+      true, Y is true now" -- supersede X with Y.
+    - After storing a corrected memory, supersede the old incorrect one
+      rather than leaving both to confuse future retrievals.
+    - When resolving a conflict where one side is clearly outdated.
+
+    This is the intent-driven complement to conflict detection (which
+    is automatic). Use this when you KNOW which memory replaces which.
+
+    Any unresolved conflicts between the two memories are automatically
+    resolved as part of the supersede action.
+
+    Args:
+        old_memory_id: UUID of the memory being replaced.
+        new_memory_id: UUID of the memory that replaces it.
+    """
+    from lib.db import supersede_memory
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "superseded": False}
+
+    try:
+        old_uuid = UUID(old_memory_id)
+        new_uuid = UUID(new_memory_id)
+    except (ValueError, TypeError) as exc:
+        return {"error": f"invalid UUID: {exc}", "superseded": False}
+
+    try:
+        ok = await supersede_memory(old_uuid, new_uuid, owner)
+    except Exception as exc:
+        return _tool_error("memory_supersede", exc, {"superseded": False})
+
+    if not ok:
+        return {
+            "error": "not found, not owned, already superseded, or same ID",
+            "superseded": False,
+        }
+    return {"superseded": True, "old_id": old_memory_id, "new_id": new_memory_id}
+
+
+@mcp.tool()
 @instrumented("memory_update")
 async def memory_update(
     memory_id: str,

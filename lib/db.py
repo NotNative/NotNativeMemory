@@ -921,12 +921,13 @@ def _build_search_query(
             params.append(allowed)
             param_idx += 1
 
+    conditions.append("m.superseded_by IS NULL")
     where = "WHERE " + " AND ".join(conditions) if conditions else ""
     params.append(limit)
 
     sql = f"""
         SELECT m.id, m.content, m.tags, m.importance, m.class,
-               m.source_kind, m.source_session_id,
+               m.source_kind, m.source_session_id, m.superseded_by,
                m.temperature,
                m.created_at, m.last_accessed, m.access_count,
                m.project_id,
@@ -988,6 +989,7 @@ def _build_hybrid_memory_query(
     filters = [
         "m.project_id = ANY($2)",
         "m.owner_user_id = $3",
+        "m.superseded_by IS NULL",
     ]
     params: List[Any] = [
         str(query_embedding),
@@ -1047,7 +1049,7 @@ def _build_hybrid_memory_query(
               FULL OUTER JOIN text_ranked t USING (id)
         )
         SELECT m.id, m.content, m.tags, m.importance, m.class,
-               m.source_kind, m.source_session_id,
+               m.source_kind, m.source_session_id, m.superseded_by,
                m.temperature,
                m.created_at, m.last_accessed, m.access_count,
                m.project_id,
@@ -1098,6 +1100,7 @@ def _format_memory_row(row: Any) -> Dict[str, Any]:
         "class": row["class"] if "class" in row.keys() else None,
         "source_kind": row["source_kind"] if "source_kind" in row.keys() else None,
         "source_session_id": row["source_session_id"] if "source_session_id" in row.keys() else None,
+        "superseded_by": str(row["superseded_by"]) if "superseded_by" in row.keys() and row["superseded_by"] else None,
         "created_at": row["created_at"].isoformat(),
         "last_accessed": row["last_accessed"].isoformat(),
         "access_count": row["access_count"],
@@ -1233,7 +1236,7 @@ async def admin_get_memory(
     async with rls.app_conn(pool, owner_user_id) as conn:
         row = await conn.fetchrow(
             """SELECT m.id, m.content, m.tags, m.importance, m.class,
-                      m.source_kind, m.source_session_id,
+                      m.source_kind, m.source_session_id, m.superseded_by,
                       m.temperature,
                       m.created_at, m.last_accessed, m.access_count,
                       m.project_id,
@@ -1668,7 +1671,7 @@ async def admin_list_memories(
 
         rows = await conn.fetch(
             f"""SELECT m.id, m.content, m.tags, m.importance, m.class,
-                       m.source_kind, m.source_session_id,
+                       m.source_kind, m.source_session_id, m.superseded_by,
                        m.temperature,
                        m.created_at, m.last_accessed, m.access_count,
                        m.project_id,
@@ -1794,7 +1797,7 @@ async def get_context_memories(
     async with rls.app_conn(pool, owner_user_id) as conn:
         rows = await conn.fetch(
             f"""SELECT m.id, m.content, m.tags, m.importance, m.class,
-                      m.source_kind, m.source_session_id,
+                      m.source_kind, m.source_session_id, m.superseded_by,
                       m.temperature,
                       m.created_at, m.last_accessed, m.access_count,
                       m.project_id,
@@ -1804,6 +1807,7 @@ async def get_context_memories(
                JOIN projects p ON p.id = m.project_id
                WHERE m.project_id = ANY($1)
                  AND m.owner_user_id = $2
+                 AND m.superseded_by IS NULL
                ORDER BY
                    {_importance_rank_sql('m.importance')} DESC,
                    m.temperature DESC,
@@ -1961,6 +1965,63 @@ async def get_conflicts_for_memory(
         }
         for r in rows
     ]
+
+
+async def supersede_memory(
+    old_memory_id: UUID,
+    new_memory_id: UUID,
+    owner_user_id: UUID,
+) -> bool:
+    """
+    Mark old_memory as superseded by new_memory. The old memory stops
+    appearing in search/context results but remains in the DB for
+    audit. Also auto-resolves any unresolved conflicts between the two.
+    Returns True if the update succeeded.
+    """
+    if old_memory_id == new_memory_id:
+        return False
+
+    from lib import rls
+    pool = await get_pool()
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        # Verify both exist and belong to caller
+        check = await conn.fetchrow(
+            """SELECT
+                   (SELECT COUNT(*) FROM memories
+                    WHERE id = $1 AND owner_user_id = $3 AND superseded_by IS NULL) AS old_ok,
+                   (SELECT COUNT(*) FROM memories
+                    WHERE id = $2 AND owner_user_id = $3) AS new_ok""",
+            old_memory_id, new_memory_id, owner_user_id,
+        )
+        if check["old_ok"] == 0 or check["new_ok"] == 0:
+            return False
+
+        result = await conn.execute(
+            """UPDATE memories SET superseded_by = $2
+               WHERE id = $1 AND owner_user_id = $3
+                 AND superseded_by IS NULL""",
+            old_memory_id, new_memory_id, owner_user_id,
+        )
+        if result != "UPDATE 1":
+            return False
+
+        # Auto-resolve any conflicts between these two memories
+        a, b = sorted([old_memory_id, new_memory_id])
+        await conn.execute(
+            """UPDATE memory_conflicts
+               SET resolved_at = now(),
+                   resolution = CASE
+                       WHEN memory_id_a = $1 THEN 'supersede_a'
+                       ELSE 'supersede_b'
+                   END
+               WHERE owner_user_id = $3
+                 AND resolved_at IS NULL
+                 AND ((memory_id_a = $1 AND memory_id_b = $2)
+                   OR (memory_id_a = $2 AND memory_id_b = $1))""",
+            old_memory_id, new_memory_id, owner_user_id,
+        )
+
+    return True
 
 
 async def get_health_stats(

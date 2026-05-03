@@ -47,6 +47,7 @@ CREATE TABLE IF NOT EXISTS memories (
     source_kind TEXT
         CHECK (source_kind IS NULL OR source_kind IN ('user-stated', 'tool-result', 'model-inferred')),
     source_session_id TEXT,
+    superseded_by UUID,
     temperature FLOAT DEFAULT 70.0,
     created_at TIMESTAMPTZ DEFAULT now(),
     last_accessed TIMESTAMPTZ DEFAULT now(),
@@ -88,6 +89,11 @@ CREATE INDEX IF NOT EXISTS idx_memories_class
 CREATE INDEX IF NOT EXISTS idx_memories_source_kind
     ON memories (source_kind)
     WHERE source_kind IS NOT NULL;
+
+-- Supersede tracking
+CREATE INDEX IF NOT EXISTS idx_memories_superseded_by
+    ON memories (superseded_by)
+    WHERE superseded_by IS NOT NULL;
 
 -- Temperature-based eviction (find coldest memories per project)
 CREATE INDEX IF NOT EXISTS idx_memories_temperature
