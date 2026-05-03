@@ -1141,6 +1141,106 @@ async def memory_supersede(
 
 
 @mcp.tool()
+@instrumented("memory_promotion_candidates")
+async def memory_promotion_candidates(
+    min_access_count: int = 3,
+    limit: int = 20,
+) -> dict:
+    """
+    Find memories that are accessed like rules or preferences but
+    haven't been classified yet. These are promotion candidates --
+    observations that have proven their value through repeated access.
+
+    WHEN to use:
+    - Periodic maintenance: check if frequently-accessed memories
+      should be hardened into rules or preferences.
+    - After the user says "you keep bringing this up" or "this is
+      always true" -- find the memory and promote it.
+    - When memory_health shows many unclassified entries with high
+      access counts.
+
+    The suggested_class field is a heuristic:
+    - 6+ accesses -> suggests "rule" (likely a hard invariant)
+    - 3-5 accesses -> suggests "preference" (soft but stable)
+
+    The user makes the final call. Present candidates and ask.
+
+    Args:
+        min_access_count: Minimum accesses to qualify (default 3).
+        limit: Max candidates to return (default 20).
+    """
+    from lib.db import get_promotion_candidates
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "candidates": [], "count": 0}
+
+    try:
+        results = await get_promotion_candidates(
+            owner, min_access_count=min_access_count, limit=limit,
+        )
+    except Exception as exc:
+        return _tool_error("memory_promotion_candidates", exc,
+                           {"candidates": [], "count": 0})
+
+    return {"candidates": results, "count": len(results)}
+
+
+@mcp.tool()
+@instrumented("memory_promote")
+async def memory_promote(
+    memory_id: str,
+    new_class: str,
+) -> dict:
+    """
+    Promote a memory to a higher classification tier. Only allows
+    upward movement: unclassified/memory -> preference -> rule.
+
+    WHEN to use:
+    - After reviewing promotion candidates and confirming with the
+      user which ones should be hardened.
+    - When the user explicitly says "that's a rule" or "always do
+      that" about a stored memory.
+
+    Promotion effects:
+    - "preference": memory won't decay thermally, stays accessible.
+    - "rule": memory never decays, never gets evicted, surfaces in
+      every relevant context load.
+
+    Args:
+        memory_id: UUID of the memory to promote.
+        new_class: Target class -- "preference" or "rule".
+    """
+    from lib.db import promote_memory
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "promoted": False}
+
+    if new_class not in ("preference", "rule"):
+        return {"error": "new_class must be 'preference' or 'rule'", "promoted": False}
+
+    try:
+        mem_uuid = UUID(memory_id)
+    except (ValueError, TypeError):
+        return {"error": f"invalid memory_id: {memory_id!r}", "promoted": False}
+
+    try:
+        ok = await promote_memory(mem_uuid, owner, new_class)
+    except Exception as exc:
+        return _tool_error("memory_promote", exc, {"promoted": False})
+
+    if not ok:
+        return {
+            "error": "not found, not owned, already at or above target class, or superseded",
+            "promoted": False,
+        }
+    return {"promoted": True, "id": memory_id, "new_class": new_class}
+
+
+@mcp.tool()
 @instrumented("memory_update")
 async def memory_update(
     memory_id: str,

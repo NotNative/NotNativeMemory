@@ -2024,6 +2024,89 @@ async def supersede_memory(
     return True
 
 
+async def get_promotion_candidates(
+    owner_user_id: UUID,
+    min_access_count: int = 3,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """
+    Find memories that behave like rules or preferences but aren't
+    classified as such. Candidates are memories that:
+    - Have been accessed multiple times (suggesting repeated relevance)
+    - Are not already classified as rule or preference
+    - Are not superseded
+    Ordered by access_count descending (most-accessed first).
+    """
+    from lib import rls
+    pool = await get_pool()
+
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(
+            """SELECT m.id, m.content, m.tags, m.importance, m.class,
+                      m.access_count, m.temperature, m.created_at,
+                      p.scope AS project_scope, p.name AS project_name
+               FROM memories m
+               JOIN projects p ON p.id = m.project_id
+               WHERE m.owner_user_id = $1
+                 AND m.superseded_by IS NULL
+                 AND (m.class IS NULL OR m.class = 'memory')
+                 AND m.access_count >= $2
+               ORDER BY m.access_count DESC, m.temperature DESC
+               LIMIT $3""",
+            owner_user_id, min_access_count, limit,
+        )
+
+    results = []
+    for r in rows:
+        suggested = "rule" if r["access_count"] >= 6 else "preference"
+        results.append({
+            "id": str(r["id"]),
+            "content": r["content"],
+            "tags": r["tags"],
+            "importance": r["importance"],
+            "current_class": r["class"],
+            "access_count": r["access_count"],
+            "temperature": round(float(r["temperature"]), 1),
+            "created_at": r["created_at"].isoformat(),
+            "scope": r["project_scope"],
+            "project": r["project_name"],
+            "suggested_class": suggested,
+        })
+    return results
+
+
+async def promote_memory(
+    memory_id: UUID,
+    owner_user_id: UUID,
+    new_class: str,
+) -> bool:
+    """
+    Promote a memory to a higher class. Only allows upward movement:
+    unclassified/memory -> preference -> rule.
+    Returns True if promoted, False if not found/not owned/invalid.
+    """
+    if new_class not in ("preference", "rule"):
+        return False
+
+    from lib import rls
+    pool = await get_pool()
+
+    # Only promote if current class is below the target
+    allowed_current = ["memory"]
+    if new_class == "rule":
+        allowed_current.append("preference")
+
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        result = await conn.execute(
+            """UPDATE memories SET class = $3
+               WHERE id = $1 AND owner_user_id = $2
+                 AND superseded_by IS NULL
+                 AND (class IS NULL OR class = ANY($4))""",
+            memory_id, owner_user_id, new_class, allowed_current,
+        )
+    return result == "UPDATE 1"
+
+
 async def get_health_stats(
     owner_user_id: UUID,
     project_id: Optional[UUID] = None,
