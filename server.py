@@ -529,6 +529,15 @@ async def memory_search(
             hybrid=hybrid,
             query_text=query,
         )
+        # Annotate results with conflict flags
+        if results:
+            from lib.db import get_conflicts_for_memory
+            for r in results:
+                conflicts = await get_conflicts_for_memory(
+                    UUID(r["id"]), owner,
+                )
+                if conflicts:
+                    r["conflicts"] = conflicts
     except Exception as exc:
         return _tool_error("memory_search", exc,
                            {"results": [], "count": 0})
@@ -987,6 +996,94 @@ async def memory_health(
         return _tool_error("memory_health", exc, {})
 
     return stats
+
+
+@mcp.tool()
+@instrumented("memory_conflicts")
+async def memory_conflicts(
+    include_resolved: bool = False,
+    limit: int = 20,
+) -> dict:
+    """
+    List detected memory conflicts -- pairs of memories that are
+    semantically close but potentially contradictory.
+
+    WHEN to use:
+    - After memory_health shows unresolved conflicts.
+    - When you suspect stale/contradictory info and want to surface it.
+    - Periodic maintenance to keep the memory store clean.
+
+    Each conflict shows both memory contents side by side with their
+    similarity score so you (or the user) can decide which is current.
+
+    Args:
+        include_resolved: If true, also return already-resolved conflicts.
+        limit: Max number of conflicts to return (default 20).
+    """
+    from lib.db import list_conflicts
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "conflicts": [], "count": 0}
+
+    try:
+        results = await list_conflicts(
+            owner, include_resolved=include_resolved, limit=limit,
+        )
+    except Exception as exc:
+        return _tool_error("memory_conflicts", exc, {"conflicts": [], "count": 0})
+
+    return {"conflicts": results, "count": len(results)}
+
+
+@mcp.tool()
+@instrumented("memory_resolve_conflict")
+async def memory_resolve_conflict(
+    conflict_id: str,
+    resolution: str,
+) -> dict:
+    """
+    Resolve a detected memory conflict.
+
+    WHEN to use:
+    - After reviewing conflicts via memory_conflicts, apply the user's
+      decision about which memory is authoritative.
+
+    Resolutions:
+    - "keep_both": not actually contradictory, both are valid.
+    - "supersede_a": memory B is newer/correct, A is outdated.
+    - "supersede_b": memory A is newer/correct, B is outdated.
+    - "merged": you manually merged the content into one memory.
+    - "dismissed": user doesn't care about this conflict.
+
+    Args:
+        conflict_id: UUID of the conflict to resolve.
+        resolution: One of keep_both, supersede_a, supersede_b,
+            merged, dismissed.
+    """
+    from lib.db import resolve_conflict
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "resolved": False}
+
+    try:
+        cid = UUID(conflict_id)
+    except (ValueError, TypeError):
+        return {"error": f"invalid conflict_id: {conflict_id!r}", "resolved": False}
+
+    try:
+        ok = await resolve_conflict(cid, owner, resolution)
+    except ValueError as exc:
+        return {"error": str(exc), "resolved": False}
+    except Exception as exc:
+        return _tool_error("memory_resolve_conflict", exc, {"resolved": False})
+
+    if not ok:
+        return {"error": "conflict not found or already resolved", "resolved": False}
+    return {"resolved": True, "conflict_id": conflict_id, "resolution": resolution}
 
 
 @mcp.tool()

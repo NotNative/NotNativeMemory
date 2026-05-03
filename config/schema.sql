@@ -111,6 +111,30 @@ CREATE TABLE IF NOT EXISTS decay_stats (
 CREATE INDEX IF NOT EXISTS idx_decay_stats_project_time
     ON decay_stats (project_id, recorded_at DESC);
 
+-- Memory conflicts: tracks detected contradictions between memories
+CREATE TABLE IF NOT EXISTS memory_conflicts (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    memory_id_a UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    memory_id_b UUID NOT NULL REFERENCES memories(id) ON DELETE CASCADE,
+    similarity FLOAT NOT NULL,
+    detected_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    resolved_at TIMESTAMPTZ,
+    resolution TEXT
+        CHECK (resolution IS NULL OR resolution IN ('keep_both', 'supersede_a', 'supersede_b', 'merged', 'dismissed')),
+    owner_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    CONSTRAINT memory_conflicts_pair_unique UNIQUE (memory_id_a, memory_id_b)
+);
+
+CREATE INDEX IF NOT EXISTS idx_memory_conflicts_unresolved
+    ON memory_conflicts (owner_user_id, resolved_at)
+    WHERE resolved_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS idx_memory_conflicts_memory_a
+    ON memory_conflicts (memory_id_a);
+
+CREATE INDEX IF NOT EXISTS idx_memory_conflicts_memory_b
+    ON memory_conflicts (memory_id_b);
+
 -- Migration tracking: records which migration files have been applied.
 -- The migration runner creates this table itself if missing, so this
 -- definition is only needed for fresh installs via docker-entrypoint.
@@ -295,6 +319,17 @@ CREATE POLICY auth_tokens_owner_rls ON auth_tokens
         OR user_id::text = current_setting('app.current_user', true)
     );
 
+DROP POLICY IF EXISTS memory_conflicts_owner_rls ON memory_conflicts;
+CREATE POLICY memory_conflicts_owner_rls ON memory_conflicts
+    USING (
+        current_setting('app.current_user', true) = 'admin'
+        OR owner_user_id::text = current_setting('app.current_user', true)
+    )
+    WITH CHECK (
+        current_setting('app.current_user', true) = 'admin'
+        OR owner_user_id::text = current_setting('app.current_user', true)
+    );
+
 -- Enable and FORCE the policies. Inert for superuser connections
 -- (which always bypass), enforced for non-superuser app roles.
 ALTER TABLE memories    ENABLE ROW LEVEL SECURITY;
@@ -305,3 +340,5 @@ ALTER TABLE projects    ENABLE ROW LEVEL SECURITY;
 ALTER TABLE projects    FORCE ROW LEVEL SECURITY;
 ALTER TABLE auth_tokens ENABLE ROW LEVEL SECURITY;
 ALTER TABLE auth_tokens FORCE ROW LEVEL SECURITY;
+ALTER TABLE memory_conflicts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE memory_conflicts FORCE ROW LEVEL SECURITY;

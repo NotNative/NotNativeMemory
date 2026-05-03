@@ -89,6 +89,8 @@ PROJECT_MEMORY_CAP = 500
 # Deduplication: cosine similarity threshold above which a memory is
 # considered a duplicate of an existing one
 DEDUP_SIMILARITY_THRESHOLD = 0.92
+CONFLICT_SIMILARITY_LOW = 0.75
+CONFLICT_SIMILARITY_HIGH = 0.91
 
 # Importance weights for search result scoring
 _IMPORTANCE_WEIGHT = {
@@ -574,6 +576,47 @@ async def _find_duplicate(
     return None
 
 
+async def _detect_conflicts(
+    conn: asyncpg.Connection,
+    new_memory_id: UUID,
+    embedding: List[float],
+    project_id: UUID,
+    owner_user_id: UUID,
+) -> int:
+    """
+    Scan for memories in the conflict band (0.75-0.91 similarity) and
+    record them in memory_conflicts. Returns count of new conflicts found.
+    """
+    rows = await conn.fetch(
+        """SELECT id, 1 - (embedding <=> $1::vector) AS similarity
+           FROM memories
+           WHERE project_id = $2
+             AND id != $3
+             AND 1 - (embedding <=> $1::vector) >= $4
+             AND 1 - (embedding <=> $1::vector) < $5
+           ORDER BY embedding <=> $1::vector ASC
+           LIMIT 5""",
+        str(embedding), project_id, new_memory_id,
+        CONFLICT_SIMILARITY_LOW, CONFLICT_SIMILARITY_HIGH,
+    )
+    count = 0
+    for row in rows:
+        a, b = sorted([new_memory_id, row["id"]])
+        result = await conn.execute(
+            """INSERT INTO memory_conflicts
+                   (memory_id_a, memory_id_b, similarity, owner_user_id)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (memory_id_a, memory_id_b) DO NOTHING""",
+            a, b, float(row["similarity"]), owner_user_id,
+        )
+        if result == "INSERT 1":
+            count += 1
+    if count:
+        _log.info("Conflict detection: %d potential conflict(s) for memory %s",
+                  count, new_memory_id)
+    return count
+
+
 async def _merge_duplicate(
     conn: asyncpg.Connection,
     existing_id: UUID,
@@ -812,6 +855,11 @@ async def store_memory(
             project_id, content.strip(), str(embedding),
             clean_tags, importance, memory_class, TEMP_INITIAL,
             owner_user_id, source_kind, source_session_id,
+        )
+
+        # Conflict detection: flag near-matches in the 0.75-0.91 band
+        await _detect_conflicts(
+            conn, row["id"], embedding, project_id, owner_user_id,
         )
 
         # Displacement cooling: storing new knowledge pressures existing
@@ -1791,6 +1839,130 @@ async def get_context_memories(
     return result
 
 
+async def list_conflicts(
+    owner_user_id: UUID,
+    *,
+    include_resolved: bool = False,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """
+    Return memory conflicts for the user. By default only unresolved.
+    Each entry includes both memory contents for easy comparison.
+    """
+    from lib import rls
+    pool = await get_pool()
+
+    resolved_filter = "" if include_resolved else "AND mc.resolved_at IS NULL"
+
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(
+            f"""SELECT mc.id, mc.similarity, mc.detected_at, mc.resolved_at,
+                       mc.resolution,
+                       ma.id AS a_id, ma.content AS a_content,
+                       ma.importance AS a_importance, ma.class AS a_class,
+                       mb.id AS b_id, mb.content AS b_content,
+                       mb.importance AS b_importance, mb.class AS b_class
+                FROM memory_conflicts mc
+                JOIN memories ma ON ma.id = mc.memory_id_a
+                JOIN memories mb ON mb.id = mc.memory_id_b
+                WHERE mc.owner_user_id = $1
+                  {resolved_filter}
+                ORDER BY mc.detected_at DESC
+                LIMIT $2""",
+            owner_user_id, limit,
+        )
+
+    return [
+        {
+            "conflict_id": str(r["id"]),
+            "similarity": round(float(r["similarity"]), 4),
+            "detected_at": r["detected_at"].isoformat(),
+            "resolved_at": r["resolved_at"].isoformat() if r["resolved_at"] else None,
+            "resolution": r["resolution"],
+            "memory_a": {
+                "id": str(r["a_id"]),
+                "content": r["a_content"],
+                "importance": r["a_importance"],
+                "class": r["a_class"],
+            },
+            "memory_b": {
+                "id": str(r["b_id"]),
+                "content": r["b_content"],
+                "importance": r["b_importance"],
+                "class": r["b_class"],
+            },
+        }
+        for r in rows
+    ]
+
+
+async def resolve_conflict(
+    conflict_id: UUID,
+    owner_user_id: UUID,
+    resolution: str,
+) -> bool:
+    """
+    Resolve a conflict. Valid resolutions:
+    - keep_both: both are valid, not actually contradictory
+    - supersede_a: memory_b replaces memory_a (a is outdated)
+    - supersede_b: memory_a replaces memory_b (b is outdated)
+    - merged: user merged them manually
+    - dismissed: user doesn't care
+    Returns True if resolved, False if not found/not owned.
+    """
+    valid = {"keep_both", "supersede_a", "supersede_b", "merged", "dismissed"}
+    if resolution not in valid:
+        raise ValueError(f"Invalid resolution: {resolution}")
+
+    from lib import rls
+    pool = await get_pool()
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        result = await conn.execute(
+            """UPDATE memory_conflicts
+               SET resolved_at = now(), resolution = $3
+               WHERE id = $1 AND owner_user_id = $2
+                 AND resolved_at IS NULL""",
+            conflict_id, owner_user_id, resolution,
+        )
+    return result == "UPDATE 1"
+
+
+async def get_conflicts_for_memory(
+    memory_id: UUID,
+    owner_user_id: UUID,
+) -> List[Dict[str, Any]]:
+    """
+    Return unresolved conflicts involving a specific memory.
+    Used to annotate search results.
+    """
+    from lib import rls
+    pool = await get_pool()
+
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(
+            """SELECT mc.id AS conflict_id, mc.similarity,
+                      CASE WHEN mc.memory_id_a = $1 THEN mb.id ELSE ma.id END AS other_id,
+                      CASE WHEN mc.memory_id_a = $1 THEN mb.content ELSE ma.content END AS other_content
+               FROM memory_conflicts mc
+               JOIN memories ma ON ma.id = mc.memory_id_a
+               JOIN memories mb ON mb.id = mc.memory_id_b
+               WHERE mc.owner_user_id = $2
+                 AND mc.resolved_at IS NULL
+                 AND (mc.memory_id_a = $1 OR mc.memory_id_b = $1)""",
+            memory_id, owner_user_id,
+        )
+
+    return [
+        {
+            "conflict_id": str(r["conflict_id"]),
+            "similarity": round(float(r["similarity"]), 4),
+            "other_id": str(r["other_id"]),
+            "other_content": r["other_content"],
+        }
+        for r in rows
+    ]
+
+
 async def get_health_stats(
     owner_user_id: UUID,
     project_id: Optional[UUID] = None,
@@ -1848,6 +2020,15 @@ async def get_health_stats(
             *params,
         )
 
+        conflict_stats = await conn.fetchrow(
+            """SELECT
+                    COUNT(*) AS total_conflicts,
+                    COUNT(*) FILTER (WHERE resolved_at IS NULL) AS unresolved
+                FROM memory_conflicts
+                WHERE owner_user_id = $1""",
+            owner_user_id,
+        )
+
     return {
         "total_memories": totals["total"],
         "by_class": {
@@ -1879,6 +2060,10 @@ async def get_health_stats(
             "total": fact_stats["total_facts"],
             "current": fact_stats["current_facts"],
             "superseded": fact_stats["superseded_facts"],
+        },
+        "conflicts": {
+            "total": conflict_stats["total_conflicts"],
+            "unresolved": conflict_stats["unresolved"],
         },
     }
 
