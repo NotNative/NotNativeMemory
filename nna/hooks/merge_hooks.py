@@ -66,7 +66,13 @@ def _write_hooks_env(target_dir: str, mcp_url: str) -> None:
         "MEMORY_EXTRACT_TEMP=0.1\n"
         "MEMORY_EXTRACT_MAX_RESULTS=5\n"
         "MEMORY_EXTRACT_TIMEOUT=10\n"
+        "# Output budget for the analyzer LLM. 16000 lets reasoning models\n"
+        "# (Qwen3-think, DeepSeek-R1, etc.) burn tokens on hidden CoT and\n"
+        "# still emit the final JSON. Lower this for cost-sensitive cloud setups.\n"
+        "MEMORY_EXTRACT_MAX_TOKENS=16000\n"
         "# MEMORY_EXTRACT_LLM_URL=http://localhost:9500/v1/chat/completions  # Optional LLM endpoint\n"
+        "\n# PromiseDetector (promise_detector.py — tool.call:post accountability)\n"
+        "MEMORY_PROMISE_TTL=1800\n"
     )
     with open(env_file, "w", encoding="utf-8") as f:
         f.write(env_content)
@@ -114,6 +120,13 @@ def _write_manifest(target_dir: str) -> None:
                 "blocking": False,
                 "timeout_ms": 15000,
             },
+            {
+                "event": "tool.call",
+                "phase": "post",
+                "command": "python promise_detector.py",
+                "blocking": False,
+                "timeout_ms": 5000,
+            },
         ],
     }
     manifest_file = os.path.join(target_dir, "manifest.json")
@@ -128,6 +141,7 @@ _SCRIPTS = [
     "session_start.py",
     "compact_guard.py",
     "turn_analysis.py",
+    "promise_detector.py",
 ]
 
 # Files to remove from the target during install (clean up after renames).

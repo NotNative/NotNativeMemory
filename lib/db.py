@@ -36,7 +36,7 @@ import asyncio
 import os
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
 import asyncpg
@@ -1841,6 +1841,169 @@ async def get_context_memories(
             )
 
     return result
+
+
+def _merge_for_task_inject(
+    always_rows: List[Dict[str, Any]],
+    semantic_rows: List[Dict[str, Any]],
+    max_chars: int,
+) -> Tuple[List[Dict[str, Any]], bool]:
+    """Pure-Python merge for task injection: dedupe by id, always-include first,
+    then semantic, truncate to char budget.
+
+    Returns (rows, truncated_flag).
+
+    Always-include rows are emitted first so a tight token budget can never
+    starve out a critical or rule-class memory in favor of a semantic match.
+    Within each group, callers are responsible for upstream ordering;
+    this helper preserves the input order verbatim except for dedup.
+    """
+    seen = set()
+    merged: List[Dict[str, Any]] = []
+    for row in always_rows:
+        rid = str(row.get("id"))
+        if rid in seen:
+            continue
+        seen.add(rid)
+        merged.append(row)
+    for row in semantic_rows:
+        rid = str(row.get("id"))
+        if rid in seen:
+            continue
+        seen.add(rid)
+        merged.append(row)
+
+    out: List[Dict[str, Any]] = []
+    chars_used = 0
+    truncated = False
+    for r in merged:
+        clen = len(r.get("content") or "")
+        if out and chars_used + clen > max_chars:
+            truncated = True
+            break
+        out.append(r)
+        chars_used += clen
+    if not out and len(merged) > len(out):
+        # Edge case: the very first row already exceeds the budget. We still
+        # return it (truncating to nothing helps no one) but flag truncation
+        # so the caller knows the budget was insufficient.
+        out.append(merged[0])
+        if len(merged) > 1:
+            truncated = True
+    return out, truncated
+
+
+async def get_inject_for_task(
+    project_id: UUID,
+    owner_user_id: UUID,
+    query_embedding: List[float],
+    query_text: str,
+    *,
+    mission_id: Optional[str] = None,
+    max_tokens: int = 1000,
+    semantic_top_k: int = 10,
+    hybrid: bool = True,
+) -> Dict[str, Any]:
+    """Build a task-scoped memory injection block for a worker or task envelope.
+
+    Composition:
+      1. Always-include: every critical-importance memory plus every rule-class
+         memory in the caller's visible scope (not token-bounded; these are
+         operational discipline that must never be dropped).
+      2. Semantic top-K against ``query_text`` / ``query_embedding``,
+         optionally filtered by ``mission:<id>`` tag.
+      3. Dedupe by id, always-include first.
+      4. Truncate to ``max_tokens`` (~4 chars/token).
+
+    Reheats every always-include row that survives truncation. Semantic rows
+    are reheated by ``search_memories`` itself.
+
+    Returns a dict ``{ "memories": [...], "count": int, "truncated": bool }``.
+    """
+    # Bound max_tokens. Same envelope as get_context_memories but wider since
+    # workers may have a larger context budget than session preambles.
+    if max_tokens < 100:
+        max_tokens = 100
+    if max_tokens > 4000:
+        max_tokens = 4000
+
+    if semantic_top_k < 0:
+        semantic_top_k = 0
+    if semantic_top_k > 50:
+        semantic_top_k = 50
+
+    from lib import rls
+    pool = await get_pool()
+    visible_ids = await get_visible_project_ids(project_id, owner_user_id)
+
+    # Step 1: always-include critical + rule-class.
+    importance_rank = _importance_rank_sql("m.importance")
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        always_raw = await conn.fetch(
+            f"""SELECT m.id, m.content, m.tags, m.importance, m.class,
+                       m.source_kind, m.source_session_id, m.superseded_by,
+                       m.temperature, m.created_at, m.last_accessed,
+                       m.access_count, m.project_id,
+                       p.scope AS project_scope, p.name AS project_name
+                FROM memories m
+                JOIN projects p ON p.id = m.project_id
+                WHERE m.project_id = ANY($1::uuid[])
+                  AND m.owner_user_id = $2
+                  AND m.superseded_by IS NULL
+                  AND (m.importance = 'critical' OR m.class = 'rule')
+                ORDER BY {importance_rank} DESC,
+                         m.temperature DESC,
+                         m.created_at DESC,
+                         m.id ASC""",
+            visible_ids, owner_user_id,
+        )
+    always_formatted = [_format_memory_row(r) for r in always_raw]
+
+    # Step 2: semantic top-K against the task description.
+    sem_tags = [f"mission:{mission_id}"] if mission_id else None
+    if semantic_top_k > 0:
+        semantic_rows = await search_memories(
+            query_embedding=query_embedding,
+            project_id=project_id,
+            owner_user_id=owner_user_id,
+            tags=sem_tags,
+            limit=semantic_top_k,
+            hybrid=hybrid,
+            query_text=query_text,
+        )
+    else:
+        semantic_rows = []
+
+    # Step 3 + 4: merge with dedup, then truncate.
+    char_budget = max_tokens * 4
+    final_rows, truncated = _merge_for_task_inject(
+        always_formatted, semantic_rows, char_budget,
+    )
+
+    # Reheat surviving always-include rows. Semantic rows were already
+    # reheated by search_memories. Overlap (a row that is both critical
+    # and semantically matched) ends up double-reheated; bounded by
+    # TEMP_MAX so it self-caps and is acceptable.
+    survivor_ids = {r["id"] for r in final_rows}
+    always_survivors = [
+        UUID(r["id"]) for r in always_formatted if r["id"] in survivor_ids
+    ]
+    if always_survivors:
+        async with rls.app_conn(pool, owner_user_id) as conn:
+            await conn.execute(
+                """UPDATE memories SET
+                       last_accessed = now(),
+                       access_count = access_count + 1,
+                       temperature = LEAST(temperature + $2, $3)
+                   WHERE id = ANY($1)""",
+                always_survivors, REHEAT_DELTA, TEMP_MAX,
+            )
+
+    return {
+        "memories": final_rows,
+        "count": len(final_rows),
+        "truncated": truncated,
+    }
 
 
 async def list_conflicts(

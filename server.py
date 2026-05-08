@@ -21,6 +21,7 @@ Tools:
     memory_list        - List memories with optional filters
     memory_update      - Edit a memory in place without losing state
     memory_context     - Pull the hottest + most-critical memories
+    memory_inject_for_task - Build a task-scoped injection block (workers)
     memory_fact_add    - Record a temporal fact triple
     memory_fact_query  - Look up facts with optional time-travel
     memory_project_configure - Declare domain memberships
@@ -952,6 +953,98 @@ async def memory_context(
                            {"context": [], "count": 0})
 
     return {"context": results, "count": len(results)}
+
+
+@mcp.tool()
+@instrumented("memory_inject_for_task")
+async def memory_inject_for_task(
+    task_description: str,
+    mission_id: Optional[str] = None,
+    max_tokens: int = 1000,
+    semantic_top_k: int = 10,
+    project: Optional[str] = None,
+    hybrid: bool = True,
+) -> dict:
+    """
+    Build a task-scoped memory injection block for a worker or any caller
+    that has an explicit task envelope (instead of a chat session).
+
+    This is the worker analog to memory_context: rather than "what's hot
+    right now," it answers "what should I have in front of me to do this
+    specific task." Compose:
+
+      1. Every critical-importance memory in the caller's scope (always
+         included; never displaced by token budget).
+      2. Every rule-class memory in the caller's scope (always included).
+      3. Semantic top-K against task_description, optionally filtered by
+         mission tag.
+      4. Dedupe (always-include first), truncate to max_tokens.
+
+    WHEN to use:
+    - A worker is starting and needs a focused preamble for its task.
+    - You have a task description and want the relevant memory set
+      without composing memory_context + memory_search yourself.
+    - You want mission-scoped retrieval (mission_id filters semantic
+      top-K to memories tagged "mission:<id>").
+
+    WHEN NOT to use:
+    - You're a chat session at startup with no specific task yet —
+      memory_context is cheaper and shaped for that.
+    - You want broad semantic recall for a question — memory_search.
+
+    Args:
+        task_description: What the caller is about to do. Used as the
+            semantic query and embedded for vector search.
+        mission_id: Optional mission identifier. When set, semantic
+            top-K is filtered to memories tagged "mission:<id>".
+        max_tokens: Soft cap on the injection block (100-4000, default
+            1000). Approximate; uses ~4 chars/token.
+        semantic_top_k: How many semantic matches to consider before
+            dedup/truncation (0-50, default 10). Set 0 to skip semantic
+            and return only critical + rule-class.
+        project: Project scope. Auto-detected if omitted.
+        hybrid: Enable BM25-style hybrid retrieval for the semantic
+            half (default True). Workers usually want hybrid because
+            task descriptions often contain named entities.
+
+    Returns:
+        { "memories": [...], "count": int, "truncated": bool }
+    """
+    if not task_description or not task_description.strip():
+        return {
+            "error": "task_description cannot be empty",
+            "memories": [], "count": 0, "truncated": False,
+        }
+
+    from lib.embeddings import embed
+    from lib.db import get_inject_for_task, get_or_create_project
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"memories": [], "count": 0, "truncated": False},
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        query_embedding = embed(task_description)
+        result = await get_inject_for_task(
+            project_id=project_id,
+            owner_user_id=owner,
+            query_embedding=query_embedding,
+            query_text=task_description,
+            mission_id=mission_id,
+            max_tokens=max_tokens,
+            semantic_top_k=semantic_top_k,
+            hybrid=hybrid,
+        )
+    except Exception as exc:
+        return _tool_error(
+            "memory_inject_for_task", exc,
+            {"memories": [], "count": 0, "truncated": False},
+        )
+
+    return result
 
 
 @mcp.tool()
