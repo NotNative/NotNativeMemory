@@ -27,8 +27,8 @@ def _make_fake_repo(tmp: str) -> str:
     """Build a minimal repo layout with the source files merge_hooks expects."""
     repo = os.path.join(tmp, "fake_repo")
     bundle_dir = os.path.join(repo, "hook_bundles", "claude", "notnative-memory")
-    os.makedirs(bundle_dir)
-    os.makedirs(os.path.join(repo, "hooks_shared"))
+    internal_dir = os.path.join(bundle_dir, "_internal")
+    os.makedirs(internal_dir)
 
     for script in merge_hooks._HOOK_SCRIPTS:
         with open(os.path.join(bundle_dir, script), "w", encoding="utf-8") as fh:
@@ -38,9 +38,9 @@ def _make_fake_repo(tmp: str) -> str:
         fh.write("MEMORY_MCP_URL=http://localhost:9500/mcp\n")
         fh.write("MEMORY_MCP_TOKEN=\n")
 
-    with open(os.path.join(repo, "hooks_shared", "__init__.py"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(internal_dir, "__init__.py"), "w", encoding="utf-8") as fh:
         fh.write("")
-    with open(os.path.join(repo, "hooks_shared", "env_loader.py"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(internal_dir, "env_loader.py"), "w", encoding="utf-8") as fh:
         fh.write("# fake env_loader\n")
 
     return repo
@@ -58,8 +58,8 @@ def test_install_creates_deploy_dir_and_copies_files():
         assert os.path.isdir(deploy_dir)
         for script in merge_hooks._HOOK_SCRIPTS:
             assert os.path.isfile(os.path.join(deploy_dir, script)), f"missing {script}"
-        assert os.path.isfile(os.path.join(deploy_dir, "hooks_shared", "__init__.py"))
-        assert os.path.isfile(os.path.join(deploy_dir, "hooks_shared", "env_loader.py"))
+        assert os.path.isfile(os.path.join(deploy_dir, "_internal", "__init__.py"))
+        assert os.path.isfile(os.path.join(deploy_dir, "_internal", "env_loader.py"))
         assert os.path.isfile(os.path.join(deploy_dir, "hooks.env"))
         assert os.path.isfile(os.path.join(deploy_dir, "hooks.env.example"))
         assert os.path.isfile(os.path.join(deploy_dir, "VERSION"))

@@ -176,6 +176,21 @@ def merge(install_path: str, mcp_url: str = "http://localhost:9500/mcp"):
         else:
             print(f"  Warning: {script} not found in {source_dir}", file=sys.stderr)
 
+    # Copy bundle-local _internal/ package (turn_analysis_core, etc.).
+    src_internal = os.path.join(source_dir, "_internal")
+    dst_internal = os.path.join(target_dir, "_internal")
+    if os.path.isdir(src_internal):
+        os.makedirs(dst_internal, exist_ok=True)
+        for entry in os.listdir(src_internal):
+            if entry == "__pycache__" or entry.startswith("."):
+                continue
+            src_path = os.path.join(src_internal, entry)
+            dst_path = os.path.join(dst_internal, entry)
+            if os.path.isfile(src_path):
+                shutil.copy2(src_path, dst_path)
+                changes_made += 1
+                print(f"  Copied _internal/{entry}")
+
     # Remove obsolete files left behind by previous installs.
     for obsolete in _OBSOLETE_FILES:
         path = os.path.join(target_dir, obsolete)

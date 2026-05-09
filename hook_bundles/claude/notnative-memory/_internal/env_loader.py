@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 """
-NotNativeMemory - shared hooks env loader.
+NotNativeMemory - Claude bundle hooks env loader.
 
-Resolves and loads `hooks.env` for any of the NotNativeMemory hook
-scripts. Search order:
+Resolves and loads `hooks.env` for the Claude hook scripts. Search order:
 
   1. ~/.claude/hooks/notnative-memory/hooks.env  (Claude Code installs)
   2. <script_dir>/hooks.env                       (back-compat for older
@@ -16,7 +15,7 @@ wins over the file (useful for tests and one-off overrides).
 
 Usage in a hook script:
 
-    from hooks_shared.env_loader import load_hooks_env
+    from _internal.env_loader import load_hooks_env
     load_hooks_env(__file__)
 
 Returns the path that was loaded, or None if no env file existed in any

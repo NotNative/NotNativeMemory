@@ -1,10 +1,14 @@
 #!/usr/bin/env python3
 """
-Tests for hooks_shared/env_loader.py.
+Tests for hook_bundles/claude/notnative-memory/_internal/env_loader.py.
 
 Covers candidate path ordering, KEY=VALUE parsing, inline-comment
 stripping, env var precedence (file values use setdefault, so explicit
 env wins), and the parse_env_file helper.
+
+NNA's bundle does not ship env_loader (its hook scripts inline their
+own minimal config loader); the Claude bundle copy is the only one
+under test here.
 """
 
 import os
@@ -13,11 +17,10 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-# Add repo root so `from hooks_shared.env_loader import ...` works.
 _REPO_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "hook_bundles" / "claude" / "notnative-memory"))
 
-from hooks_shared import env_loader  # noqa: E402
+from _internal import env_loader  # noqa: E402
 
 
 def test_strip_inline_comment_with_space():

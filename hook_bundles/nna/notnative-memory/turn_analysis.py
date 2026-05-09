@@ -6,7 +6,7 @@ Fires at the END of each turn (post phase) in the nna harness, after
 the model responds. Pulls user_prompt + model_response straight from
 nna's Stop hook stdin, then delegates to the shared analysis core.
 
-The shared core (hooks_shared/turn_analysis_core.py) handles:
+The bundle-local core (_internal/turn_analysis_core.py) handles:
   1. Learnable-pattern extraction → RAG-ingested into NotNativeMemory.
   2. Promise tracking → high-importance nudge memory for next-turn surfacing.
 
@@ -34,13 +34,10 @@ if os.path.exists(_ENV_FILE):
                 _key, _val = _line.split("=", 1)
                 os.environ.setdefault(_key.strip(), _val.strip())
 
-# Add the shared module to sys.path. Layout:
-#   NotNativeMemory/
-#     hooks_shared/turn_analysis_core.py
-#     hook_bundles/nna/notnative-memory/turn_analysis.py        <- this file
-_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_HOOK_DIR)))
-sys.path.insert(0, _REPO_ROOT)
-from hooks_shared.turn_analysis_core import (  # noqa: E402
+# Bundle-local helpers under _internal/. Same shape in both repo and
+# deployed layouts.
+sys.path.insert(0, _HOOK_DIR)
+from _internal.turn_analysis_core import (  # noqa: E402
     analyze_turn,
     resolve_config_from_env,
 )

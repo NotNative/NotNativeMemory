@@ -14,7 +14,7 @@ Default deployment layout:
         session_start.py
         turn_analysis.py
         user_prompt_inject.py
-        hooks_shared/
+        _internal/
             __init__.py
             env_loader.py
             turn_analysis_core.py
@@ -149,13 +149,13 @@ def _load_settings(settings_file: str) -> dict:
 
 
 def _copy_runtime_files(repo_path: str, deploy_dir: str) -> int:
-    """Copy hook scripts + hooks_shared package + hooks.env.example.
+    """Copy hook scripts + bundle-local _internal/ + hooks.env.example.
 
     Returns the count of files copied (for logging).
     """
     os.makedirs(deploy_dir, exist_ok=True)
     src_hooks = os.path.join(repo_path, "hook_bundles", "claude", "notnative-memory")
-    src_shared = os.path.join(repo_path, "hooks_shared")
+    src_internal = os.path.join(src_hooks, "_internal")
 
     copied = 0
 
@@ -169,15 +169,15 @@ def _copy_runtime_files(repo_path: str, deploy_dir: str) -> int:
         shutil.copy2(src, dst)
         copied += 1
 
-    # Shared package (env_loader.py + turn_analysis_core.py + __init__.py)
-    dst_shared = os.path.join(deploy_dir, "hooks_shared")
-    os.makedirs(dst_shared, exist_ok=True)
-    if os.path.isdir(src_shared):
-        for entry in os.listdir(src_shared):
+    # Bundle-local _internal/ package (env_loader.py + turn_analysis_core.py + __init__.py)
+    dst_internal = os.path.join(deploy_dir, "_internal")
+    os.makedirs(dst_internal, exist_ok=True)
+    if os.path.isdir(src_internal):
+        for entry in os.listdir(src_internal):
             if entry == "__pycache__" or entry.startswith("."):
                 continue
-            src_path = os.path.join(src_shared, entry)
-            dst_path = os.path.join(dst_shared, entry)
+            src_path = os.path.join(src_internal, entry)
+            dst_path = os.path.join(dst_internal, entry)
             if os.path.isfile(src_path):
                 shutil.copy2(src_path, dst_path)
                 copied += 1

@@ -30,7 +30,6 @@ NotNativeMemory/
   lib/                   Core engine (db, embeddings, retrieval, auth, RAG, classify, web routes)
   config/                schema.sql + 21 advisory-lock-serialized migrations
   models/                Local embedding model (gte-large-en-v1.5, 1024-dim, fp16)
-  hooks_shared/          Platform-agnostic turn analysis core
   hook_bundles/
     claude/notnative-memory/  Claude Code hook integration
     nna/notnative-memory/     NotNativeAgent hook integration (incl. promise_detector)
@@ -211,7 +210,7 @@ NNM ships hooks for two host platforms: Claude Code (`hook_bundles/claude/notnat
 | `PreCompact` | Inject rules + critical memories so operational discipline survives context compression. |
 | `Stop` (turn-analysis) | End-of-turn LLM extraction (NNA only today): produces RAG ingestions and, optionally, a high-importance "promise" nudge memory for the next turn. |
 
-`hooks_shared/turn_analysis_core.py` is the platform-agnostic core; the per-host hook modules are thin wrappers. Configuration lives in `hooks.env` (LLM endpoint, model, char caps, max tokens). LM Studio (OpenAI-compatible) and the Anthropic Messages API are both supported.
+Each bundle ships its own `_internal/turn_analysis_core.py`; the agent-facing hook scripts in the bundle are thin adapters. Configuration lives in `hooks.env` (LLM endpoint, model, char caps, max tokens). LM Studio (OpenAI-compatible) and the Anthropic Messages API are both supported. Bundles do not share helpers across agents — each agent's bundle is developed independently with its own dev.
 
 `promise_detector.py` is a recent addition that watches for commitments the agent makes and surfaces them at next-turn so they don't get lost on compaction.
 
@@ -306,6 +305,6 @@ A representative round trip:
 - Auth + RLS: `lib/auth*.py`, `lib/rls.py`, `docs/api-auth.md`, `docs/rls-activation.md`
 - Web: `lib/web_routes.py`, `templates/`
 - MCP server: `server.py`
-- Hooks: `hooks_shared/`, `hook_bundles/claude/notnative-memory/`, `hook_bundles/nna/notnative-memory/`
+- Hooks: `hook_bundles/claude/notnative-memory/`, `hook_bundles/nna/notnative-memory/`
 - Tests: `tests/`
 - Operator docs: `docs/api-auth.md`, `docs/incident-response.md`, `docs/turn-analysis.md`, `docs/memory-persona.md`

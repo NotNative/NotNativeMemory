@@ -66,7 +66,7 @@ This is already implemented; see `lib/db.py::get_inject_for_task` and `server.py
 | `taskEnvelope` | string | The original task description (or the full envelope) as fed to the worker. |
 | `workerOutput` | string | The worker's structured result or output transcript. May be empty for tool-result-only workers; in that case `WorkerEnd` is a no-op. |
 
-**What NNM does:** calls `hooks_shared.turn_analysis_core.analyze_worker_run(...)` which:
+**What NNM does:** calls `hook_bundles/nna/notnative-memory/_internal/turn_analysis_core.analyze_worker_run(...)` which:
 
 1. Calls the configured analysis LLM with the worker-tuned prompt (`build_worker_analysis_prompt`). The prompt steers extraction toward vendor quirks, tool-result patterns, and operational gotchas, *not* toward user preferences.
 2. Tags every extracted memory with `mission:<missionId>` and `assignment:<assignmentId>`.
@@ -74,7 +74,7 @@ This is already implemented; see `lib/db.py::get_inject_for_task` and `server.py
 4. Stores the run summary in RAG with tags `["session-summary", "conv:<prefix>"]`.
 5. (Until promise detection moves; see §5) optionally writes a pending-nudge memory for the next worker on the same mission.
 
-This is already implemented in `hooks_shared/turn_analysis_core.py::analyze_worker_run`. NNA needs to ship the wrapper hook script that pulls payload from stdin in NNA's hook shape and calls this function.
+This is already implemented in `hook_bundles/nna/notnative-memory/_internal/turn_analysis_core.py::analyze_worker_run`. NNA needs to ship the wrapper hook script that pulls payload from stdin in NNA's hook shape and calls this function.
 
 ### 2.3 What does NOT fire in worker mode
 
@@ -168,11 +168,11 @@ Two parallel promise-tracking implementations currently live in NNM. Both should
 | File | Current location | Mechanism | Move target |
 |---|---|---|---|
 | `hook_bundles/nna/notnative-memory/promise_detector.py` | NNM repo, NNA bundle subdir | Rule-based; fires on `tool.call:post` and watches `TaskCreate`/`TaskUpdate`/`TodoWrite`/`Write`/`Edit`. | NNA repo proper. |
-| Section 2 of `hooks_shared/turn_analysis_core.py` | NNM repo, shared core | LLM-judged; runs at end-of-turn and produces `unfulfilledPromises` / `shouldNudge` / `nudgeText`. | NNA repo, called by NNA's end-of-turn handler. |
+| Section 2 of `hook_bundles/nna/notnative-memory/_internal/turn_analysis_core.py` | NNM repo, shared core | LLM-judged; runs at end-of-turn and produces `unfulfilledPromises` / `shouldNudge` / `nudgeText`. | NNA repo, called by NNA's end-of-turn handler. |
 
 **Why both move:** promise detection is an agent-loop concern (did the model commit to something and not deliver?), not a memory concern. NNM's job is to remember; NNA's job is to nudge. The LLM-judged version is currently entangled with NNM's extraction prompt for historical reasons; it should be a separate NNA-side LLM call that consumes turn input, not an embedded section of NNM's extraction prompt.
 
-**What NNM keeps:** `store_pending_nudge` continues to exist in `turn_analysis_core.py` and writes a high-importance pending-nudge memory when called. NNA can call it directly via the MCP `memory_store` tool with the right tags and importance, OR keep using the existing helper if NNA imports `hooks_shared`. Either way, the *decision* to write a nudge is NNA's.
+**What NNM keeps:** the bundle's own `_internal/turn_analysis_core.py::store_pending_nudge` writes a high-importance pending-nudge memory when called. NNA can call `memory_store` directly via MCP with the right tags and importance, or use the bundle-local helper if it ships its own bundle. Either way, the *decision* to write a nudge is NNA's.
 
 **Ordering:** moving promise detection out is safe to do at any point; it does not block the worker lifecycle work. Do it together with the worker hooks if convenient.
 
@@ -211,10 +211,10 @@ For the NNA implementer's reference; nothing here needs new NNM work.
 
 - `lib/db.py::get_inject_for_task` — full implementation of the `WorkerStart` retrieval blend.
 - `server.py::memory_inject_for_task` — MCP tool surface for the same operation.
-- `hooks_shared/turn_analysis_core.py::analyze_worker_run` — full implementation of `WorkerEnd` extraction with mission tagging, summary write to RAG, and nudge write.
-- `hooks_shared/turn_analysis_core.py::build_worker_analysis_prompt` — worker-tuned LLM prompt.
-- `hooks_shared/turn_analysis_core.py::_attach_mission_tags` — pure-Python mission/assignment tag attachment with no-mutation, no-duplicate semantics.
-- `hooks_shared/turn_analysis_core.py::store_conversation_summary` — session/run summary writer; lands in RAG with the right tags.
+- `hook_bundles/nna/notnative-memory/_internal/turn_analysis_core.py::analyze_worker_run` — full implementation of `WorkerEnd` extraction with mission tagging, summary write to RAG, and nudge write.
+- `hook_bundles/nna/notnative-memory/_internal/turn_analysis_core.py::build_worker_analysis_prompt` — worker-tuned LLM prompt.
+- `hook_bundles/nna/notnative-memory/_internal/turn_analysis_core.py::_attach_mission_tags` — pure-Python mission/assignment tag attachment with no-mutation, no-duplicate semantics.
+- `hook_bundles/nna/notnative-memory/_internal/turn_analysis_core.py::store_conversation_summary` — session/run summary writer; lands in RAG with the right tags.
 - Tests for all of the above in `tests/test_turn_analysis.py` and `tests/test_memory_inject.py`.
 
 What NNA still needs to build on its side:

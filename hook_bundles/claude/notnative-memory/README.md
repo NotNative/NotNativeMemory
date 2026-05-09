@@ -46,7 +46,7 @@ Sharing one LLM call across both jobs means promise-detection costs zero extra t
 
 **This hook needs an LLM endpoint configured** in `hooks.env`. The defaults are deliberately unset so the hook short-circuits with a warning until you opt in. See **Analysis LLM endpoint** below.
 
-The shared analysis logic lives in `hooks_shared/turn_analysis_core.py` so the nna and Claude Code hooks both use the same pipeline; only the input adapter (transcript JSONL parser here, direct stdin in nna) differs per harness.
+The analysis logic lives in this bundle's `_internal/turn_analysis_core.py`. Each agent's bundle keeps its own copy under `_internal/`, so Claude and NNA can diverge on prompt and behavior without coordination.
 
 ## Analysis LLM endpoint
 
@@ -163,7 +163,7 @@ If you're not using the install script, run:
 python hook_bundles/claude/notnative-memory/merge_hooks.py /absolute/path/to/NotNativeMemory http://your-mcp-host:9500/mcp
 ```
 
-That copies the Python hooks + `hooks_shared/` package + `hooks.env.example` into `~/.claude/hooks/notnative-memory/`, creates `hooks.env` from the template (if it doesn't already exist), and registers the hook entries in `~/.claude/settings.json`. Safe to re-run; updates existing entries in place and preserves your `hooks.env` edits.
+That copies the Python hooks + the bundle's `_internal/` package + `hooks.env.example` into `~/.claude/hooks/notnative-memory/`, creates `hooks.env` from the template (if it doesn't already exist), and registers the hook entries in `~/.claude/settings.json`. Safe to re-run; updates existing entries in place and preserves your `hooks.env` edits.
 
 The deploy layout:
 
@@ -173,7 +173,7 @@ The deploy layout:
     session_start.py          # SessionStart hook
     turn_analysis.py          # Stop hook
     user_prompt_inject.py     # UserPromptSubmit hook
-    hooks_shared/             # shared modules (env loader, analysis core)
+    _internal/                # bundle-local modules (env loader, analysis core)
     hooks.env                 # your config — preserved across re-installs
     hooks.env.example         # canonical template — refreshed from repo each install
     VERSION                   # install timestamp + source repo path

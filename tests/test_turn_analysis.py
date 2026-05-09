@@ -20,11 +20,14 @@ import tempfile
 from pathlib import Path
 from unittest import mock
 
-# Add the repo root to sys.path so `from hooks_shared.turn_analysis_core import ...` works.
+# turn_analysis_core lives in each bundle's _internal/ after the
+# hooks_shared dissolve. Both bundle copies are byte-equivalent at
+# the moment; this suite exercises the Claude bundle copy. NNA can
+# diverge and add its own tests later.
 _REPO_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(_REPO_ROOT))
+sys.path.insert(0, str(_REPO_ROOT / "hook_bundles" / "claude" / "notnative-memory"))
 
-from hooks_shared import turn_analysis_core as core  # noqa: E402
+from _internal import turn_analysis_core as core  # noqa: E402
 
 
 # -- Fence stripping -------------------------------------------------------

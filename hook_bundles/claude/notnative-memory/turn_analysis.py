@@ -34,16 +34,12 @@ import json
 import os
 import sys
 
-# Resolve hooks_shared/ regardless of whether this script runs from the
-# deployed location (~/.claude/hooks/notnative-memory/) or directly from
-# the repo (<repo>/hook_bundles/claude/notnative-memory/). In the deployed
-# layout, hooks_shared sits alongside this script. In the repo, it lives
-# three levels up.
+# Bundle-local helpers under _internal/. Same shape in both repo and
+# deployed layouts.
 _HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HOOK_DIR)
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HOOK_DIR))))
-from hooks_shared.env_loader import load_hooks_env  # noqa: E402
-from hooks_shared.turn_analysis_core import (  # noqa: E402
+from _internal.env_loader import load_hooks_env  # noqa: E402
+from _internal.turn_analysis_core import (  # noqa: E402
     analyze_turn,
     resolve_config_from_env,
 )
