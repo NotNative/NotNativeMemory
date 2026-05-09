@@ -167,7 +167,7 @@ Two parallel promise-tracking implementations currently live in NNM. Both should
 
 | File | Current location | Mechanism | Move target |
 |---|---|---|---|
-| `nna/hooks/promise_detector.py` | NNM repo, NNA hook subdir | Rule-based; fires on `tool.call:post` and watches `TaskCreate`/`TaskUpdate`/`TodoWrite`/`Write`/`Edit`. | NNA repo proper. |
+| `hook_bundles/nna/notnative-memory/promise_detector.py` | NNM repo, NNA bundle subdir | Rule-based; fires on `tool.call:post` and watches `TaskCreate`/`TaskUpdate`/`TodoWrite`/`Write`/`Edit`. | NNA repo proper. |
 | Section 2 of `hooks_shared/turn_analysis_core.py` | NNM repo, shared core | LLM-judged; runs at end-of-turn and produces `unfulfilledPromises` / `shouldNudge` / `nudgeText`. | NNA repo, called by NNA's end-of-turn handler. |
 
 **Why both move:** promise detection is an agent-loop concern (did the model commit to something and not deliver?), not a memory concern. NNM's job is to remember; NNA's job is to nudge. The LLM-judged version is currently entangled with NNM's extraction prompt for historical reasons; it should be a separate NNA-side LLM call that consumes turn input, not an embedded section of NNM's extraction prompt.

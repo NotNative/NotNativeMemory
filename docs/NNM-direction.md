@@ -192,7 +192,7 @@ To save Claude Code from chasing things that don't matter:
 
 If Claude Code is going to take this on incrementally, the order I'd recommend:
 
-1. **Move LLM-based promise detection to NNA.** Smallest change, clears a conceptual debt. Includes the rule-based `promise_detector.py` already living in `nna/hooks/` and the LLM-judged promise tracking currently entangled in `hooks_shared/turn_analysis_core.py`.
+1. **Move LLM-based promise detection to NNA.** Smallest change, clears a conceptual debt. Includes the rule-based `promise_detector.py` already living in `hook_bundles/nna/notnative-memory/` and the LLM-judged promise tracking currently entangled in `hooks_shared/turn_analysis_core.py`.
 2. **Add worker-mode hook lifecycle (`WorkerStart`, `WorkerEnd`).** Required for NNO worker integration. Coordinates with NNA's mode taxonomy.
 3. **Add `memory_inject_for_task` MCP tool.** Required for clean worker injection.
 4. **Add mode-aware hook configuration (TUI vs. worker).** Coordinates with NNA's mode-routing work; lets the same `hooks_shared` core serve both shapes via env-prefixed overrides.

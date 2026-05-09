@@ -8,7 +8,7 @@ Handles two LLM API shapes (OpenAI-compat and Anthropic Messages),
 auto-discovers a model when one isn't pinned, and exposes the
 ingest/storage helpers for adapters to call.
 
-Adapter modules (nna/hooks/turn_analysis.py, claude/hooks/turn_analysis.py)
+Adapter modules (hook_bundles/{nna,claude}/notnative-memory/turn_analysis.py)
 are thin wrappers that pull stdin in their harness's shape, then call
 analyze_turn() with the right config.
 """

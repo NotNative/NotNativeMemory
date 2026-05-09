@@ -37,8 +37,8 @@ if os.path.exists(_ENV_FILE):
 # Add the shared module to sys.path. Layout:
 #   NotNativeMemory/
 #     hooks_shared/turn_analysis_core.py
-#     nna/hooks/turn_analysis.py        <- this file
-_REPO_ROOT = os.path.dirname(os.path.dirname(_HOOK_DIR))
+#     hook_bundles/nna/notnative-memory/turn_analysis.py        <- this file
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(_HOOK_DIR)))
 sys.path.insert(0, _REPO_ROOT)
 from hooks_shared.turn_analysis_core import (  # noqa: E402
     analyze_turn,

@@ -161,7 +161,7 @@ def merge(install_path: str, mcp_url: str = "http://localhost:9500/mcp"):
     target_dir = os.path.join(hooks_base, "notnative-memory")
     os.makedirs(target_dir, exist_ok=True)
 
-    source_dir = os.path.join(install_path, "nna", "hooks")
+    source_dir = os.path.join(install_path, "hook_bundles", "nna", "notnative-memory")
 
     changes_made = 0
 

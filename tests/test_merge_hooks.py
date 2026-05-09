@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Tests for claude/hooks/merge_hooks.py — the installer.
+Tests for hook_bundles/claude/notnative-memory/merge_hooks.py — the installer.
 
 Covers: file copying into the deploy dir, hooks.env preservation across
 re-runs, MCP URL patching on first install, settings.json upsert, and
@@ -17,7 +17,7 @@ from unittest import mock
 
 # Add path to the merge_hooks module.
 _REPO_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "claude" / "hooks"))
+sys.path.insert(0, str(_REPO_ROOT / "hook_bundles" / "claude" / "notnative-memory"))
 sys.path.insert(0, str(_REPO_ROOT))
 
 import merge_hooks  # noqa: E402
@@ -26,14 +26,15 @@ import merge_hooks  # noqa: E402
 def _make_fake_repo(tmp: str) -> str:
     """Build a minimal repo layout with the source files merge_hooks expects."""
     repo = os.path.join(tmp, "fake_repo")
-    os.makedirs(os.path.join(repo, "claude", "hooks"))
+    bundle_dir = os.path.join(repo, "hook_bundles", "claude", "notnative-memory")
+    os.makedirs(bundle_dir)
     os.makedirs(os.path.join(repo, "hooks_shared"))
 
     for script in merge_hooks._HOOK_SCRIPTS:
-        with open(os.path.join(repo, "claude", "hooks", script), "w", encoding="utf-8") as fh:
+        with open(os.path.join(bundle_dir, script), "w", encoding="utf-8") as fh:
             fh.write(f"# fake {script}\n")
 
-    with open(os.path.join(repo, "claude", "hooks", "hooks.env.example"), "w", encoding="utf-8") as fh:
+    with open(os.path.join(bundle_dir, "hooks.env.example"), "w", encoding="utf-8") as fh:
         fh.write("MEMORY_MCP_URL=http://localhost:9500/mcp\n")
         fh.write("MEMORY_MCP_TOKEN=\n")
 
@@ -121,7 +122,7 @@ def test_install_updates_hooks_env_example_on_rerun():
             merge_hooks.install(repo, "http://localhost:9500/mcp")
 
             # Modify the repo's .example template.
-            with open(os.path.join(repo, "claude", "hooks", "hooks.env.example"), "w", encoding="utf-8") as fh:
+            with open(os.path.join(repo, "hook_bundles", "claude", "notnative-memory", "hooks.env.example"), "w", encoding="utf-8") as fh:
                 fh.write("# updated template\nNEW_KEY=new_value\n")
 
             merge_hooks.install(repo, "http://localhost:9500/mcp")

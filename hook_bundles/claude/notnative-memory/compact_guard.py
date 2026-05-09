@@ -24,7 +24,7 @@ import urllib.error
 # Resolve hooks_shared/ for both deployed and repo layouts.
 _HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HOOK_DIR)
-sys.path.insert(0, os.path.dirname(os.path.dirname(_HOOK_DIR)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(_HOOK_DIR))))
 from hooks_shared.env_loader import load_hooks_env  # noqa: E402
 
 load_hooks_env(__file__)

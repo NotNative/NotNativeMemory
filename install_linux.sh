@@ -26,11 +26,11 @@ configure_agents() {
 
     if command -v claude &> /dev/null; then
         step "Configuring Claude Code hooks..."
-        if python3 claude/hooks/merge_hooks.py "$install_path" "$mcp_url"; then
+        if python3 hook_bundles/claude/notnative-memory/merge_hooks.py "$install_path" "$mcp_url"; then
             CONFIGURED_AGENTS+=("claude")
         else
             warn "Claude Code hook configuration failed. You can run this manually later:"
-            info "python3 claude/hooks/merge_hooks.py \"$install_path\" \"$mcp_url\""
+            info "python3 hook_bundles/claude/notnative-memory/merge_hooks.py \"$install_path\" \"$mcp_url\""
         fi
 
         step "Registering MCP memory server with Claude Code..."
@@ -45,7 +45,7 @@ configure_agents() {
     if [ ${#CONFIGURED_AGENTS[@]} -eq 0 ]; then
         info "No supported agent CLIs detected (claude)."
         info "To configure manually after installing one:"
-        info "  python3 claude/hooks/merge_hooks.py \"$install_path\" \"$mcp_url\"  # Claude Code"
+        info "  python3 hook_bundles/claude/notnative-memory/merge_hooks.py \"$install_path\" \"$mcp_url\"  # Claude Code"
     fi
 }
 

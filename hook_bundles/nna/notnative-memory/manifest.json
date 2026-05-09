@@ -1,0 +1,48 @@
+{
+  "name": "notnative-memory",
+  "version": "1.1.0",
+  "subscriptions": [
+    {
+      "event": "user.prompt.submit",
+      "phase": "pre",
+      "command": "python user_prompt_inject.py",
+      "blocking": true,
+      "timeout_ms": 60000
+    },
+    {
+      "event": "session.start",
+      "phase": "post",
+      "command": "python session_start.py",
+      "blocking": true,
+      "timeout_ms": 60000
+    },
+    {
+      "event": "compaction",
+      "phase": "pre",
+      "command": "python compact_guard.py",
+      "blocking": true,
+      "timeout_ms": 60000
+    },
+    {
+      "event": "session.end",
+      "phase": "pre",
+      "command": "python compact_guard.py",
+      "blocking": true,
+      "timeout_ms": 60000
+    },
+    {
+      "event": "user.prompt.submit",
+      "phase": "post",
+      "command": "python turn_analysis.py",
+      "blocking": false,
+      "timeout_ms": 90000
+    },
+    {
+      "event": "tool.call",
+      "phase": "post",
+      "command": "python promise_detector.py",
+      "blocking": false,
+      "timeout_ms": 60000
+    }
+  ]
+}

@@ -947,9 +947,9 @@ def test_analyze_turn_skips_summary_when_empty():
 
 # -- Claude adapter: transcript parsing ----------------------------------
 
-# The Claude hook lives at <repo>/claude/hooks/turn_analysis.py. Add it
-# to sys.path so we can import it directly.
-sys.path.insert(0, str(_REPO_ROOT / "claude" / "hooks"))
+# The Claude hook lives at <repo>/hook_bundles/claude/notnative-memory/turn_analysis.py.
+# Add it to sys.path so we can import it directly.
+sys.path.insert(0, str(_REPO_ROOT / "hook_bundles" / "claude" / "notnative-memory"))
 import turn_analysis as claude_adapter  # noqa: E402
 
 

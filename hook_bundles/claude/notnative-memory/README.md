@@ -160,7 +160,7 @@ All values can be overridden by setting the corresponding environment variable b
 If you're not using the install script, run:
 
 ```bash
-python claude/hooks/merge_hooks.py /absolute/path/to/NotNativeMemory http://your-mcp-host:9500/mcp
+python hook_bundles/claude/notnative-memory/merge_hooks.py /absolute/path/to/NotNativeMemory http://your-mcp-host:9500/mcp
 ```
 
 That copies the Python hooks + `hooks_shared/` package + `hooks.env.example` into `~/.claude/hooks/notnative-memory/`, creates `hooks.env` from the template (if it doesn't already exist), and registers the hook entries in `~/.claude/settings.json`. Safe to re-run; updates existing entries in place and preserves your `hooks.env` edits.
@@ -181,7 +181,7 @@ The deploy layout:
 
 ## Adapting for other platforms
 
-Claude Code's hook protocol (stdin JSON in, stdout JSON or plain text out, event names like `SessionStart` / `UserPromptSubmit` / `PreCompact`) is Claude-Code-specific. If your agent platform has equivalent hook events, the core Python in each hook is platform-agnostic — the query building, HTTP call to the MCP server, and response formatting all work anywhere. You'll just need to adapt the stdin/stdout contract to whatever your platform expects. See `nna/hooks/` for an example port to a different hook system.
+Claude Code's hook protocol (stdin JSON in, stdout JSON or plain text out, event names like `SessionStart` / `UserPromptSubmit` / `PreCompact`) is Claude-Code-specific. If your agent platform has equivalent hook events, the core Python in each hook is platform-agnostic — the query building, HTTP call to the MCP server, and response formatting all work anywhere. You'll just need to adapt the stdin/stdout contract to whatever your platform expects. See `hook_bundles/nna/notnative-memory/` for an example port to a different hook system.
 
 ## What gets injected
 

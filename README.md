@@ -205,7 +205,7 @@ Together they cover the three points in a turn where memory matters most: when t
 
 ### Claude Code
 
-Located at `claude/hooks/`. Claude Code's install script wires them up automatically. For manual setup or tuning, see [`claude/hooks/README.md`](claude/hooks/README.md).
+Located at `hook_bundles/claude/notnative-memory/`. Claude Code's install script wires them up automatically. For manual setup or tuning, see [`hook_bundles/claude/notnative-memory/README.md`](hook_bundles/claude/notnative-memory/README.md).
 
 Tool matcher: `Edit|Write|Bash`.
 
@@ -419,13 +419,22 @@ claude/
     memory-instructions.md - Short version to append to an existing CLAUDE.md
     claude-code-config.json - Claude Code MCP config template
     lmstudio-config.json    - LM Studio MCP config template
-    hooks/
+hook_bundles/
+    claude/notnative-memory/
         README.md               - Hook setup and adaptation guide
         session_start.py        - SessionStart hook (working-continuity at session start)
         user_prompt_inject.py   - UserPromptSubmit hook (context on every prompt)
         compact_guard.py        - PreCompact hook (rules + top memories)
+        turn_analysis.py        - Stop hook (end-of-turn extraction)
         merge_hooks.py          - Idempotent installer for ~/.claude/settings.json
         hooks-config.json       - Hook registration snippet template
+    nna/notnative-memory/
+        session_start.py        - session.start subscriber
+        user_prompt_inject.py   - user.prompt.submit:pre subscriber
+        compact_guard.py        - compaction:pre and session.end:pre subscriber
+        turn_analysis.py        - user.prompt.submit:post subscriber (extraction)
+        promise_detector.py     - tool.call:post subscriber (rule-based; pending NNA migration)
+        merge_hooks.py          - Idempotent installer for ~/.nna/hooks/notnative-memory/
 models/
     gte-large-en-v1.5/  - Embedding model (downloaded by install script)
 ```

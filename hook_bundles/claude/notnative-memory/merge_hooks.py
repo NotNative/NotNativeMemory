@@ -51,7 +51,7 @@ from typing import Tuple
 # Plugin-relative install layout. ~/.claude/hooks/notnative-memory/
 PLUGIN_NAME = "notnative-memory"
 
-# Hook scripts to deploy. Source path is relative to repo's claude/hooks/.
+# Hook scripts to deploy. Source path is relative to repo's hook_bundles/claude/notnative-memory/.
 _HOOK_SCRIPTS = {
     "compact_guard.py",
     "session_start.py",
@@ -154,7 +154,7 @@ def _copy_runtime_files(repo_path: str, deploy_dir: str) -> int:
     Returns the count of files copied (for logging).
     """
     os.makedirs(deploy_dir, exist_ok=True)
-    src_hooks = os.path.join(repo_path, "claude", "hooks")
+    src_hooks = os.path.join(repo_path, "hook_bundles", "claude", "notnative-memory")
     src_shared = os.path.join(repo_path, "hooks_shared")
 
     copied = 0

@@ -56,10 +56,10 @@ function Configure-Agents($installPath, $mcpUrl) {
     $claudeInstalled = Get-Command claude -ErrorAction SilentlyContinue
     if ($claudeInstalled) {
         Write-Step "Configuring Claude Code hooks..."
-        Invoke-Native python claude/hooks/merge_hooks.py "$installPath" "$mcpUrl"
+        Invoke-Native python hook_bundles/claude/notnative-memory/merge_hooks.py "$installPath" "$mcpUrl"
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "Claude Code hook configuration failed. You can run this manually later:"
-            Write-Info "python claude/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`""
+            Write-Info "python hook_bundles/claude/notnative-memory/merge_hooks.py `"$installPath`" `"$mcpUrl`""
         } else {
             $configured += "claude"
         }
@@ -77,10 +77,10 @@ function Configure-Agents($installPath, $mcpUrl) {
     $nnaInstalled = Get-Command nna -ErrorAction SilentlyContinue
     if ($nnaInstalled) {
         Write-Step "Configuring NotNativeAgent memory..."
-        Invoke-Native python nna/hooks/merge_hooks.py "$installPath" "$mcpUrl"
+        Invoke-Native python hook_bundles/nna/notnative-memory/merge_hooks.py "$installPath" "$mcpUrl"
         if ($LASTEXITCODE -ne 0) {
             Write-Warn "NotNativeAgent configuration failed. You can run this manually later:"
-            Write-Info "python nna/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`""
+            Write-Info "python hook_bundles/nna/notnative-memory/merge_hooks.py `"$installPath`" `"$mcpUrl`""
         } else {
             $configured += "nna"
             Write-Info "memoryUrl written to ~/.nna/config.json"
@@ -90,8 +90,8 @@ function Configure-Agents($installPath, $mcpUrl) {
     if ($configured.Count -eq 0) {
         Write-Info "No supported agent CLIs detected (claude, nna)."
         Write-Info "To configure manually after installing one:"
-        Write-Info "  python claude/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`"  # Claude Code"
-        Write-Info "  python nna/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`"     # NotNativeAgent"
+        Write-Info "  python hook_bundles/claude/notnative-memory/merge_hooks.py `"$installPath`" `"$mcpUrl`"  # Claude Code"
+        Write-Info "  python hook_bundles/nna/notnative-memory/merge_hooks.py `"$installPath`" `"$mcpUrl`"     # NotNativeAgent"
     }
 
     return ,$configured
