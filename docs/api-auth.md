@@ -252,14 +252,14 @@ claude mcp add --transport http memory --scope user \
 
 ### Hooks
 
-`claude/hooks/hooks.env` and `nnc/hooks/hooks.env` only carry
+`claude/hooks/hooks.env` and `nna/hooks/hooks.env` only carry
 `MEMORY_MCP_URL` today. In solo mode the hooks work without a token
 because bypass handles loopback. In multi-user mode, extend
 `merge_hooks.py::_write_hooks_env` to also write
-`MEMORY_MCP_TOKEN=nnm_...` and update the three hook scripts to set
+`MEMORY_MCP_TOKEN=nnm_...` and update the hook scripts to set
 `Authorization: Bearer <token>` on their `urllib.request.Request`
 calls. Every hook file has its own HTTP call, so the change is
-three one-liners per client (six total across `claude/` and `nnc/`).
+one-liners per client across `claude/` and `nna/`.
 
 ## Rate limiting
 

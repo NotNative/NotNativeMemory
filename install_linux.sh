@@ -42,22 +42,10 @@ configure_agents() {
         fi
     fi
 
-    if command -v nnc &> /dev/null; then
-        step "Configuring NotNativeCoder hooks..."
-        if python3 nnc/hooks/merge_hooks.py "$install_path" "$mcp_url"; then
-            CONFIGURED_AGENTS+=("nnc")
-            info "memoryUrl and hooks written to ~/.nnc/settings.json"
-        else
-            warn "NotNativeCoder hook configuration failed. You can run this manually later:"
-            info "python3 nnc/hooks/merge_hooks.py \"$install_path\" \"$mcp_url\""
-        fi
-    fi
-
     if [ ${#CONFIGURED_AGENTS[@]} -eq 0 ]; then
-        info "No supported agent CLIs detected (claude, nnc)."
+        info "No supported agent CLIs detected (claude)."
         info "To configure manually after installing one:"
         info "  python3 claude/hooks/merge_hooks.py \"$install_path\" \"$mcp_url\"  # Claude Code"
-        info "  python3 nnc/hooks/merge_hooks.py \"$install_path\" \"$mcp_url\"     # NotNativeCoder"
     fi
 }
 
@@ -986,7 +974,6 @@ if [ ${#CONFIGURED_AGENTS[@]} -gt 0 ]; then
     for a in "${CONFIGURED_AGENTS[@]}"; do
         case "$a" in
             claude) label="Claude Code (~/.claude/settings.json)" ;;
-            nnc)    label="NotNativeCoder (~/.nnc/settings.json)" ;;
             *)      label="$a" ;;
         esac
         agent_summary="${agent_summary:+$agent_summary, }$label"

@@ -74,19 +74,6 @@ function Configure-Agents($installPath, $mcpUrl) {
         }
     }
 
-    $nncInstalled = Get-Command nnc -ErrorAction SilentlyContinue
-    if ($nncInstalled) {
-        Write-Step "Configuring NotNativeCoder hooks..."
-        Invoke-Native python nnc/hooks/merge_hooks.py "$installPath" "$mcpUrl"
-        if ($LASTEXITCODE -ne 0) {
-            Write-Warn "NotNativeCoder hook configuration failed. You can run this manually later:"
-            Write-Info "python nnc/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`""
-        } else {
-            $configured += "nnc"
-            Write-Info "memoryUrl and hooks written to ~/.nnc/settings.json"
-        }
-    }
-
     $nnaInstalled = Get-Command nna -ErrorAction SilentlyContinue
     if ($nnaInstalled) {
         Write-Step "Configuring NotNativeAgent memory..."
@@ -101,10 +88,9 @@ function Configure-Agents($installPath, $mcpUrl) {
     }
 
     if ($configured.Count -eq 0) {
-        Write-Info "No supported agent CLIs detected (claude, nnc, nna)."
+        Write-Info "No supported agent CLIs detected (claude, nna)."
         Write-Info "To configure manually after installing one:"
         Write-Info "  python claude/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`"  # Claude Code"
-        Write-Info "  python nnc/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`"     # NotNativeCoder"
         Write-Info "  python nna/hooks/merge_hooks.py `"$installPath`" `"$mcpUrl`"     # NotNativeAgent"
     }
 
@@ -1037,7 +1023,6 @@ if ($configuredAgents -and $configuredAgents.Count -gt 0) {
     $agentLabels = @()
     foreach ($a in $configuredAgents) {
         if ($a -eq "claude") { $agentLabels += "Claude Code (~/.claude/settings.json)" }
-        elseif ($a -eq "nnc") { $agentLabels += "NotNativeCoder (~/.nnc/settings.json)" }
         elseif ($a -eq "nna") { $agentLabels += "NotNativeAgent (~/.nna/config.json)" }
     }
     Write-Step "Hooks: configured for $($agentLabels -join ', ')"

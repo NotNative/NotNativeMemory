@@ -6,8 +6,7 @@ Resolves and loads `hooks.env` for any of the NotNativeMemory hook
 scripts. Search order:
 
   1. ~/.claude/hooks/notnative-memory/hooks.env  (Claude Code installs)
-  2. ~/.nnc/hooks/notnative-memory/hooks.env     (NotNativeCoder installs)
-  3. <script_dir>/hooks.env                       (back-compat for older
+  2. <script_dir>/hooks.env                       (back-compat for older
                                                    installs that wrote
                                                    directly into the repo)
 
@@ -36,7 +35,6 @@ def _candidate_paths(script_path: str) -> list:
     script_dir = os.path.dirname(os.path.abspath(script_path))
     return [
         os.path.join(home, ".claude", "hooks", "notnative-memory", "hooks.env"),
-        os.path.join(home, ".nnc", "hooks", "notnative-memory", "hooks.env"),
         os.path.join(script_dir, "hooks.env"),
     ]
 

@@ -181,7 +181,7 @@ The deploy layout:
 
 ## Adapting for other platforms
 
-Claude Code's hook protocol (stdin JSON in, stdout JSON or plain text out, event names like `SessionStart` / `UserPromptSubmit` / `PreCompact`) is Claude-Code-specific. If your agent platform has equivalent hook events, the core Python in each hook is platform-agnostic — the query building, HTTP call to the MCP server, and response formatting all work anywhere. You'll just need to adapt the stdin/stdout contract to whatever your platform expects. See `nnc/hooks/` for an example port to a different hook system.
+Claude Code's hook protocol (stdin JSON in, stdout JSON or plain text out, event names like `SessionStart` / `UserPromptSubmit` / `PreCompact`) is Claude-Code-specific. If your agent platform has equivalent hook events, the core Python in each hook is platform-agnostic — the query building, HTTP call to the MCP server, and response formatting all work anywhere. You'll just need to adapt the stdin/stdout contract to whatever your platform expects. See `nna/hooks/` for an example port to a different hook system.
 
 ## What gets injected
 

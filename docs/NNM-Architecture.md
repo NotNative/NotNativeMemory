@@ -33,7 +33,6 @@ NotNativeMemory/
   hooks_shared/          Platform-agnostic turn analysis core
   claude/hooks/          Claude Code hook integration
   nna/hooks/             NotNativeAgent hook integration (incl. promise_detector)
-  nnc/hooks/             NotNativeCoder hook integration
   templates/             Jinja2 web UI (memories, facts, tokens, conflicts)
   tests/                 25+ unit/integration tests
   docker/                docker-compose stack (mcp + postgres profiles)
@@ -202,7 +201,7 @@ Postgres Row-Level Security is **scaffolded but inert** (see `lib/rls.py`, `docs
 
 ## 10. Hook Integration
 
-NNM ships hooks for three host platforms: Claude Code (`claude/hooks/`), NotNativeAgent (`nna/hooks/`), NotNativeCoder (`nnc/hooks/`). All three share the same lifecycle:
+NNM ships hooks for two host platforms: Claude Code (`claude/hooks/`), NotNativeAgent (`nna/hooks/`). Both share the same lifecycle:
 
 | Hook | Behavior |
 |---|---|
@@ -306,6 +305,6 @@ A representative round trip:
 - Auth + RLS: `lib/auth*.py`, `lib/rls.py`, `docs/api-auth.md`, `docs/rls-activation.md`
 - Web: `lib/web_routes.py`, `templates/`
 - MCP server: `server.py`
-- Hooks: `hooks_shared/`, `claude/hooks/`, `nna/hooks/`, `nnc/hooks/`
+- Hooks: `hooks_shared/`, `claude/hooks/`, `nna/hooks/`
 - Tests: `tests/`
 - Operator docs: `docs/api-auth.md`, `docs/incident-response.md`, `docs/turn-analysis.md`, `docs/memory-persona.md`
