@@ -433,7 +433,6 @@ hook_bundles/
         user_prompt_inject.py   - user.prompt.submit:pre subscriber
         compact_guard.py        - compaction:pre and session.end:pre subscriber
         turn_analysis.py        - user.prompt.submit:post subscriber (extraction)
-        promise_detector.py     - tool.call:post subscriber (rule-based; pending NNA migration)
         merge_hooks.py          - Idempotent installer for ~/.nna/hooks/notnative-memory/
 models/
     gte-large-en-v1.5/  - Embedding model (downloaded by install script)

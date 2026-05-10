@@ -32,7 +32,7 @@ NotNativeMemory/
   models/                Local embedding model (gte-large-en-v1.5, 1024-dim, fp16)
   hook_bundles/
     claude/notnative-memory/  Claude Code hook integration
-    nna/notnative-memory/     NotNativeAgent hook integration (incl. promise_detector)
+    nna/notnative-memory/     NotNativeAgent hook integration
   templates/             Jinja2 web UI (memories, facts, tokens, conflicts)
   tests/                 25+ unit/integration tests
   docker/                docker-compose stack (mcp + postgres profiles)
@@ -211,8 +211,6 @@ NNM ships hooks for two host platforms: Claude Code (`hook_bundles/claude/notnat
 | `Stop` (turn-analysis) | End-of-turn LLM extraction (NNA only today): produces RAG ingestions and, optionally, a high-importance "promise" nudge memory for the next turn. |
 
 Each bundle ships its own `_internal/turn_analysis_core.py`; the agent-facing hook scripts in the bundle are thin adapters. Configuration lives in `hooks.env` (LLM endpoint, model, char caps, max tokens). LM Studio (OpenAI-compatible) and the Anthropic Messages API are both supported. Bundles do not share helpers across agents — each agent's bundle is developed independently with its own dev.
-
-`promise_detector.py` is a recent addition that watches for commitments the agent makes and surfaces them at next-turn so they don't get lost on compaction.
 
 ---
 

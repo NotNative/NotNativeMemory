@@ -71,8 +71,6 @@ def _write_hooks_env(target_dir: str, mcp_url: str) -> None:
         "# still emit the final JSON. Lower this for cost-sensitive cloud setups.\n"
         "MEMORY_EXTRACT_MAX_TOKENS=16000\n"
         "# MEMORY_EXTRACT_LLM_URL=http://localhost:9500/v1/chat/completions  # Optional LLM endpoint\n"
-        "\n# PromiseDetector (promise_detector.py — tool.call:post accountability)\n"
-        "MEMORY_PROMISE_TTL=1800\n"
     )
     with open(env_file, "w", encoding="utf-8") as f:
         f.write(env_content)
@@ -120,13 +118,6 @@ def _write_manifest(target_dir: str) -> None:
                 "blocking": False,
                 "timeout_ms": 15000,
             },
-            {
-                "event": "tool.call",
-                "phase": "post",
-                "command": "python promise_detector.py",
-                "blocking": False,
-                "timeout_ms": 5000,
-            },
         ],
     }
     manifest_file = os.path.join(target_dir, "manifest.json")
@@ -141,6 +132,11 @@ _SCRIPTS = [
     "session_start.py",
     "compact_guard.py",
     "turn_analysis.py",
+]
+
+# Files to retire from prior installs (script removed from this bundle;
+# logic migrated to NNA proper per contract §5).
+_RETIRED_SCRIPTS = [
     "promise_detector.py",
 ]
 
@@ -192,7 +188,7 @@ def merge(install_path: str, mcp_url: str = "http://localhost:9500/mcp"):
                 print(f"  Copied _internal/{entry}")
 
     # Remove obsolete files left behind by previous installs.
-    for obsolete in _OBSOLETE_FILES:
+    for obsolete in (*_OBSOLETE_FILES, *_RETIRED_SCRIPTS):
         path = os.path.join(target_dir, obsolete)
         if os.path.exists(path):
             try:

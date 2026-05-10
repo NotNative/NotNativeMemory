@@ -36,13 +36,6 @@
       "command": "python turn_analysis.py",
       "blocking": false,
       "timeout_ms": 90000
-    },
-    {
-      "event": "tool.call",
-      "phase": "post",
-      "command": "python promise_detector.py",
-      "blocking": false,
-      "timeout_ms": 60000
     }
   ]
 }

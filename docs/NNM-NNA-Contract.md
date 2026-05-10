@@ -163,18 +163,13 @@ Implementation pending; depends on §4.2 firing.
 
 ## 5. Promise Detection Migration
 
-Two parallel promise-tracking implementations currently live in NNM. Both should move to NNA.
+**Status (2026-05-09):** the rule-based `promise_detector.py` has been removed from the NNM-side NNA bundle and the corresponding `tool.call:post` subscription dropped from `hook_bundles/nna/notnative-memory/manifest.json`. The NNA repo owns this logic going forward. The bundle's installer treats `promise_detector.py` as a retired script and removes it from the deployed dir on next install.
 
-| File | Current location | Mechanism | Move target |
-|---|---|---|---|
-| `hook_bundles/nna/notnative-memory/promise_detector.py` | NNM repo, NNA bundle subdir | Rule-based; fires on `tool.call:post` and watches `TaskCreate`/`TaskUpdate`/`TodoWrite`/`Write`/`Edit`. | NNA repo proper. |
-| Section 2 of `hook_bundles/nna/notnative-memory/_internal/turn_analysis_core.py` | NNM repo, shared core | LLM-judged; runs at end-of-turn and produces `unfulfilledPromises` / `shouldNudge` / `nudgeText`. | NNA repo, called by NNA's end-of-turn handler. |
+The LLM-judged promise tracking that lives inside `_internal/turn_analysis_core.py::analyze_turn` is still bundle-internal and still runs in NNM's NNA bundle today. Migrating that to a separate NNA-side LLM call remains pending; it does not block the worker lifecycle work.
 
-**Why both move:** promise detection is an agent-loop concern (did the model commit to something and not deliver?), not a memory concern. NNM's job is to remember; NNA's job is to nudge. The LLM-judged version is currently entangled with NNM's extraction prompt for historical reasons; it should be a separate NNA-side LLM call that consumes turn input, not an embedded section of NNM's extraction prompt.
+**Why both move:** promise detection is an agent-loop concern (did the model commit to something and not deliver?), not a memory concern. NNM's job is to remember; NNA's job is to nudge.
 
 **What NNM keeps:** the bundle's own `_internal/turn_analysis_core.py::store_pending_nudge` writes a high-importance pending-nudge memory when called. NNA can call `memory_store` directly via MCP with the right tags and importance, or use the bundle-local helper if it ships its own bundle. Either way, the *decision* to write a nudge is NNA's.
-
-**Ordering:** moving promise detection out is safe to do at any point; it does not block the worker lifecycle work. Do it together with the worker hooks if convenient.
 
 ---
 
