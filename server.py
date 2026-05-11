@@ -888,6 +888,128 @@ async def memory_fact_query(
 
 
 @mcp.tool()
+@instrumented("memory_fact_update")
+async def memory_fact_update(
+    fact_id: str,
+    subject: Optional[str] = None,
+    predicate: Optional[str] = None,
+    object: Optional[str] = None,
+    confidence: Optional[float] = None,
+) -> dict:
+    """
+    Edit a fact in place. Only fields you pass get changed; everything
+    else stays as it was. Use this for typos, value corrections, or
+    confidence adjustments on a CURRENT fact (one whose valid_to is
+    still NULL).
+
+    WHEN to use:
+    - The subject, predicate, or object has a typo or formatting bug.
+    - You want to raise or lower confidence after new evidence.
+    - You misspelled a server name or used a wrong port string in
+      memory_fact_add and want to fix it directly rather than add a
+      new fact + invalidate the old.
+
+    WHEN NOT to use:
+    - The fact's *value* legitimately changed (port moved, model
+      swapped). Use memory_fact_add — the new add auto-invalidates the
+      old one and the temporal history is preserved.
+    - Updating a historical (already invalidated) fact. This tool only
+      touches the currently-valid row.
+
+    Args:
+        fact_id: UUID of the fact to update (from memory_fact_query).
+        subject: New subject (optional).
+        predicate: New predicate (optional).
+        object: New object value (optional).
+        confidence: New confidence 0.0-1.0 (optional).
+    """
+    from uuid import UUID as _UUID
+    from lib.db import update_fact
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "updated": False}
+
+    try:
+        fid = _UUID(fact_id)
+    except (ValueError, TypeError):
+        return {"error": f"Invalid fact_id: {fact_id}", "updated": False}
+
+    if all(v is None for v in (subject, predicate, object, confidence)):
+        return {"error": "No fields to update", "updated": False}
+
+    try:
+        ok = await update_fact(
+            fact_id=fid,
+            owner_user_id=owner,
+            subject=subject,
+            predicate=predicate,
+            object=object,
+            confidence=confidence,
+        )
+    except Exception as exc:
+        return _tool_error("memory_fact_update", exc, {"updated": False})
+
+    if not ok:
+        return {
+            "updated": False,
+            "error": "Fact not found, not owned by caller, or already invalidated.",
+        }
+    return {"updated": True, "id": fact_id}
+
+
+@mcp.tool()
+@instrumented("memory_fact_forget")
+async def memory_fact_forget(fact_id: str) -> dict:
+    """
+    Hard-delete a fact row. Removes it entirely — the temporal history
+    is lost. Use this when a fact was wrong, never should have been
+    recorded, or contains sensitive data that shouldn't survive in any
+    form.
+
+    WHEN to use:
+    - The fact was an outright mistake (wrong subject, fabricated
+      relationship). It poisons future queries; delete it.
+    - The fact contains a secret or PII that landed by accident.
+    - The fact is too noisy to keep even as historical record.
+
+    WHEN NOT to use:
+    - The fact is just stale because the value changed. Use
+      memory_fact_add with the new value; the temporal model preserves
+      the old fact for "what was true on date X" queries.
+    - You want to edit, not delete. Use memory_fact_update.
+
+    Args:
+        fact_id: UUID of the fact to delete.
+    """
+    from uuid import UUID as _UUID
+    from lib.db import forget_fact
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "forgotten": False}
+
+    try:
+        fid = _UUID(fact_id)
+    except (ValueError, TypeError):
+        return {"error": f"Invalid fact_id: {fact_id}", "forgotten": False}
+
+    try:
+        ok = await forget_fact(fid, owner)
+    except Exception as exc:
+        return _tool_error("memory_fact_forget", exc, {"forgotten": False})
+
+    if not ok:
+        return {
+            "forgotten": False,
+            "error": "Fact not found or not owned by caller.",
+        }
+    return {"forgotten": True}
+
+
+@mcp.tool()
 @instrumented("memory_project_configure")
 async def memory_project_configure(
     domains: list[str],
@@ -955,6 +1077,60 @@ async def memory_project_configure(
         "project": info["name"] if info else project_dir,
         "domains": updated,
     }
+
+
+@mcp.tool()
+@instrumented("memory_project_list")
+async def memory_project_list(
+    scope: Optional[str] = None,
+    include_counts: bool = False,
+) -> dict:
+    """
+    List the projects you own. Each project carries its directory,
+    display name, scope (local/domain/global), and declared domains.
+
+    WHEN to use:
+    - You want to see which projects have local memories vs which are
+      domain or global buckets.
+    - Before declaring a domain via memory_project_configure — confirm
+      the domain projects you expect to share with actually exist.
+    - You suspect a memory landed in a project you didn't expect
+      (e.g. typo'd directory creating a phantom project row).
+    - Curation: identify low-traffic projects that may want to be
+      cleaned up or merged.
+
+    Args:
+        scope: Filter to a single scope ("local", "domain", or
+            "global"). Omit for all scopes.
+        include_counts: When True, includes memory_count per project.
+            Slightly more expensive (one extra count subquery per row);
+            default False keeps the call cheap for the common case.
+    """
+    from lib.db import list_user_projects
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "projects": [], "count": 0}
+
+    if scope is not None and scope not in ("local", "domain", "global"):
+        return {
+            "error": f"Invalid scope: {scope}",
+            "projects": [],
+            "count": 0,
+        }
+
+    try:
+        rows = await list_user_projects(
+            owner,
+            scope=scope,
+            include_counts=include_counts,
+        )
+    except Exception as exc:
+        return _tool_error("memory_project_list", exc,
+                           {"projects": [], "count": 0})
+
+    return {"projects": rows, "count": len(rows)}
 
 
 @mcp.tool()

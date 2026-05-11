@@ -1535,6 +1535,73 @@ async def update_fact(
     return result == "UPDATE 1"
 
 
+async def list_user_projects(
+    owner_user_id: UUID,
+    *,
+    scope: Optional[str] = None,
+    include_counts: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Return all projects owned by `owner_user_id` with their metadata.
+
+    Args:
+        scope: Filter to a specific scope ("local"/"domain"/"global").
+            Omit for all scopes.
+        include_counts: If True, joins memories to report row counts
+            per project. Skips the join when False so the call stays
+            cheap for tools that just want directory/name/domains.
+
+    Returns a list of dicts sorted by (scope, name) ascending. Each
+    row carries: id, directory, name, scope, domains, created_at, and
+    optionally memory_count.
+    """
+    from lib import rls
+    pool = await get_pool()
+
+    filters = ["p.owner_user_id = $1"]
+    params: List[Any] = [owner_user_id]
+    if scope:
+        filters.append("p.scope = $2")
+        params.append(scope)
+    where_sql = " AND ".join(filters)
+
+    if include_counts:
+        sql = (
+            f"""SELECT p.id, p.directory, p.name, p.scope, p.domains,
+                       p.created_at,
+                       (SELECT count(*) FROM memories m
+                          WHERE m.project_id = p.id) AS memory_count
+                  FROM projects p
+                  WHERE {where_sql}
+                  ORDER BY p.scope, p.name"""
+        )
+    else:
+        sql = (
+            f"""SELECT id, directory, name, scope, domains, created_at
+                  FROM projects p
+                  WHERE {where_sql}
+                  ORDER BY scope, name"""
+        )
+
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(sql, *params)
+
+    out = []
+    for r in rows:
+        item = {
+            "id": str(r["id"]),
+            "directory": r["directory"],
+            "name": r["name"],
+            "scope": r["scope"],
+            "domains": list(r["domains"] or []),
+            "created_at": r["created_at"].isoformat(),
+        }
+        if include_counts:
+            item["memory_count"] = int(r["memory_count"])
+        out.append(item)
+    return out
+
+
 async def admin_bulk_delete(
     memory_ids: List[UUID], owner_user_id: UUID,
 ) -> int:
