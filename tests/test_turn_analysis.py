@@ -126,6 +126,88 @@ def test_build_analysis_prompt_includes_summary_section():
     print("[OK] build_analysis_prompt includes the summary section with dialogue-only rule")
 
 
+# -- Brevity contract on extracted facts ----------------------------------
+# Memories should be short, easily-consumable, single-thought entries. The
+# earlier prompt told the model to "Include both the WHY and the WHAT-TO-DO"
+# and used a ~400-character soft target, which produced run-on memories with
+# two glued-together clauses. These tests pin the tighter contract so future
+# prompt tweaks can't silently regress.
+
+def test_session_prompt_does_not_mandate_combined_why_and_what():
+    """The model must not be told to ALWAYS include WHY+WHAT-TO-DO. That
+    mandate is what produced the run-on, semicolon-joined memories."""
+    prompt = core.build_analysis_prompt("u", "m")
+    bad_phrases = [
+        "Include both the WHY and the WHAT-TO-DO",
+        "cause and remedy together",
+    ]
+    for bad in bad_phrases:
+        assert bad not in prompt, (
+            f"Session prompt still mandates {bad!r}; this pushes the model "
+            f"toward compound run-on memories. Soften to opt-in."
+        )
+    print("[OK] session prompt does not mandate combined WHY+WHAT-TO-DO")
+
+
+def test_session_prompt_targets_short_facts():
+    """The length target must be in words (~25), not characters (~400).
+
+    ~400 chars is roughly 60-80 words: too long, encourages run-ons. ~25
+    words aligns with the memory_store style guide."""
+    prompt = core.build_analysis_prompt("u", "m")
+    assert "400 character" not in prompt and "400-character" not in prompt, (
+        "Session prompt still uses the 400-character target. Switch to "
+        "~25 words to encourage single-thought entries."
+    )
+    assert "25 words" in prompt, (
+        "Session prompt should give a ~25-word soft length target."
+    )
+    print("[OK] session prompt targets ~25-word facts, not 400 chars")
+
+
+def test_session_prompt_encourages_brevity_and_opt_in_why():
+    """The new contract: terse by default; reason only when needed."""
+    prompt = core.build_analysis_prompt("u", "m")
+    lower = prompt.lower()
+    assert "be terse" in lower, (
+        "Session prompt should explicitly tell the model to be terse."
+    )
+    # Either of these phrasings makes the why-clause opt-in instead of mandatory.
+    assert (
+        "only when the rule wouldn't stand alone" in prompt
+        or "only when" in lower and "self-evident" in lower
+    ), "Session prompt should make the why-clause explicitly optional."
+    print("[OK] session prompt encourages brevity + opt-in why")
+
+
+def test_worker_prompt_targets_short_facts():
+    """Worker prompt mirrors the session contract: ~25-word target, no
+    400-character ceiling, no WHY+WHAT-TO-DO mandate."""
+    prompt = core.build_worker_analysis_prompt("envelope", "output")
+    assert "400 character" not in prompt and "400-character" not in prompt
+    assert "25 words" in prompt
+    assert "be terse" in prompt.lower(), (
+        "Worker prompt should explicitly tell the model to be terse."
+    )
+    assert "Include WHY and WHAT-TO-DO when applicable" not in prompt, (
+        "Worker prompt still mandates WHY+WHAT-TO-DO together. Soften."
+    )
+    print("[OK] worker prompt targets ~25-word facts and opt-in why")
+
+
+def test_session_prompt_bad_example_includes_run_on_shape():
+    """The bad-example set must call out the run-on shape explicitly,
+    because that's the most common failure mode under reasoning models.
+    A model that has never seen 'this is wrong' for a run-on will produce
+    run-ons."""
+    prompt = core.build_analysis_prompt("u", "m")
+    assert "run-on" in prompt.lower(), (
+        "Session prompt's bad-example set should label the run-on shape "
+        "as wrong; otherwise the model has no negative exemplar for it."
+    )
+    print("[OK] session prompt's bad-example set covers the run-on shape")
+
+
 # -- Shape coercion -------------------------------------------------------
 
 def test_coerce_analysis_full_shape():
@@ -1419,6 +1501,12 @@ if __name__ == "__main__":
         test_build_worker_analysis_prompt_steers_toward_vendor_quirks,
         test_build_analysis_prompt_does_not_truncate_long_inputs,
         test_build_worker_analysis_prompt_does_not_truncate_long_inputs,
+        # core: brevity contract on extracted facts
+        test_session_prompt_does_not_mandate_combined_why_and_what,
+        test_session_prompt_targets_short_facts,
+        test_session_prompt_encourages_brevity_and_opt_in_why,
+        test_worker_prompt_targets_short_facts,
+        test_session_prompt_bad_example_includes_run_on_shape,
         # core: shape coercion
         test_coerce_analysis_full_shape,
         test_coerce_analysis_missing_keys_default_safe,

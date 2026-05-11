@@ -250,14 +250,16 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         "\n"
         "  Rules for each fact:\n"
         "    1. One self-contained sentence that reads correctly in isolation, weeks later.\n"
-        "    2. Include both the WHY and the WHAT-TO-DO when applicable (cause and remedy together).\n"
+        "    2. Be terse. Add a brief reason only when the rule wouldn't stand alone without it.\n"
+        "       Most facts don't need one. Don't force a why-clause when the action is self-evident.\n"
         "    3. State rules and preferences as rules, not as observations about a speaker.\n"
         '         Bad:  "The user said responses should be terse."\n'
-        '         Good: "Responses should be terse; design ownership belongs to the user."\n'
+        '         Good: "Keep responses terse unless asked for details."\n'
         '    4. Do not reference "the user", "this turn", "above", "the conversation",\n'
         "       or any speaker. The fact must stand alone with no context dependency.\n"
         "    5. One thought per entry. If a fact has two unrelated parts, split it into two entries.\n"
-        "    6. Soft length target ~400 characters. If a thought is longer, it is probably two thoughts.\n"
+        "    6. Soft length target ~25 words. If you can't say it in one short sentence,\n"
+        "       you have two thoughts: split them.\n"
         "    7. Tags are short lowercase keywords useful for later filtering\n"
         '       (e.g. "shell", "powershell", "correction", "preference", "infra", "tool-failure").\n'
         "    8. Skip an entry entirely if it cannot stand alone usefully. Better empty than noisy.\n"
@@ -266,18 +268,17 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         "  yields 30 facts, return 30. There is no quota and no upper target.\n"
         "\n"
         "  Examples of well-formed facts:\n"
-        '    - "When writing a PowerShell script from bash, use single quotes around strings\n'
-        "       containing special characters; bash's escape rendering will otherwise corrupt\n"
-        '       double-quoted strings before PowerShell sees them."\n'
-        '    - "Em-dashes must never appear in any text output. Replace with semicolons or periods."\n'
-        '    - "NotNativeMemory RAG ingestion uses 2000-character chunks with 250-character overlap,\n'
-        "       sharing the gte-large-en-v1.5 embedding space with memories so hybrid retrieval can\n"
-        '       fuse them via reciprocal rank fusion."\n'
+        '    - "Em-dashes must never appear in any text output."\n'
+        '    - "Use single quotes when shelling PowerShell from bash; bash mangles double quotes first."\n'
+        '    - "Keep responses terse unless asked for details."\n'
+        '    - "NNM RAG chunks are 2000 chars with 250-char overlap, sharing the memory embedding space."\n'
         "\n"
         "  Examples of BAD extractions (do not produce these):\n"
         '    - "The user prefers terse responses." (references the user; reframe as a rule)\n'
         '    - "This turn discussed PowerShell quoting." (meta about the turn, not a fact)\n'
-        '    - "Use single quotes." (no why, no scope, useless out of context)\n'
+        '    - "When writing a PowerShell script from bash, use single quotes around strings\n'
+        "       containing special characters; bash's escape rendering will otherwise corrupt\n"
+        '       double-quoted strings before PowerShell sees them." (run-on; same idea fits in one short sentence)\n'
         '    - "OK." (trivial)\n'
         "\n"
         'SECTION 2: Promise tracking ("unfulfilledPromises", "shouldNudge", "nudgeText")\n'
@@ -384,9 +385,10 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         "\n"
         "  Same fact rules as session extraction:\n"
         "    - One self-contained sentence that reads correctly in isolation.\n"
-        "    - Include WHY and WHAT-TO-DO when applicable.\n"
+        "    - Be terse. Add a brief reason only when the action is not self-evident.\n"
         "    - No references to \"the worker\", \"this run\", \"the task above\".\n"
-        "    - Soft length target ~400 characters.\n"
+        "    - Soft length target ~25 words. If you can't say it in one short sentence,\n"
+        "      you have two thoughts: split them.\n"
         "    - Tags are short lowercase keywords; include the affected\n"
         '       vendor or system if applicable (e.g. "vendor:acme", "scrape",\n'
         '       "api:stripe", "selector").\n'
@@ -395,15 +397,9 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         "  20 distinct vendor quirks, return all 20.\n"
         "\n"
         "  Examples of well-formed worker facts:\n"
-        '    - "Acme Corp\'s pricing page renders price in a data-price attribute\n'
-        '       on the .product-tile element; the visible text is a localized\n'
-        '       formatted string and is unsafe to parse for the numeric value."\n'
-        '    - "Stripe checkout sessions older than 24 hours return a 410 GONE\n'
-        '       on retrieve; treat any retrieve failure on a session_id older\n'
-        '       than a day as expected and skip rather than retry."\n'
-        '    - "Cloudflare-protected vendor pages require a real browser fingerprint;\n'
-        '       a plain requests.get returns a 403 challenge page rather than the\n'
-        '       resource. Use the headless-browser tool, not raw HTTP."\n'
+        '    - "Acme pricing lives in .product-tile data-price, not the visible text."\n'
+        '    - "Stripe checkout sessions older than 24h return 410 GONE; skip the retrieve, don\'t retry."\n'
+        '    - "Cloudflare-protected vendor pages need the headless-browser tool, not raw requests."\n'
         "\n"
         'SECTION 2: Promise tracking ("unfulfilledPromises", "shouldNudge", "nudgeText")\n'
         "\n"
