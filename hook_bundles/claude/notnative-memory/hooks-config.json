@@ -46,7 +46,7 @@
           {
             "type": "command",
             "command": "python {{DEPLOY_DIR}}/turn_analysis.py",
-            "timeout": 15
+            "timeout": 120
           }
         ]
       }

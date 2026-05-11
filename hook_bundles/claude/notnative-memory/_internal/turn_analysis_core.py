@@ -27,9 +27,10 @@ from typing import Optional
 DEFAULT_ANTHROPIC_MODEL = "claude-haiku-4-5-20251001"
 DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 
-# Conservative caps so a single turn never floods the analyzer.
-USER_PROMPT_CAP_CHARS = 2000
-MODEL_RESPONSE_CAP_CHARS = 4000
+# No input-size caps. This is a local-first analyzer; token cost is not a
+# concern, and truncating the user prompt or model response loses signal.
+# Runaway protection comes from MEMORY_EXTRACT_TIMEOUT (urllib whole-request
+# timeout) plus the outer hook-process timeout, not from input slicing.
 
 # Min combined chars to trigger analysis. Set low: short corrections like
 # "stop using em-dashes" are some of the highest-value extractions. The cap
@@ -67,6 +68,8 @@ class AnalysisConfig:
         timeout: int = DEFAULT_LLM_TIMEOUT,
         min_conversation_chars: int = DEFAULT_MIN_CONVERSATION_CHARS,
         max_extractions: int = DEFAULT_MAX_EXTRACTIONS,
+        disable_reasoning: bool = False,
+        project: str = "_global",
     ) -> None:
         if api not in ("anthropic_messages", "openai_compat"):
             raise ValueError(f"unknown api: {api}")
@@ -85,6 +88,17 @@ class AnalysisConfig:
         self.timeout = timeout
         self.min_conversation_chars = min_conversation_chars
         self.max_extractions = max_extractions
+        # When true and api == 'openai_compat', the LLM request includes
+        # chat_template_kwargs={"enable_thinking": false}. Backends that
+        # honor this kwarg (LM Studio, vLLM, llama.cpp Qwen3 templates)
+        # skip the hidden <think> phase, which the analyzer doesn't need.
+        # No-op on anthropic_messages.
+        self.disable_reasoning = disable_reasoning
+        # NNM project scope to write into. Must be a valid write target —
+        # '_global', '_domain_<name>', or an absolute path. The server-side
+        # default 'general' is rejected, so this MUST be supplied explicitly
+        # or every store silently fails with stored=false.
+        self.project = project
 
 
 def resolve_config_from_env(env: Optional[dict] = None) -> AnalysisConfig:
@@ -171,6 +185,8 @@ def resolve_config_from_env(env: Optional[dict] = None) -> AnalysisConfig:
     timeout = int(e.get("MEMORY_EXTRACT_TIMEOUT", str(DEFAULT_LLM_TIMEOUT)))
     min_chars = int(e.get("MEMORY_EXTRACT_MIN_LENGTH", str(DEFAULT_MIN_CONVERSATION_CHARS // 10))) * 10
     max_ext = int(e.get("MEMORY_EXTRACT_MAX_RESULTS", str(DEFAULT_MAX_EXTRACTIONS)))
+    disable_reasoning = e.get("MEMORY_EXTRACT_DISABLE_REASONING", "").strip().lower() in ("1", "true", "yes")
+    project = e.get("MEMORY_EXTRACT_PROJECT", "_global").strip() or "_global"
 
     return AnalysisConfig(
         api=api,
@@ -185,6 +201,8 @@ def resolve_config_from_env(env: Optional[dict] = None) -> AnalysisConfig:
         timeout=timeout,
         min_conversation_chars=min_chars,
         max_extractions=max_ext,
+        disable_reasoning=disable_reasoning,
+        project=project,
     )
 
 
@@ -311,10 +329,10 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         "\n"
         "Conversation Turn:\n"
         "--- USER ---\n"
-        f"{user_prompt[:USER_PROMPT_CAP_CHARS]}\n"
+        f"{user_prompt}\n"
         "\n"
         "--- MODEL ---\n"
-        f"{model_response[:MODEL_RESPONSE_CAP_CHARS]}\n"
+        f"{model_response}\n"
         "--- END ---"
     )
 
@@ -430,10 +448,10 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         "\n"
         "Worker Run:\n"
         "--- TASK ENVELOPE ---\n"
-        f"{task_envelope[:USER_PROMPT_CAP_CHARS]}\n"
+        f"{task_envelope}\n"
         "\n"
         "--- WORKER OUTPUT ---\n"
-        f"{worker_output[:MODEL_RESPONSE_CAP_CHARS]}\n"
+        f"{worker_output}\n"
         "--- END ---"
     )
 
@@ -476,6 +494,32 @@ def coerce_analysis(parsed: dict) -> dict:
     }
 
 
+def _log_analysis_failure(reason: str) -> None:
+    """Append a single-line failure record to the analyzer log so silent
+    LLM-call problems are observable.
+
+    Adapters set MEMORY_EXTRACT_LOG to their per-harness log path; we
+    reuse it so successes and failures land in the same file. When the
+    env var is unset (e.g. core called in isolation), fall back to a
+    neutral path so the failure is at least recoverable.
+    """
+    log_path = os.environ.get(
+        "MEMORY_EXTRACT_LOG",
+        os.path.expanduser("~/.nnm_turn_analysis_failures.log"),
+    )
+    try:
+        parent = os.path.dirname(log_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(log_path, "a", encoding="utf-8") as fh:
+            fh.write(
+                f"{datetime.datetime.now().isoformat(timespec='seconds')}\t"
+                f"failure\treason={reason}\n"
+            )
+    except OSError:
+        pass
+
+
 def _call_analysis_llm_with_prompt(
     user_msg: str,
     config: AnalysisConfig,
@@ -491,9 +535,8 @@ def _call_analysis_llm_with_prompt(
     if not model and config.api == "openai_compat":
         model = discover_model(config)
     if not model:
-        print(
-            "[WARN] No model resolved for analysis; set MEMORY_EXTRACT_MODEL or ensure /models is reachable.",
-            file=sys.stderr,
+        _log_analysis_failure(
+            "no_model_resolved: set MEMORY_EXTRACT_MODEL or ensure /models is reachable"
         )
         return empty_analysis()
 
@@ -521,6 +564,11 @@ def _call_analysis_llm_with_prompt(
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
         }
+        if config.disable_reasoning:
+            # LM Studio / vLLM / llama.cpp Qwen3 honor this kwarg to skip
+            # the hidden <think> phase. Reasoning is wasted compute for a
+            # classifier prompt and burns the subprocess timeout budget.
+            body["chat_template_kwargs"] = {"enable_thinking": False}
 
     payload = json.dumps(body).encode("utf-8")
     try:
@@ -533,7 +581,7 @@ def _call_analysis_llm_with_prompt(
         with urllib.request.urlopen(req, timeout=config.timeout) as resp:
             response = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        print(f"[WARN] Analysis LLM unavailable ({exc}). Skipping.", file=sys.stderr)
+        _log_analysis_failure(f"llm_call_failed: {type(exc).__name__}: {exc}")
         return empty_analysis()
 
     # Extract content per API shape.
@@ -552,6 +600,8 @@ def _call_analysis_llm_with_prompt(
     try:
         parsed = json.loads(strip_markdown_fences(content))
     except (json.JSONDecodeError, ValueError):
+        preview = (content or "").strip()[:160].replace("\n", " ")
+        _log_analysis_failure(f"unparseable_json: content_preview={preview!r}")
         return empty_analysis()
 
     return coerce_analysis(parsed)
@@ -593,6 +643,47 @@ def call_worker_analysis_llm(
     return _call_analysis_llm_with_prompt(user_msg, config)
 
 
+def _mcp_call_stored(envelope: dict) -> bool:
+    """Return True if an MCP tools/call response indicates a successful write.
+
+    The MCP server wraps tool results as:
+
+        {"result": {"content": [{"type":"text","text": "{...inner json...}"}],
+                    "isError": false}}
+
+    A truthy ``result`` field at the JSON-RPC envelope level only means the
+    HTTP/JSON-RPC call itself succeeded. The actual storage outcome lives
+    inside ``content[0].text`` as a JSON string with a ``"stored"`` flag.
+    A non-stored response looks like:
+
+        {"stored": false, "error": "project 'general' is not a valid write target..."}
+
+    Pre-fix the analyzer counted these as successes — every "store" silently
+    failed but the log reported ``extracted=N``. This helper is the contract.
+    """
+    if not isinstance(envelope, dict):
+        return False
+    result = envelope.get("result")
+    if not isinstance(result, dict):
+        return False
+    if result.get("isError"):
+        return False
+    content = result.get("content")
+    if not isinstance(content, list) or not content:
+        return False
+    first = content[0]
+    if not isinstance(first, dict):
+        return False
+    text = first.get("text")
+    if not isinstance(text, str):
+        return False
+    try:
+        inner = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return False
+    return bool(inner.get("stored"))
+
+
 def rag_ingest(
     title: str,
     content: str,
@@ -614,6 +705,7 @@ def rag_ingest(
         "params": {
             "name": "rag_ingest_text",
             "arguments": {
+                "project": config.project,
                 "title": title,
                 "content": content,
                 "tags": tags,
@@ -630,11 +722,20 @@ def rag_ingest(
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=config.timeout) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        return bool(result.get("result"))
+            envelope = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        print(f"[ERROR] Failed to ingest '{title}': {exc}", file=sys.stderr)
+        _log_analysis_failure(f"rag_ingest_failed: {type(exc).__name__}: {exc}")
         return False
+    if not _mcp_call_stored(envelope):
+        # Server returned a structured failure — surface the inner text so
+        # the cause (e.g. invalid project, auth, schema) is in the log.
+        try:
+            inner = envelope.get("result", {}).get("content", [{}])[0].get("text", "")[:200]
+        except Exception:  # noqa: BLE001
+            inner = "<unparseable>"
+        _log_analysis_failure(f"rag_ingest_rejected: title={title!r} inner={inner!r}")
+        return False
+    return True
 
 
 def memory_store_call(
@@ -658,6 +759,7 @@ def memory_store_call(
         "params": {
             "name": "memory_store",
             "arguments": {
+                "project": config.project,
                 "content": content,
                 "tags": tags,
                 "importance": importance,
@@ -674,12 +776,20 @@ def memory_store_call(
             method="POST",
         )
         with urllib.request.urlopen(req, timeout=config.timeout) as resp:
-            result = json.loads(resp.read().decode("utf-8"))
-        return bool(result.get("result"))
+            envelope = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
         preview = content[:60].replace("\n", " ")
-        print(f"[ERROR] Failed to store memory '{preview}...': {exc}", file=sys.stderr)
+        _log_analysis_failure(f"memory_store_failed: preview={preview!r} {type(exc).__name__}: {exc}")
         return False
+    if not _mcp_call_stored(envelope):
+        try:
+            inner = envelope.get("result", {}).get("content", [{}])[0].get("text", "")[:200]
+        except Exception:  # noqa: BLE001
+            inner = "<unparseable>"
+        preview = content[:60].replace("\n", " ")
+        _log_analysis_failure(f"memory_store_rejected: preview={preview!r} inner={inner!r}")
+        return False
+    return True
 
 
 def _confidence_to_importance(confidence: str) -> str:

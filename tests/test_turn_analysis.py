@@ -110,17 +110,6 @@ def test_build_worker_analysis_prompt_steers_toward_vendor_quirks():
     print("[OK] build_worker_analysis_prompt steers toward vendor/operational extraction")
 
 
-def test_build_worker_analysis_prompt_caps_lengths():
-    long_envelope = "ENV" * 1000      # 3000 chars
-    long_output = "OUT" * 2000        # 6000 chars
-    prompt = core.build_worker_analysis_prompt(long_envelope, long_output)
-    # Re-uses USER_PROMPT_CAP_CHARS / MODEL_RESPONSE_CAP_CHARS so a single
-    # noisy worker run cannot blow the analyzer's context budget.
-    assert prompt.count("ENV") < 1000
-    assert prompt.count("OUT") < 2000
-    print("[OK] build_worker_analysis_prompt caps envelope/output lengths")
-
-
 def test_build_analysis_prompt_includes_summary_section():
     """The summary section drives §3.7 (compacted conversation summaries to RAG).
 
@@ -135,16 +124,6 @@ def test_build_analysis_prompt_includes_summary_section():
     assert "tool calls" in prompt.lower() or "tool results" in prompt.lower()
     assert "dialogue" in prompt.lower() or "discussed" in prompt.lower()
     print("[OK] build_analysis_prompt includes the summary section with dialogue-only rule")
-
-
-def test_build_analysis_prompt_caps_lengths():
-    long_user = "USERTOK" * 1000     # 7000 chars
-    long_model = "MODELTOK" * 1000   # 8000 chars
-    prompt = core.build_analysis_prompt(long_user, long_model)
-    # User capped at 2000 chars; model capped at 4000 chars.
-    assert prompt.count("USERTOK") < 1000
-    assert prompt.count("MODELTOK") == 500
-    print("[OK] build_analysis_prompt caps user/model lengths")
 
 
 # -- Shape coercion -------------------------------------------------------
@@ -291,6 +270,338 @@ def test_resolve_config_explicit_model_wins():
     cfg = core.resolve_config_from_env(env)
     assert cfg.model == "model-fixture-a"
     print("[OK] resolve_config: MEMORY_EXTRACT_MODEL pins the model")
+
+
+# -- No input-size caps (local-first analyzer) ----------------------------
+# Regression: build_analysis_prompt / build_worker_analysis_prompt used to
+# truncate user_prompt at 2000 chars and model_response at 4000 chars.
+# That throws away signal in turns with long tool results or detailed
+# discussion. Token cost is not a concern for a local-only analyzer;
+# runaway protection lives at the urllib timeout and the hook-process
+# timeout, not in input slicing.
+
+def test_build_analysis_prompt_does_not_truncate_long_inputs():
+    user = "U" * 20000
+    model = "M" * 50000
+    prompt = core.build_analysis_prompt(user, model)
+    assert user in prompt, "long user prompt must pass through verbatim"
+    assert model in prompt, "long model response must pass through verbatim"
+    print("[OK] build_analysis_prompt does not truncate long inputs")
+
+
+def test_build_worker_analysis_prompt_does_not_truncate_long_inputs():
+    envelope = "E" * 20000
+    output = "O" * 50000
+    prompt = core.build_worker_analysis_prompt(envelope, output)
+    assert envelope in prompt
+    assert output in prompt
+    print("[OK] build_worker_analysis_prompt does not truncate long inputs")
+
+
+# -- Reasoning suppression (MEMORY_EXTRACT_DISABLE_REASONING) -------------
+# Regression: the hooks.env contract documents
+# MEMORY_EXTRACT_DISABLE_REASONING=1 → core must send
+# chat_template_kwargs={"enable_thinking": false}. Before the fix the
+# flag was a no-op: reasoning models burned the subprocess timeout on
+# hidden <think> and the JSON content arrived empty, so extractions
+# silently stored zero memories.
+
+def test_resolve_config_disable_reasoning_default_false():
+    cfg = core.resolve_config_from_env({})
+    assert cfg.disable_reasoning is False
+    print("[OK] resolve_config: disable_reasoning defaults to False")
+
+
+def test_resolve_config_disable_reasoning_honors_truthy_values():
+    for truthy in ("1", "true", "TRUE", "yes"):
+        cfg = core.resolve_config_from_env({"MEMORY_EXTRACT_DISABLE_REASONING": truthy})
+        assert cfg.disable_reasoning is True, f"{truthy!r} should enable the flag"
+    for falsy in ("0", "false", "no", ""):
+        cfg = core.resolve_config_from_env({"MEMORY_EXTRACT_DISABLE_REASONING": falsy})
+        assert cfg.disable_reasoning is False, f"{falsy!r} should leave the flag off"
+    print("[OK] resolve_config: disable_reasoning parses truthy/falsy env values")
+
+
+def test_openai_body_includes_chat_template_kwargs_when_disable_reasoning():
+    cfg = _make_config("openai_compat", model="x", disable_reasoning=True)
+    captured = {}
+
+    def _capture(req, *_, **__):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = _mock_openai_response(
+            core.empty_analysis()
+        )
+        return cm
+
+    with mock.patch.object(core.urllib.request, "urlopen", side_effect=_capture):
+        core.call_analysis_llm("u" * 200, "m" * 200, cfg)
+
+    assert captured["body"].get("chat_template_kwargs") == {"enable_thinking": False}, (
+        "MEMORY_EXTRACT_DISABLE_REASONING=1 must produce "
+        "chat_template_kwargs={'enable_thinking': false} so reasoning models "
+        "skip the hidden <think> phase."
+    )
+    print("[OK] openai_compat body sends chat_template_kwargs when disable_reasoning is True")
+
+
+def test_openai_body_omits_chat_template_kwargs_by_default():
+    cfg = _make_config("openai_compat", model="x")
+    assert cfg.disable_reasoning is False
+    captured = {}
+
+    def _capture(req, *_, **__):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = _mock_openai_response(
+            core.empty_analysis()
+        )
+        return cm
+
+    with mock.patch.object(core.urllib.request, "urlopen", side_effect=_capture):
+        core.call_analysis_llm("u" * 200, "m" * 200, cfg)
+
+    assert "chat_template_kwargs" not in captured["body"], (
+        "By default the body must not carry chat_template_kwargs — adding it "
+        "unconditionally would break backends that reject unknown kwargs."
+    )
+    print("[OK] openai_compat body omits chat_template_kwargs by default")
+
+
+def test_anthropic_body_ignores_disable_reasoning():
+    cfg = _make_config("anthropic_messages", model="claude-fixture", disable_reasoning=True)
+    captured = {}
+
+    def _capture(req, *_, **__):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = _mock_anthropic_response(
+            core.empty_analysis()
+        )
+        return cm
+
+    with mock.patch.object(core.urllib.request, "urlopen", side_effect=_capture):
+        core.call_analysis_llm("u" * 200, "m" * 200, cfg)
+
+    assert "chat_template_kwargs" not in captured["body"], (
+        "chat_template_kwargs is an OpenAI-compat extension; Anthropic Messages "
+        "rejects unknown top-level fields."
+    )
+    print("[OK] anthropic body never carries chat_template_kwargs")
+
+
+# -- Project scope + wrapped MCP response parsing -------------------------
+# Regression: the analyzer historically passed no `project` to memory_store,
+# letting the server fall back to the default "general" — which the server
+# rejects as a write target. Worse, the storage helpers only checked the
+# JSON-RPC envelope's `result` field for truthiness, missing the inner
+# `{"stored": false, "error": "..."}` payload. Result: the log reported
+# extracted=N but nothing actually landed in NNM. These tests pin the
+# project argument, the wrapped-response parser, and the failure-logging
+# behavior so that "stored=N" is now a real promise, not a lie.
+
+def test_resolve_config_default_project_is_global():
+    cfg = core.resolve_config_from_env({})
+    assert cfg.project == "_global", (
+        "Default must be a valid write target ('_global'). Server-side "
+        "default 'general' is rejected; an unset project would silently "
+        "fail every store."
+    )
+    print("[OK] resolve_config: project defaults to '_global'")
+
+
+def test_resolve_config_project_env_override():
+    cfg = core.resolve_config_from_env({"MEMORY_EXTRACT_PROJECT": "_domain_nna"})
+    assert cfg.project == "_domain_nna"
+    print("[OK] resolve_config: MEMORY_EXTRACT_PROJECT overrides default")
+
+
+def test_resolve_config_empty_project_falls_back_to_global():
+    cfg = core.resolve_config_from_env({"MEMORY_EXTRACT_PROJECT": "   "})
+    assert cfg.project == "_global", (
+        "Whitespace/empty MEMORY_EXTRACT_PROJECT must not produce '' — that "
+        "would re-introduce the server-side default-to-'general' failure."
+    )
+    print("[OK] resolve_config: empty/whitespace project falls back to '_global'")
+
+
+def test_memory_store_call_passes_project_argument():
+    cfg = _make_config("openai_compat", model="x", project="_domain_test")
+    captured = {}
+
+    def _capture(req, *_, **__):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = json.dumps({
+            "result": {"content": [{"type": "text", "text": '{"stored": true, "id": "test-id"}'}], "isError": False}
+        }).encode("utf-8")
+        return cm
+
+    with mock.patch.object(core.urllib.request, "urlopen", side_effect=_capture):
+        ok = core.memory_store_call("a fact", ["t"], "normal", "model-inferred", cfg)
+
+    assert ok is True
+    args = captured["body"]["params"]["arguments"]
+    assert args["project"] == "_domain_test", (
+        "memory_store_call must pass `project` in the MCP arguments, or the "
+        "server falls back to 'general' and rejects the write."
+    )
+    print("[OK] memory_store_call forwards project argument")
+
+
+def test_rag_ingest_passes_project_argument():
+    cfg = _make_config("openai_compat", model="x", project="_global")
+    captured = {}
+
+    def _capture(req, *_, **__):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = json.dumps({
+            "result": {"content": [{"type": "text", "text": '{"stored": true, "document_id": "doc-1"}'}], "isError": False}
+        }).encode("utf-8")
+        return cm
+
+    with mock.patch.object(core.urllib.request, "urlopen", side_effect=_capture):
+        ok = core.rag_ingest("title", "body", ["t"], "normal", cfg)
+
+    assert ok is True
+    args = captured["body"]["params"]["arguments"]
+    assert args["project"] == "_global"
+    print("[OK] rag_ingest forwards project argument")
+
+
+def test_mcp_call_stored_success_envelope():
+    envelope = {
+        "result": {
+            "content": [{"type": "text", "text": '{"stored": true, "id": "abc"}'}],
+            "isError": False,
+        }
+    }
+    assert core._mcp_call_stored(envelope) is True
+    print("[OK] _mcp_call_stored returns True on inner stored=true")
+
+
+def test_mcp_call_stored_inner_failure():
+    """The exact failure shape that hid the bug for so long.
+
+    Pre-fix the analyzer counted this as success because the JSON-RPC
+    envelope has a truthy ``result`` field — even though the inner payload
+    clearly says the write did not happen.
+    """
+    envelope = {
+        "result": {
+            "content": [{"type": "text", "text": '{"stored": false, "error": "project \'general\' is not a valid write target. Use \'_global\', _domain_<name>, or an absolute path.", "project": "general"}'}],
+            "isError": False,
+        }
+    }
+    assert core._mcp_call_stored(envelope) is False
+    print("[OK] _mcp_call_stored returns False on inner stored=false (the bug shape)")
+
+
+def test_mcp_call_stored_is_error_flag():
+    envelope = {
+        "result": {
+            "content": [{"type": "text", "text": '{"stored": true}'}],
+            "isError": True,
+        }
+    }
+    assert core._mcp_call_stored(envelope) is False, (
+        "isError=true at the envelope level must override inner content."
+    )
+    print("[OK] _mcp_call_stored returns False when isError=true")
+
+
+def test_mcp_call_stored_malformed_envelopes():
+    # Defensive: every malformed shape should be treated as failure, not crash.
+    for envelope in [
+        None,
+        {},
+        {"result": None},
+        {"result": "string-not-dict"},
+        {"result": {"content": []}},
+        {"result": {"content": [{}]}},
+        {"result": {"content": [{"text": "not-json"}]}},
+        {"result": {"content": [{"text": '{"different_key": true}'}]}},
+    ]:
+        assert core._mcp_call_stored(envelope) is False, (
+            f"malformed envelope must not return True: {envelope!r}"
+        )
+    print("[OK] _mcp_call_stored treats malformed envelopes as failure")
+
+
+def test_memory_store_call_rejected_inner_returns_false(tmp_path):
+    """End-to-end: when the server returns the 'project general not valid'
+    rejection, the call must return False AND log the rejection reason."""
+    log_file = tmp_path / "turn_analysis.log"
+    cfg = _make_config("openai_compat", model="x")
+    rejection = json.dumps({
+        "result": {
+            "content": [{"type": "text", "text": '{"stored": false, "error": "project \'general\' is not a valid write target."}'}],
+            "isError": False,
+        }
+    }).encode("utf-8")
+
+    with mock.patch.dict(os.environ, {"MEMORY_EXTRACT_LOG": str(log_file)}, clear=False):
+        with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = rejection
+            ok = core.memory_store_call("a fact", [], "normal", "model-inferred", cfg)
+
+    assert ok is False
+    line = log_file.read_text(encoding="utf-8")
+    assert "memory_store_rejected" in line
+    assert "not a valid write target" in line
+    print("[OK] memory_store_call: inner rejection returns False and logs the reason")
+
+
+# -- Failure observability (silent → logged) ------------------------------
+
+def test_llm_call_failure_writes_log_line(tmp_path):
+    """When the LLM call raises, the core must append a failure line to the
+    analyzer log instead of silently swallowing it. Pre-fix the only signal
+    was a stderr print that the subprocess-launching harness discarded, so
+    "extracted=0" entries had no explanation in the log file.
+    """
+    import urllib.error
+    log_file = tmp_path / "turn_analysis.log"
+    cfg = _make_config("openai_compat", model="x")
+
+    with mock.patch.dict(os.environ, {"MEMORY_EXTRACT_LOG": str(log_file)}, clear=False):
+        with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
+            urlopen_mock.side_effect = urllib.error.URLError("connection refused")
+            result = core.call_analysis_llm("u" * 200, "m" * 200, cfg)
+
+    assert result == core.empty_analysis()
+    assert log_file.exists(), "failure must produce a log entry"
+    line = log_file.read_text(encoding="utf-8")
+    assert "failure" in line
+    assert "llm_call_failed" in line
+    assert "URLError" in line
+    print("[OK] LLM call failure writes a diagnosable line to MEMORY_EXTRACT_LOG")
+
+
+def test_unparseable_response_writes_log_line(tmp_path):
+    """When the LLM returns non-JSON content, the core must log a preview
+    of what came back so the user can tell whether the model emitted
+    reasoning-only output, truncated output, or pure garbage.
+    """
+    log_file = tmp_path / "turn_analysis.log"
+    cfg = _make_config("openai_compat", model="x")
+    # Return a non-JSON response body so json.loads() fails downstream.
+    bad_body = json.dumps({
+        "choices": [{"message": {"content": "I was still thinking when…"}}]
+    }).encode("utf-8")
+
+    with mock.patch.dict(os.environ, {"MEMORY_EXTRACT_LOG": str(log_file)}, clear=False):
+        with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
+            urlopen_mock.return_value.__enter__.return_value.read.return_value = bad_body
+            result = core.call_analysis_llm("u" * 200, "m" * 200, cfg)
+
+    assert result == core.empty_analysis()
+    assert log_file.exists()
+    line = log_file.read_text(encoding="utf-8")
+    assert "unparseable_json" in line
+    assert "content_preview" in line
+    print("[OK] unparseable response writes a content preview to the log")
 
 
 # -- Model auto-discovery -------------------------------------------------
@@ -671,9 +982,15 @@ def test_memory_store_call_posts_correct_jsonrpc_shape():
         captured["url"] = req.full_url
         captured["body"] = json.loads(req.data.decode("utf-8"))
         cm = mock.MagicMock()
-        cm.__enter__.return_value.read.return_value = json.dumps(
-            {"result": {"id": "abc", "stored": True}}
-        ).encode("utf-8")
+        # Realistic MCP envelope: tool result wrapped in content[].text as a
+        # JSON string. The pre-fix flat shape ({"result": {"stored": true}})
+        # never matched what the server actually returns.
+        cm.__enter__.return_value.read.return_value = json.dumps({
+            "result": {
+                "content": [{"type": "text", "text": '{"stored": true, "id": "abc"}'}],
+                "isError": False,
+            }
+        }).encode("utf-8")
         return cm
 
     with mock.patch.object(core.urllib.request, "urlopen", side_effect=_capture):
@@ -694,6 +1011,7 @@ def test_memory_store_call_posts_correct_jsonrpc_shape():
     assert args["tags"] == ["a", "b"]
     assert args["importance"] == "high"
     assert args["source"] == "model-inferred"
+    assert args["project"] == "_global", "project must be passed; server rejects default 'general'"
     print("[OK] memory_store_call posts the expected JSON-RPC payload to the MCP")
 
 
@@ -1099,8 +1417,8 @@ if __name__ == "__main__":
         test_build_analysis_prompt_specifies_new_schema_and_quality_bar,
         test_build_analysis_prompt_includes_summary_section,
         test_build_worker_analysis_prompt_steers_toward_vendor_quirks,
-        test_build_worker_analysis_prompt_caps_lengths,
-        test_build_analysis_prompt_caps_lengths,
+        test_build_analysis_prompt_does_not_truncate_long_inputs,
+        test_build_worker_analysis_prompt_does_not_truncate_long_inputs,
         # core: shape coercion
         test_coerce_analysis_full_shape,
         test_coerce_analysis_missing_keys_default_safe,
