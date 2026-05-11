@@ -940,6 +940,7 @@ def register_routes(mcp) -> None:
             "scope": _qs_str(params, "scope"),
             "tag": _qs_str(params, "tag"),
             "min_importance": _qs_str(params, "min_importance"),
+            "source_kind": _qs_str(params, "source_kind"),
             "q": _qs_str(params, "q"),
             "sort": _qs_str(params, "sort") or "created_at",
             "order": _qs_str(params, "order") or "DESC",
@@ -953,6 +954,7 @@ def register_routes(mcp) -> None:
             scope=filters["scope"],
             tag=filters["tag"],
             min_importance=filters["min_importance"],
+            source_kind=filters["source_kind"],
             q=filters["q"],
             sort=filters["sort"],
             order=filters["order"],
@@ -964,7 +966,7 @@ def register_routes(mcp) -> None:
             offset=offset, limit=limit, total=total,
             filters=filters,
             filter_names=("project", "scope", "tag", "min_importance",
-                          "q", "sort", "order"),
+                          "source_kind", "q", "sort", "order"),
         )
 
         # HTMX requests want just the list partial for in-place swap;

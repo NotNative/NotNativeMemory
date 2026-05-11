@@ -1602,6 +1602,62 @@ async def list_user_projects(
     return out
 
 
+async def delete_user_project(
+    project_id: UUID,
+    owner_user_id: UUID,
+) -> Dict[str, int]:
+    """
+    Hard-delete a project AND every child row (memories, facts, RAG
+    documents, ingestion jobs) via FK ON DELETE CASCADE. Owner-scoped:
+    another user's project rows are untouched, and the SQL filters
+    explicitly on owner_user_id as belt-and-suspenders with RLS.
+
+    Returns a dict with `projects_deleted` (0 or 1) plus pre-delete
+    counts of each child table the cascade will reap, so callers can
+    confirm blast radius before logging.
+    """
+    from lib import rls
+    pool = await get_pool()
+
+    counts: Dict[str, int] = {
+        "memories": 0,
+        "facts": 0,
+        "documents": 0,
+        "projects_deleted": 0,
+    }
+
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        async with conn.transaction():
+            row = await conn.fetchrow(
+                "SELECT id FROM projects WHERE id = $1 AND owner_user_id = $2",
+                project_id, owner_user_id,
+            )
+            if row is None:
+                return counts
+
+            counts["memories"] = int((await conn.fetchval(
+                "SELECT count(*) FROM memories WHERE project_id = $1",
+                project_id,
+            )) or 0)
+            counts["facts"] = int((await conn.fetchval(
+                "SELECT count(*) FROM facts WHERE project_id = $1",
+                project_id,
+            )) or 0)
+            counts["documents"] = int((await conn.fetchval(
+                "SELECT count(*) FROM documents WHERE project_id = $1",
+                project_id,
+            )) or 0)
+
+            result = await conn.execute(
+                "DELETE FROM projects WHERE id = $1 AND owner_user_id = $2",
+                project_id, owner_user_id,
+            )
+            if result == "DELETE 1":
+                counts["projects_deleted"] = 1
+
+    return counts
+
+
 async def admin_bulk_delete(
     memory_ids: List[UUID], owner_user_id: UUID,
 ) -> int:
@@ -1661,6 +1717,9 @@ _ADMIN_SORT_COLUMNS = {
 }
 
 
+_ADMIN_SOURCE_KINDS = {"user-stated", "tool-result", "model-inferred"}
+
+
 async def admin_list_memories(
     owner_user_id: UUID,
     *,
@@ -1668,6 +1727,7 @@ async def admin_list_memories(
     scope: Optional[str] = None,
     tag: Optional[str] = None,
     min_importance: Optional[str] = None,
+    source_kind: Optional[str] = None,
     q: Optional[str] = None,
     sort: str = "created_at",
     order: str = "DESC",
@@ -1740,6 +1800,11 @@ async def admin_list_memories(
             conditions.append(f"m.importance = ANY(${param_idx})")
             params.append(allowed)
             param_idx += 1
+
+    if source_kind and source_kind in _ADMIN_SOURCE_KINDS:
+        conditions.append(f"m.source_kind = ${param_idx}")
+        params.append(source_kind)
+        param_idx += 1
 
     if q:
         conditions.append(f"m.content ILIKE ${param_idx}")

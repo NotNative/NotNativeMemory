@@ -25,6 +25,12 @@
       <option value="high" {% if filters.min_importance == 'high' %}selected{% endif %}>high+</option>
       <option value="critical" {% if filters.min_importance == 'critical' %}selected{% endif %}>critical only</option>
     </select>
+    <select name="source_kind" style="flex: 0 1 170px;">
+      <option value="">source: any</option>
+      <option value="user-stated" {% if filters.source_kind == 'user-stated' %}selected{% endif %}>user-stated</option>
+      <option value="tool-result" {% if filters.source_kind == 'tool-result' %}selected{% endif %}>tool-result</option>
+      <option value="model-inferred" {% if filters.source_kind == 'model-inferred' %}selected{% endif %}>model-inferred</option>
+    </select>
     <input name="tag" value="{{ filters.tag or '' }}"
            placeholder="tag" style="flex: 0 1 140px;">
     <input name="project" value="{{ filters.project or '' }}"

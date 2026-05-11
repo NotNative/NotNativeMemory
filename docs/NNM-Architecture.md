@@ -157,19 +157,19 @@ A reranker pass was investigated and **deferred**.
 - **stdio** — launched per session by the MCP client; stateless; RAG ingest is inline.
 - **http** — long-lived process on port 9500. Starlette + Uvicorn; hosts the web UI and the RAG async worker. Operator surface: `--foreground`, `--status`, `--stop`.
 
-### 7.1 Exposed Tools (26)
+### 7.1 Exposed Tools (27)
 
 | Group | Tools |
 |---|---|
 | Memory CRUD | `memory_store`, `memory_search`, `memory_forget`, `memory_list`, `memory_update`, `memory_context`, `memory_inject_for_task` |
 | Facts | `memory_fact_add`, `memory_fact_query`, `memory_fact_update`, `memory_fact_forget` |
-| Project | `memory_project_configure`, `memory_project_list` |
+| Project | `memory_project_configure`, `memory_project_list`, `memory_project_delete` |
 | Promotion | `memory_promotion_candidates`, `memory_promote`, `memory_health` |
 | Conflicts | `memory_conflicts`, `memory_resolve_conflict`, `memory_supersede` |
 | RAG | `rag_ingest_text`, `rag_ingest_file`, `rag_search`, `rag_ingestion_status`, `rag_list`, `rag_forget` |
 | Composed | `recall` |
 
-Every tool runs through `_tool_auth_and_project()` (bearer token or localhost bypass) and `_tool_error()` (structured error wrapping).
+Every tool runs through `_tool_auth_and_project()` (bearer token or localhost bypass) and `_tool_error()` (structured error wrapping). Write tools whose project arg fails `_validate_writable_scope` (e.g. the legacy `general` sentinel, bare names, relative paths) **raise** `ToolError` rather than returning a structured failure dict, so the MCP envelope reports `isError: true` and clients that only inspect the envelope cannot mistake a rejected write for a successful one. The detail message is still surfaced via `content[0].text` for clients that read the inner shape.
 
 ---
 
@@ -180,7 +180,7 @@ Implemented in `lib/web_routes.py` over Starlette, sharing the bearer-token mode
 **Routes:**
 
 - `/login`, `/register` — auth.
-- `/memories` — list/filter/sort/search; inline HTMX edits; bulk delete; rescope between projects/scopes.
+- `/memories` — list/filter/sort/search; inline HTMX edits; bulk delete; rescope between projects/scopes. Filters: project, scope, tag, importance floor, source kind (`user-stated` / `tool-result` / `model-inferred`), free-text content search.
 - `/facts` — temporal browser with an "include superseded" toggle.
 - `/tokens` — mint/label/revoke bearer tokens.
 - `/conflicts` — side-by-side conflict resolution.

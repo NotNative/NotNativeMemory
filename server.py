@@ -40,6 +40,7 @@ from uuid import UUID
 
 from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
 
 load_dotenv()
 
@@ -347,9 +348,15 @@ def _tool_auth_and_project(
     if writable:
         scope_err = _validate_writable_scope(project_dir)
         if scope_err:
-            return None, None, {
-                "error": scope_err, **empty_shape, "project": project_dir,
-            }
+            # Raise so FastMCP wraps this in a CallToolResult with
+            # isError=true at the JSON-RPC envelope level. Returning an
+            # error dict keeps the envelope's isError=false, which let
+            # the turn-analyzer happily count rejected stores as
+            # successes for months. The exception path forces the
+            # failure to be visible to any client that only inspects
+            # the envelope, while clients that read content[0].text
+            # still get the message they expect.
+            raise ToolError(f"{scope_err} (project={project_dir!r})")
     return owner, project_dir, None
 
 
@@ -1134,6 +1141,76 @@ async def memory_project_list(
 
 
 @mcp.tool()
+@instrumented("memory_project_delete")
+async def memory_project_delete(project_id: str) -> dict:
+    """
+    Permanently delete one of your own projects, including every memory,
+    fact, and RAG document tied to it. Cascades through FK ON DELETE
+    CASCADE. This is irreversible — once you call it, the project row
+    and everything under it is gone.
+
+    WHEN to use:
+    - Empty cruft rows from typos in old project paths.
+    - Duplicates created before path normalization shipped
+      (D:/foo and D:\\foo treated as different projects).
+    - Stale test or scratch projects you never want to see again.
+    - Off-boarding a project that's been retired.
+
+    WHEN NOT to use:
+    - The project still contains memories or facts you care about. The
+      cascade is not selective.
+    - You're not sure. Call memory_project_list with include_counts=True
+      first to see what's actually attached.
+
+    The owner scoping is strict: you cannot delete another user's
+    project even if you have their project_id.
+
+    Args:
+        project_id: UUID of the project to delete (from
+            memory_project_list).
+
+    Returns:
+        A dict reporting the blast radius:
+        {
+          "projects_deleted": 0 or 1,
+          "memories": <count cascaded>,
+          "facts": <count cascaded>,
+          "documents": <count cascaded>,
+        }
+        When the id doesn't exist or isn't yours, projects_deleted=0
+        and all child counts are 0.
+    """
+    from uuid import UUID as _UUID
+    from lib.db import delete_user_project
+    from lib.auth_context import current_user_id
+
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required", "projects_deleted": 0}
+
+    try:
+        pid = _UUID(project_id)
+    except (ValueError, TypeError):
+        return {
+            "error": f"Invalid project_id: {project_id}",
+            "projects_deleted": 0,
+        }
+
+    try:
+        counts = await delete_user_project(pid, owner)
+    except Exception as exc:
+        return _tool_error("memory_project_delete", exc,
+                           {"projects_deleted": 0})
+
+    if counts["projects_deleted"] == 0:
+        return {
+            "projects_deleted": 0,
+            "error": "Project not found or not owned by caller.",
+        }
+    return counts
+
+
+@mcp.tool()
 @instrumented("memory_context")
 async def memory_context(
     project: Optional[str] = None,
@@ -1654,8 +1731,10 @@ async def memory_update(
         destination_dir = _normalize_project(project)
         scope_err = _validate_writable_scope(destination_dir)
         if scope_err:
-            return {"error": scope_err, "updated": False,
-                    "project": destination_dir}
+            # Same rationale as _tool_auth_and_project: raise so the MCP
+            # envelope reports isError=true, not isError=false with the
+            # failure buried in content[0].text.
+            raise ToolError(f"{scope_err} (project={destination_dir!r})")
 
     if content is not None and not content.strip():
         return {"error": "content cannot be empty", "updated": False}
