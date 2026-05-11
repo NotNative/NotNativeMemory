@@ -221,7 +221,20 @@ NNM ships hooks for two host platforms: Claude Code (`hook_bundles/claude/notnat
 | `Stop` (turn-analysis) | End-of-turn LLM extraction (NNA only today): produces RAG ingestions and, optionally, a high-importance "promise" nudge memory for the next turn. |
 | `PreToolUse` (safety gate) | Opt-in (`MEMORY_SAFETY_GATE_ENABLED=1`). Refuses a small baseline of destructive ops — `git push --force`, `rm -rf /`, `git reset --hard origin/...`, `DROP DATABASE` — by exiting 2 before dispatch. Disabled by default. |
 
-Each bundle ships its own `_internal/turn_analysis_core.py`; the agent-facing hook scripts in the bundle are thin adapters. Configuration lives in `hooks.env` (LLM endpoint, model, char caps, max tokens). LM Studio (OpenAI-compatible) and the Anthropic Messages API are both supported. Bundles do not share helpers across agents — each agent's bundle is developed independently with its own dev.
+Each bundle ships its own `_internal/turn_analysis_core.py`; the agent-facing hook scripts in the bundle are thin adapters. Configuration lives in `hooks.env`, resolved by `_internal/env_loader.py::load_hooks_env` which reads `~/.claude/hooks/notnative-memory/hooks.env` (or the NNA equivalent) and merges into `os.environ` via `setdefault` — so the inherited process environment always wins over file values, useful for tests and one-off overrides.
+
+Installer-generated defaults seed the analyzer with a working local LLM endpoint and safe write target so a fresh install runs end-to-end without manual editing:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `MEMORY_MCP_URL` | `http://localhost:9500/mcp` (or installer arg) | NNM MCP endpoint the hooks POST to. |
+| `OPENAI_BASE_URL` | `http://127.0.0.1:1234/v1` (LM Studio) | OpenAI-compat LLM endpoint for turn analysis. |
+| `OPENAI_API_KEY` | `lm-studio` | Placeholder accepted by LM Studio; real key for cloud backends. |
+| `MEMORY_EXTRACT_MODEL` | unset | Auto-discovered via `/v1/models` when blank; pin a specific id when multiple are loaded. |
+| `MEMORY_EXTRACT_PROJECT` | `_global` | NNM scope analyzer writes to. Must be a writable scope (`_global`, `_domain_<name>`, or absolute path). The server-side `general` default is rejected. |
+| `MEMORY_EXTRACT_DISABLE_REASONING` | `1` | When set, OpenAI-compat body adds `chat_template_kwargs={"enable_thinking": false}` so reasoning models (Qwen3-think, DeepSeek-R1) skip the hidden `<think>` phase that wastes the subprocess timeout on a classifier prompt. No-op on the Anthropic Messages backend. |
+
+LM Studio (OpenAI-compatible) and the Anthropic Messages API are both supported. Bundles do not share helpers across agents — each agent's bundle is developed independently with its own dev.
 
 ---
 
