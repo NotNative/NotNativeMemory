@@ -736,6 +736,45 @@ print('Model saved to models/gte-large-en-v1.5 (fp16)')
 fi
 
 # -----------------------------------------------------------------------
+# 8b. Firewall rule for inbound MCP port (Linux: ufw / firewall-cmd)
+# Server modes only (client-only mode exits earlier). The .env we wrote
+# pins MEMORY_BIND_HOST=0.0.0.0; without a firewall hole the port is
+# usually unreachable from the LAN. Opt-in via prompt, idempotent on
+# re-runs (skips when the rule already exists).
+# -----------------------------------------------------------------------
+# shellcheck source=install_lib/firewall.sh
+. "$SCRIPT_DIR/install_lib/firewall.sh"
+FW_TOOL=$(nnm_firewall_detect_tool)
+if [ "$FW_TOOL" = "none" ]; then
+    info "No active host firewall detected (ufw/firewall-cmd); skipping firewall configuration."
+elif nnm_firewall_rule_exists "$FW_TOOL" "$MCP_PORT"; then
+    info "Firewall rule for port $MCP_PORT already present in $FW_TOOL; skipping."
+else
+    step "Host firewall ($FW_TOOL)"
+    echo ""
+    read -r -p "  Open inbound TCP $MCP_PORT in $FW_TOOL? [Y/n] " fw_ans
+    if [ -z "$fw_ans" ] || [ "$fw_ans" = "y" ] || [ "$fw_ans" = "Y" ]; then
+        FW_RESULT=$(nnm_firewall_apply "$FW_TOOL" "$MCP_PORT" "0")
+        case "$FW_RESULT" in
+            created)
+                info "Firewall rule added via $FW_TOOL for port $MCP_PORT."
+                ;;
+            skipped-exists)
+                info "Firewall rule already present, skipping."
+                ;;
+            failed)
+                FW_CMD=$(nnm_firewall_build_cmd "$FW_TOOL" "$MCP_PORT")
+                warn "Could not add firewall rule (likely missing privilege)."
+                info "Run this manually as root:"
+                info "  $FW_CMD"
+                ;;
+        esac
+    else
+        info "Firewall left unchanged. Remote clients will not be able to reach $MCP_PORT until you open it."
+    fi
+fi
+
+# -----------------------------------------------------------------------
 # 9. Self-test
 # -----------------------------------------------------------------------
 step "Running self-test..."

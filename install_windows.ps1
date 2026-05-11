@@ -785,6 +785,47 @@ print('Model saved to models/gte-large-en-v1.5 (fp16)')
 }
 
 # -----------------------------------------------------------------------
+# 8b. Windows Firewall rule for inbound MCP port.
+# Server modes only (client-only mode exits earlier). The .env we just
+# wrote pins MEMORY_BIND_HOST=0.0.0.0, so the server listens on every
+# interface and a firewall rule is the actual gate. The rule is opt-in
+# via prompt; the helper functions are idempotent so re-running the
+# installer with an existing rule is a no-op.
+# -----------------------------------------------------------------------
+. "$SCRIPT_DIR\install_lib\firewall.ps1"
+$ruleName = Get-NnmFirewallRuleName -Port $MCP_PORT
+$existingRule = Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue
+if ($existingRule) {
+    Write-Info "Firewall rule '$ruleName' already exists, skipping."
+} else {
+    Write-Step "Windows Firewall"
+    Write-Host ""
+    Write-Host "  Current network profiles on this host:"
+    Get-NetConnectionProfile | ForEach-Object {
+        Write-Host ("    {0,-20} {1}" -f $_.InterfaceAlias, $_.NetworkCategory)
+    }
+    Write-Host ""
+    $openAns = Read-Host "  Open inbound TCP $MCP_PORT in Windows Firewall? [Y/n]"
+    if (-not $openAns -or $openAns -match '^[Yy]') {
+        $pubAns = Read-Host "  Include Public networks? Recommended only for trusted-LAN servers. [y/N]"
+        $includePublic = ($pubAns -match '^[Yy]')
+        $fwProfiles = Get-FirewallProfileList -IncludePublic $includePublic
+        $fwResult = Add-NnmFirewallRuleIfMissing -Port $MCP_PORT -Profiles $fwProfiles
+        switch ($fwResult.action) {
+            "created"        { Write-Info "Firewall rule '$($fwResult.rule)' added (profile: $($fwResult.profile))" }
+            "skipped-exists" { Write-Info "Firewall rule '$($fwResult.rule)' already exists, skipping." }
+            "failed" {
+                Write-Warn "Could not add firewall rule: $($fwResult.error)"
+                Write-Info "Run this manually in an admin PowerShell:"
+                Write-Info "  New-NetFirewallRule -DisplayName '$($fwResult.rule)' -Direction Inbound -Protocol TCP -LocalPort $MCP_PORT -Action Allow -Profile $fwProfiles"
+            }
+        }
+    } else {
+        Write-Info "Firewall left unchanged. Remote clients will not be able to reach $MCP_PORT until you open it."
+    }
+}
+
+# -----------------------------------------------------------------------
 # 9. Self-test
 # -----------------------------------------------------------------------
 Write-Step "Running self-test..."
