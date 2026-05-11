@@ -98,7 +98,7 @@ Response (200):
     "user_id": "...",
     "label": "laptop",
     "created_at": "2026-04-19T...",
-    "token": "nnm_1Nuitm8AfhcNNjXx52QubU5KT-3dl3KS6TvkZ2T-e-0"
+    "token": "nnm_EXAMPLE_TOKEN_SHOWN_ONCE_AT_CREATION"
   }
 }
 ```

@@ -176,5 +176,5 @@ The hook never blocks NNA. All failures are recoverable — next turn retries au
 - `user_prompt_inject.py` — pre-phase semantic search + injection (consumer of `pending_nudge` memories)
 - `compact_guard.py` — compaction-time persistent context injection
 - `merge_hooks.py` — installer that copies hooks into NNA's drop-in directory
-- NNA design doc: `D:/ProjectRepo/NotNativeAgent/docs/planning/turn-analysis-self-learning-system.md`
-- NNA implementation status: `D:/ProjectRepo/NotNativeAgent/docs/planning/turn-analysis-implementation-status.md`
+- NNA design doc: `<NotNativeAgent repo>/docs/planning/turn-analysis-self-learning-system.md`
+- NNA implementation status: `<NotNativeAgent repo>/docs/planning/turn-analysis-implementation-status.md`

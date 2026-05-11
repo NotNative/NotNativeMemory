@@ -144,19 +144,17 @@ def _filter_relevant(results: list) -> list:
 
 
 def _format_memories(memories: list) -> str:
-    """Format memories into a concise context block."""
-    lines = ["[Memory Hook] Context from previous sessions relevant to this request:"]
-    for i, mem in enumerate(memories, 1):
-        tags = ", ".join(mem.get("tags", []))
-        importance = mem.get("importance", "normal")
-        similarity = mem.get("similarity", 0)
-        scope = mem.get("scope", "")
+    """Format memories into a concise context block.
+
+    Plain `From memory:` header + one bullet per item. No importance,
+    scope, similarity, or tag metadata — small local models read those
+    prefixes as noise. Metadata stays available server-side for
+    retrieval and curation; the consumer only sees the content.
+    """
+    lines = ["From memory:"]
+    for mem in memories:
         content = mem.get("content", "")
-        scope_tag = f"|{scope}" if scope else ""
-        lines.append(
-            f"  {i}. [{importance}{scope_tag}|{similarity:.2f}] {content}"
-            + (f" (tags: {tags})" if tags else "")
-        )
+        lines.append(f"- {content}")
     return "\n".join(lines)
 
 

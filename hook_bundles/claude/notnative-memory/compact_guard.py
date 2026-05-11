@@ -114,10 +114,9 @@ def _format_memories(memories: list) -> str:
         return ""
 
     lines = ["\n[Compact Guard] High-priority memories from previous sessions:"]
-    for i, mem in enumerate(memories, 1):
-        importance = mem.get("importance", "normal")
+    for mem in memories:
         content = mem.get("content", "")
-        lines.append(f"  {i}. [{importance}] {content}")
+        lines.append(f"- {content}")
     return "\n".join(lines)
 
 

@@ -390,7 +390,7 @@ The `.env` file and project directory are preserved — remove them manually if 
 
 ```
 README.md               - This file
-SECURITY.md             - Security posture, threat model, deployment guidance
+docs/SECURITY.md        - Security posture, threat model, deployment guidance
 server.py               - MCP server (run by any MCP-compatible agent)
 scripts/
     mine.py             - CLI for bulk-importing conversation transcripts

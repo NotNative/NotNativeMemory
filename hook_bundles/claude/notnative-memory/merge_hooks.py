@@ -57,6 +57,7 @@ _HOOK_SCRIPTS = {
     "session_start.py",
     "turn_analysis.py",
     "user_prompt_inject.py",
+    "pre_tool_safety.py",
 }
 
 # Retired scripts: any settings.json entry referencing one gets cleaned
@@ -87,6 +88,11 @@ _DESIRED_HOOKS = {
         "matcher": "",
         "script": "turn_analysis.py",
         "timeout": 15,
+    },
+    "PreToolUse": {
+        "matcher": "",
+        "script": "pre_tool_safety.py",
+        "timeout": 5,
     },
 }
 

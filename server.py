@@ -506,7 +506,12 @@ async def memory_store(
     except Exception as exc:
         return _tool_error("memory_store", exc, {"stored": False})
 
-    return {"id": str(memory_id), "stored": True}
+    from lib.memory_linter import lint
+    response = {"id": str(memory_id), "stored": True}
+    warnings = lint(content, memory_class=memory_class)
+    if warnings:
+        response["warnings"] = warnings
+    return response
 
 
 @mcp.tool()

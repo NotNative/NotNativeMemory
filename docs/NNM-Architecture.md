@@ -75,6 +75,16 @@ NotNativeMemory/
 
 ## 4. Memory Lifecycle
 
+### 4.0 Write-Time Linter
+
+`memory_store` runs a cheap advisory pass via `lib/memory_linter.py`
+after a successful insert. It flags long sentences (>40 words),
+cross-memory meta-phrases ("this coexists with…", "as noted above"),
+and rule-class memories missing `Why:` / `How to apply:` anchors.
+Warnings ride back on the response payload as `warnings: [...]`;
+nothing is rejected. Disable by setting `MEMORY_LINT_ENABLED=0` in
+the server's environment.
+
 ### 4.1 Storage and Deduplication
 
 On `memory_store`:
@@ -88,7 +98,7 @@ On `memory_store`:
 ### 4.2 Thermal Decay (Activity-Driven, Not Time-Based)
 
 - **Reheat** (+10) on each search hit or dedup merge.
-- **Displacement cooling** (−0.5) on every new memory stored in the same project; an additional −0.5 of pressure cooling kicks in once the project exceeds 80% of its 500-memory cap.
+- **Displacement cooling** (−0.5) on every new memory stored in the same project; an additional −0.5 of pressure cooling kicks in once the project exceeds 80% of its scope cap (500 local / 1000 domain / 1000 global by default; override via `MEMORY_PROJECT_CAP`, `MEMORY_DOMAIN_CAP`, `MEMORY_GLOBAL_CAP`).
 - **Importance multiplier** on cooling: critical 0× (never cools), high 0.25×, normal 1×, low 2×.
 - **Eviction** at the per-project cap: coldest first, importance as tiebreaker.
 
@@ -136,7 +146,7 @@ Retrieval is always scoped: a query for project P sees `local` memories of P, al
 - **Search:** `rag_search` over `doc_chunks`. `recall` fuses RAG hits with memory hits via RRF.
 - **Status:** `rag_ingestion_status` reports queue depth, in-flight jobs, recent failures.
 
-A reranker pass was investigated and **deferred** (see `docs/planning-reranker.md`).
+A reranker pass was investigated and **deferred**.
 
 ---
 
@@ -209,6 +219,7 @@ NNM ships hooks for two host platforms: Claude Code (`hook_bundles/claude/notnat
 | `UserPromptSubmit` | Search with the user's prompt; inject matches before the model sees the prompt. |
 | `PreCompact` | Inject rules + critical memories so operational discipline survives context compression. |
 | `Stop` (turn-analysis) | End-of-turn LLM extraction (NNA only today): produces RAG ingestions and, optionally, a high-importance "promise" nudge memory for the next turn. |
+| `PreToolUse` (safety gate) | Opt-in (`MEMORY_SAFETY_GATE_ENABLED=1`). Refuses a small baseline of destructive ops — `git push --force`, `rm -rf /`, `git reset --hard origin/...`, `DROP DATABASE` — by exiting 2 before dispatch. Disabled by default. |
 
 Each bundle ships its own `_internal/turn_analysis_core.py`; the agent-facing hook scripts in the bundle are thin adapters. Configuration lives in `hooks.env` (LLM endpoint, model, char caps, max tokens). LM Studio (OpenAI-compatible) and the Anthropic Messages API are both supported. Bundles do not share helpers across agents — each agent's bundle is developed independently with its own dev.
 
@@ -260,7 +271,7 @@ A representative round trip:
 4. **Turn ends.**
    `Stop` hook (NNA) runs turn analysis: extracts learnable patterns via the configured LLM and writes them as RAG documents and/or as a high-importance promise nudge.
 5. **Storage path.**
-   Each `memory_store` embeds, checks for dedup at ≥0.92, conflicts at 0.75–0.91, then inserts. Displacement cooling fires across the project; if over the 500-memory cap, the coldest non-critical row is evicted.
+   Each `memory_store` embeds, checks for dedup at ≥0.92, conflicts at 0.75–0.91, then inserts. Displacement cooling fires across the project; if over the scope-appropriate cap (500 local, 1000 domain, 1000 global by default), the coldest non-critical row is evicted.
 6. **Curation.**
    The user opens the web UI to resolve conflicts, promote frequently-accessed memories to `rule`/`preference`, supersede stale rows, or revoke tokens.
 7. **Next session.**
@@ -286,7 +297,7 @@ A representative round trip:
 ## 15. Known Limits and Open Questions
 
 - **Single embedding model.** Switching models requires a re-embed migration.
-- **Per-project memory cap (500).** Tunable, but no per-importance cap; a flood of `low` memories can pressure-cool `normal` ones until eviction.
+- **Per-scope memory caps (500 local / 1000 domain / 1000 global).** Each scope has its own env-tunable cap. No per-importance cap; a flood of `low` memories can pressure-cool `normal` ones until eviction.
 - **Conflict thresholds are fixed (0.75 / 0.92).** They are correct for the current embedding model; they would need re-tuning if the model changes.
 - **RLS not yet active.** Multi-tenant isolation today is application-layer only.
 - **Reranker deferred.** Hybrid RRF is the current ceiling on retrieval quality; a cross-encoder reranker is a known future option.

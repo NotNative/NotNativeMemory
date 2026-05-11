@@ -132,10 +132,9 @@ def _format_context(memories: list, source: str) -> str:
         f"[Session Start | source={source}] Working-set memories for this project:"
     )
     lines = [header]
-    for i, mem in enumerate(memories, 1):
-        importance = mem.get("importance", "normal")
+    for mem in memories:
         content = mem.get("content", "")
-        lines.append(f"  {i}. [{importance}] {content}")
+        lines.append(f"- {content}")
     return "\n".join(lines)
 
 

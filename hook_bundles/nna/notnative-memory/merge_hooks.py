@@ -71,6 +71,10 @@ def _write_hooks_env(target_dir: str, mcp_url: str) -> None:
         "# still emit the final JSON. Lower this for cost-sensitive cloud setups.\n"
         "MEMORY_EXTRACT_MAX_TOKENS=16000\n"
         "# MEMORY_EXTRACT_LLM_URL=http://localhost:9500/v1/chat/completions  # Optional LLM endpoint\n"
+        "\n# PreToolUse safety gate (pre_tool_safety.py)\n"
+        "# Disabled by default. Set =1 to refuse destructive ops like\n"
+        "# `git push --force`, `rm -rf /`, `git reset --hard origin/...`.\n"
+        "MEMORY_SAFETY_GATE_ENABLED=0\n"
     )
     with open(env_file, "w", encoding="utf-8") as f:
         f.write(env_content)
@@ -118,6 +122,13 @@ def _write_manifest(target_dir: str) -> None:
                 "blocking": False,
                 "timeout_ms": 15000,
             },
+            {
+                "event": "tool.call",
+                "phase": "pre",
+                "command": "python pre_tool_safety.py",
+                "blocking": True,
+                "timeout_ms": 5000,
+            },
         ],
     }
     manifest_file = os.path.join(target_dir, "manifest.json")
@@ -132,6 +143,7 @@ _SCRIPTS = [
     "session_start.py",
     "compact_guard.py",
     "turn_analysis.py",
+    "pre_tool_safety.py",
 ]
 
 # Files to retire from prior installs (script removed from this bundle;

@@ -83,8 +83,40 @@ _COOL_RATE = {
     "low": 2.0,
 }
 
-# Per-project memory cap
-PROJECT_MEMORY_CAP = 500
+# Per-scope memory caps.
+#
+# Local projects get the baseline cap. Domain and global scopes aggregate
+# cross-cutting knowledge (PowerShell rules, Python quirks, etc.) across
+# many projects, so they get more headroom by default. All three are
+# env-overridable; the constants below are read once at import time.
+def _int_env(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, default))
+    except (TypeError, ValueError):
+        return default
+
+PROJECT_MEMORY_CAP = _int_env("MEMORY_PROJECT_CAP", 500)
+DOMAIN_MEMORY_CAP = _int_env("MEMORY_DOMAIN_CAP", 1000)
+GLOBAL_MEMORY_CAP = _int_env("MEMORY_GLOBAL_CAP", 1000)
+
+_CAP_BY_SCOPE = {
+    "local": PROJECT_MEMORY_CAP,
+    "domain": DOMAIN_MEMORY_CAP,
+    "global": GLOBAL_MEMORY_CAP,
+}
+
+
+def _cap_for_scope(scope: Optional[str]) -> int:
+    return _CAP_BY_SCOPE.get(scope or "local", PROJECT_MEMORY_CAP)
+
+
+async def _cap_for_project(
+    conn: asyncpg.Connection, project_id: UUID,
+) -> int:
+    scope = await conn.fetchval(
+        "SELECT scope FROM projects WHERE id = $1", project_id,
+    )
+    return _cap_for_scope(scope)
 
 # Deduplication: cosine similarity threshold above which a memory is
 # considered a duplicate of an existing one
@@ -701,12 +733,14 @@ async def _apply_displacement_cooling(
         return 0
     _store_counters[project_key] = 0
 
-    # Check if we're under pressure (above 80% cap)
+    # Check if we're under pressure (above 80% cap).
+    # Cap depends on this project's scope (local/domain/global).
+    cap = await _cap_for_project(conn, project_id)
     total = await conn.fetchval(
         "SELECT count(*) FROM memories WHERE project_id = $1",
         project_id,
     )
-    pressure_ratio = total / PROJECT_MEMORY_CAP if PROJECT_MEMORY_CAP > 0 else 0
+    pressure_ratio = total / cap if cap > 0 else 0
     extra_cool = PRESSURE_COOL_DELTA if pressure_ratio >= PRESSURE_THRESHOLD else 0
     total_cool = DISPLACEMENT_COOL_DELTA + extra_cool
 
@@ -747,15 +781,16 @@ async def _enforce_cap(conn: asyncpg.Connection, project_id: UUID) -> int:
     Critical memories are evicted last (sorted by importance then
     temperature ascending). Returns number of memories evicted.
     """
+    cap = await _cap_for_project(conn, project_id)
     count_row = await conn.fetchrow(
         "SELECT count(*) AS cnt FROM memories WHERE project_id = $1",
         project_id,
     )
     total = count_row["cnt"]
-    if total <= PROJECT_MEMORY_CAP:
+    if total <= cap:
         return 0
 
-    excess = total - PROJECT_MEMORY_CAP
+    excess = total - cap
     result = await conn.execute(
         f"""DELETE FROM memories WHERE id IN (
                SELECT id FROM memories
