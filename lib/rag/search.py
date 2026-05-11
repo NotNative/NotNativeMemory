@@ -267,3 +267,87 @@ async def get_document_status(
         "error": row["error"],
         "finished_at": row["finished_at"].isoformat() if row["finished_at"] else None,
     }
+
+
+async def forget_document(owner_user_id: UUID, document_id: UUID) -> bool:
+    """
+    Delete a RAG document by ID. Only the owner can delete their own
+    document; deleting someone else's returns False without side effects.
+
+    The chunks and ingestion_jobs rows cascade automatically via the
+    FK ON DELETE CASCADE declared in migration 015.
+    """
+    from lib import rls
+    from lib.db import get_pool
+
+    pool = await get_pool()
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        result = await conn.execute(
+            "DELETE FROM documents WHERE id = $1 AND owner_user_id = $2",
+            document_id, owner_user_id,
+        )
+    return result == "DELETE 1"
+
+
+async def list_documents(
+    owner_user_id: UUID,
+    project_id: UUID,
+    limit: int = 50,
+    offset: int = 0,
+) -> List[Dict[str, Any]]:
+    """
+    Enumerate documents visible to the caller under the same scope
+    expansion as search_docs (local project + caller's globals +
+    declared domains). Ordered newest first by created_at.
+
+    Returns lightweight metadata only -- no chunk content. Use
+    rag_search for content retrieval.
+    """
+    if limit < _MIN_LIMIT:
+        limit = _MIN_LIMIT
+    if limit > _MAX_LIMIT:
+        limit = _MAX_LIMIT
+    if offset < 0:
+        offset = 0
+
+    from lib import rls
+    from lib.db import get_pool, get_visible_project_ids
+
+    visible_ids = await get_visible_project_ids(project_id, owner_user_id)
+    if not visible_ids:
+        return []
+
+    pool = await get_pool()
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT d.id, d.title, d.source_uri, d.content_type,
+                   d.size_bytes, d.created_at,
+                   p.scope AS project_scope,
+                   p.name  AS project_name,
+                   (SELECT COUNT(*) FROM doc_chunks dc
+                     WHERE dc.document_id = d.id) AS chunk_count
+              FROM documents d
+              JOIN projects p ON p.id = d.project_id
+             WHERE d.project_id = ANY($1)
+               AND d.owner_user_id = $2
+             ORDER BY d.created_at DESC, d.id ASC
+             LIMIT $3 OFFSET $4
+            """,
+            visible_ids, owner_user_id, limit, offset,
+        )
+
+    return [
+        {
+            "document_id": str(r["id"]),
+            "title": r["title"],
+            "source_uri": r["source_uri"],
+            "content_type": r["content_type"],
+            "size_bytes": r["size_bytes"],
+            "chunk_count": int(r["chunk_count"] or 0),
+            "created_at": r["created_at"].isoformat(),
+            "scope": r["project_scope"],
+            "project": r["project_name"],
+        }
+        for r in rows
+    ]

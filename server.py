@@ -47,6 +47,65 @@ _log = logging.getLogger("notnative.server")
 
 from lib.observability import instrumented
 
+
+# Boot-time retry budget for the DB pool. When the app and Postgres
+# start together (docker compose, k8s), pg may be up but still in
+# "starting up" mode when the app's lifespan tries to open a pool.
+# Without retry, the app exits, the orchestrator restarts it, and the
+# log fills with restart cycles until pg is ready. Tunable via env so
+# ops can dial it up for slow disks. 60s covers the worst observed
+# cold-start in compose.
+_BOOT_DB_BUDGET_SECS = float(
+    os.environ.get("MEMORY_BOOT_DB_RETRY_SECS", "60")
+)
+_BOOT_DB_INITIAL_DELAY = 0.25
+_BOOT_DB_MAX_DELAY = 2.0
+
+
+async def _acquire_pool_with_retry(get_pool_fn, budget_secs=None):
+    """
+    Call ``get_pool_fn()`` with bounded exponential backoff on the
+    two transient errors that surface when Postgres is reachable but
+    not yet accepting client connections:
+
+    - ``asyncpg.exceptions.CannotConnectNowError`` -- pg replies
+      "the database system is starting up".
+    - ``ConnectionRefusedError`` -- pg port not listening yet.
+
+    Any other exception is re-raised immediately so genuine
+    misconfiguration (bad creds, wrong DB, migration error) fails
+    fast at boot instead of being masked by a retry loop.
+
+    Args:
+        get_pool_fn: zero-arg coroutine that returns the pool.
+        budget_secs: total time to keep retrying. Falls back to
+            ``_BOOT_DB_BUDGET_SECS`` (env-tunable).
+    """
+    import asyncio as _asyncio
+    import asyncpg
+
+    deadline = _asyncio.get_event_loop().time() + (
+        budget_secs if budget_secs is not None else _BOOT_DB_BUDGET_SECS
+    )
+    delay = _BOOT_DB_INITIAL_DELAY
+    while True:
+        try:
+            return await get_pool_fn()
+        except (
+            asyncpg.exceptions.CannotConnectNowError,
+            ConnectionRefusedError,
+        ) as exc:
+            now = _asyncio.get_event_loop().time()
+            if now >= deadline:
+                raise
+            print(
+                f"DB not ready ({type(exc).__name__}); "
+                f"retrying in {delay:.2f}s",
+                file=sys.stderr,
+            )
+            await _asyncio.sleep(min(delay, max(0.05, deadline - now)))
+            delay = min(delay * 2, _BOOT_DB_MAX_DELAY)
+
 # Default port for HTTP transport mode
 _DEFAULT_HTTP_PORT = 9500
 
@@ -81,7 +140,7 @@ def install_rag_worker_lifespan(app) -> None:
     async def _start():
         from lib.db import get_pool
         from lib.rag.worker import start_worker_task
-        pool = await get_pool()
+        pool = await _acquire_pool_with_retry(get_pool)
         task, stop_event = start_worker_task(pool)
         state["task"] = task
         state["stop_event"] = stop_event
@@ -1730,6 +1789,107 @@ async def rag_ingestion_status(document_id: str) -> dict:
         }
 
     return {"found": True, **status}
+
+
+@mcp.tool()
+@instrumented("rag_forget")
+async def rag_forget(document_id: str) -> dict:
+    """
+    Delete a RAG document by ID. Cascades to its chunks and
+    ingestion_jobs via the FK ON DELETE CASCADE.
+
+    WHEN to use:
+    - The document is stale, wrong, or no longer wanted in the corpus.
+    - You ingested something by mistake (test data, wrong scope, wrong
+      title) and want it gone.
+    - The user asks you to forget a specific document.
+
+    WHEN NOT to use:
+    - You only want to hide a few bad chunks -- there is no chunk-level
+      forget; the unit is the whole document.
+    - For curated memories, use memory_forget instead.
+
+    Only the owner can delete their own documents. Attempting to delete
+    a document owned by another user returns ``forgotten: False`` with
+    no leak about whether it existed.
+
+    Args:
+        document_id: UUID returned by rag_ingest_text or rag_ingest_file.
+    """
+    try:
+        doc_uuid = UUID(document_id)
+    except (ValueError, TypeError, AttributeError):
+        return {
+            "forgotten": False,
+            "error": f"invalid document_id: {document_id!r}",
+        }
+
+    from lib.auth_context import current_user_id
+    owner = current_user_id()
+    if owner is None:
+        return {"forgotten": False, "error": "authentication required"}
+
+    try:
+        from lib.rag.search import forget_document
+        deleted = await forget_document(owner, doc_uuid)
+    except Exception as exc:
+        return _tool_error("rag_forget", exc, {"forgotten": False})
+
+    return {"forgotten": deleted}
+
+
+@mcp.tool()
+@instrumented("rag_list")
+async def rag_list(
+    project: Optional[str] = None,
+    limit: int = 50,
+    offset: int = 0,
+) -> dict:
+    """
+    Enumerate ingested RAG documents visible to the caller. Returns
+    lightweight metadata (title, source_uri, size, chunk_count, scope,
+    created_at) without any chunk content -- use rag_search when you
+    need the text.
+
+    WHEN to use:
+    - You need a document_id for rag_forget or rag_ingestion_status but
+      do not have it cached.
+    - Auditing the corpus: what's in here, when was it added, how big.
+    - Spotting orphaned test docs and other ingestion mistakes.
+
+    Scope behavior: same expansion as rag_search. From a local project,
+    you see that project's docs plus your globals and declared domains.
+
+    Results are ordered newest first by created_at. There is no sort
+    parameter in v1; if you need a different order, sort client-side.
+
+    Args:
+        project: Project scope. Auto-detected if omitted.
+        limit: Max documents to return (1-100, default 50).
+        offset: Skip the first N rows. For paging through large corpora.
+    """
+    from lib.db import get_or_create_project
+    from lib.rag.search import list_documents
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"results": [], "count": 0},
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        results = await list_documents(
+            owner_user_id=owner,
+            project_id=project_id,
+            limit=limit,
+            offset=offset,
+        )
+    except Exception as exc:
+        return _tool_error("rag_list", exc,
+                           {"results": [], "count": 0})
+
+    return {"results": results, "count": len(results)}
 
 
 @mcp.tool()
