@@ -64,7 +64,7 @@ def test_build_analysis_prompt_includes_both_sides():
     prompt = core.build_analysis_prompt(user, model)
     assert user in prompt
     assert model in prompt
-    assert "Learnable facts" in prompt
+    assert "Learnable observations" in prompt
     assert "Promise tracking" in prompt
     assert "shouldNudge" in prompt
     print("[OK] build_analysis_prompt covers both sections")
@@ -212,6 +212,7 @@ def test_session_prompt_bad_example_includes_run_on_shape():
 
 def test_coerce_analysis_full_shape():
     parsed = {
+        "state_assertions": [{"subject": "s", "predicate": "p", "object": "o", "confidence": 0.9}],
         "results": [{"type": "behavioral"}],
         "unfulfilledPromises": [{"promise": "x"}],
         "shouldNudge": True,
@@ -226,6 +227,7 @@ def test_coerce_analysis_full_shape():
 def test_coerce_analysis_missing_keys_default_safe():
     out = core.coerce_analysis({"results": []})
     assert out == {
+        "state_assertions": [],
         "results": [],
         "unfulfilledPromises": [],
         "shouldNudge": False,
@@ -1487,6 +1489,249 @@ def test_extract_last_turn_skips_malformed_lines():
     print("[OK] extract_last_turn skips malformed JSONL lines")
 
 
+# -- Fact-vs-memory extraction split (Fix #1) -----------------------------
+# Extraction must emit two channels:
+#   state_assertions -> memory_fact_add  (mutable subject/predicate/object)
+#   results          -> memory_store     (durable observations/rules)
+# Pre-fix, every extraction was routed to memory_store, so NNM's fact graph
+# stayed nearly empty even though many turns made plain state assertions.
+
+
+def test_build_analysis_prompt_includes_state_assertions_section():
+    """Tier 2: snapshot the load-bearing fields of the new section.
+
+    Drift here (renaming subject/predicate/object, or losing the
+    fact-vs-observation distinction) would silently break the routing
+    contract that downstream code depends on.
+    """
+    prompt = core.build_analysis_prompt("u", "m")
+    assert '"state_assertions"' in prompt
+    assert '"subject"' in prompt
+    assert '"predicate"' in prompt
+    assert '"object"' in prompt
+    # The framing must distinguish mutable-now from durable-observation,
+    # otherwise the LLM has no signal for which channel to use.
+    lower = prompt.lower()
+    assert "right now" in lower
+    assert "could change later" in lower or "may change later" in lower
+    # Negative steering: rules/preferences must NOT land in state_assertions.
+    assert "preference" in lower
+    print("[OK] build_analysis_prompt includes the state_assertions section with subject/predicate/object")
+
+
+def test_empty_analysis_includes_state_assertions():
+    out = core.empty_analysis()
+    assert out["state_assertions"] == []
+    print("[OK] empty_analysis includes state_assertions field")
+
+
+def test_coerce_analysis_state_assertions_wrong_type_defaults_safe():
+    out = core.coerce_analysis({"state_assertions": "not a list"})
+    assert out["state_assertions"] == []
+    print("[OK] coerce_analysis defends against non-list state_assertions")
+
+
+def test_memory_fact_add_call_posts_correct_jsonrpc_shape():
+    """Regression guard for the memory_fact_add MCP wire shape.
+
+    The triple subject/predicate/object plus project must reach the server
+    exactly as named; any drift causes silent fact drops.
+    """
+    cfg = _make_config("openai_compat", model="x", project="_domain_test")
+    captured = {}
+
+    def _capture(req, *_, **__):
+        captured["body"] = json.loads(req.data.decode("utf-8"))
+        cm = mock.MagicMock()
+        cm.__enter__.return_value.read.return_value = json.dumps({
+            "result": {
+                "content": [{"type": "text", "text": '{"stored": true, "fact_id": "f-1"}'}],
+                "isError": False,
+            }
+        }).encode("utf-8")
+        return cm
+
+    with mock.patch.object(core.urllib.request, "urlopen", side_effect=_capture):
+        ok = core.memory_fact_add_call(
+            "inference-host", "model", "qwen3-30b-a3b", 0.95, cfg,
+        )
+
+    assert ok is True
+    body = captured["body"]
+    assert body["method"] == "tools/call"
+    assert body["params"]["name"] == "memory_fact_add"
+    args = body["params"]["arguments"]
+    assert args["subject"] == "inference-host"
+    assert args["predicate"] == "model"
+    assert args["object"] == "qwen3-30b-a3b"
+    assert args["confidence"] == 0.95
+    assert args["project"] == "_domain_test"
+    print("[OK] memory_fact_add_call posts the expected JSON-RPC payload")
+
+
+def test_memory_fact_add_call_returns_false_on_inner_rejection():
+    """Inner-stored=false must surface as False with a log line."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log_file = os.path.join(tmp, "turn_analysis.log")
+        cfg = _make_config("openai_compat", model="x")
+        rejection = json.dumps({
+            "result": {
+                "content": [{"type": "text", "text": '{"stored": false, "error": "Subject cannot be empty"}'}],
+                "isError": False,
+            }
+        }).encode("utf-8")
+
+        with mock.patch.dict(os.environ, {"MEMORY_EXTRACT_LOG": log_file}, clear=False):
+            with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
+                urlopen_mock.return_value.__enter__.return_value.read.return_value = rejection
+                ok = core.memory_fact_add_call("s", "p", "o", 1.0, cfg)
+
+        assert ok is False
+        with open(log_file, encoding="utf-8") as fh:
+            line = fh.read()
+    assert "memory_fact_add_rejected" in line
+    print("[OK] memory_fact_add_call: inner rejection returns False and logs")
+
+
+def test_memory_fact_add_call_returns_false_on_network_error():
+    cfg = _make_config("openai_compat")
+    import urllib.error
+    with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
+        urlopen_mock.side_effect = urllib.error.URLError("down")
+        ok = core.memory_fact_add_call("s", "p", "o", 1.0, cfg)
+    assert ok is False
+    print("[OK] memory_fact_add_call returns False when MCP is unreachable")
+
+
+def test_store_fact_assertions_skips_malformed_items():
+    cfg = _make_config("openai_compat")
+    items = [
+        {"predicate": "p", "object": "o"},                     # missing subject
+        {"subject": "s", "object": "o"},                       # missing predicate
+        {"subject": "s", "predicate": "p"},                    # missing object
+        {"subject": "  ", "predicate": "p", "object": "o"},    # whitespace subject
+        {"subject": 1, "predicate": "p", "object": "o"},       # non-string
+        "not a dict",                                          # wrong type
+    ]
+    with mock.patch.object(core, "memory_fact_add_call", return_value=True) as fact_mock:
+        stored = core.store_fact_assertions(items, cfg)
+    assert stored == 0
+    fact_mock.assert_not_called()
+    print("[OK] store_fact_assertions skips malformed items")
+
+
+def test_store_fact_assertions_calls_fact_add_per_item():
+    cfg = _make_config("openai_compat")
+    items = [
+        {"subject": "host", "predicate": "port", "object": "9500", "confidence": 1.0},
+        {"subject": "host", "predicate": "model", "object": "qwen3", "confidence": 0.9},
+    ]
+    captured = []
+
+    def _capture(subject, predicate, obj, confidence, config):
+        captured.append((subject, predicate, obj, confidence))
+        return True
+
+    with mock.patch.object(core, "memory_fact_add_call", side_effect=_capture):
+        stored = core.store_fact_assertions(items, cfg)
+
+    assert stored == 2
+    assert captured[0] == ("host", "port", "9500", 1.0)
+    assert captured[1] == ("host", "model", "qwen3", 0.9)
+    print("[OK] store_fact_assertions calls memory_fact_add_call per valid item")
+
+
+def test_store_fact_assertions_coerces_confidence_strings():
+    """Reasoning models tend to emit string confidences even when the
+    schema asks for a float. The coercer normalizes high/medium/low and
+    numeric strings; everything else falls back to 0.8."""
+    cfg = _make_config("openai_compat")
+    items = [
+        {"subject": "a", "predicate": "p", "object": "o", "confidence": "high"},
+        {"subject": "b", "predicate": "p", "object": "o", "confidence": "medium"},
+        {"subject": "c", "predicate": "p", "object": "o", "confidence": "low"},
+        {"subject": "d", "predicate": "p", "object": "o", "confidence": "0.42"},
+        {"subject": "e", "predicate": "p", "object": "o", "confidence": "garbage"},
+        {"subject": "f", "predicate": "p", "object": "o"},  # missing -> default 0.8
+        {"subject": "g", "predicate": "p", "object": "o", "confidence": 2.5},  # clamped
+    ]
+    captured = []
+
+    def _capture(subject, predicate, obj, confidence, config):
+        captured.append(confidence)
+        return True
+
+    with mock.patch.object(core, "memory_fact_add_call", side_effect=_capture):
+        core.store_fact_assertions(items, cfg)
+
+    assert captured == [1.0, 0.8, 0.5, 0.42, 0.8, 0.8, 1.0]
+    print("[OK] store_fact_assertions coerces confidence (high/medium/low + floats + clamps)")
+
+
+def test_store_fact_assertions_caps_at_max_extractions():
+    """Same runaway hedge as store_extractions; facts share the cap."""
+    cfg = _make_config("openai_compat", max_extractions=2)
+    items = [
+        {"subject": f"s{i}", "predicate": "p", "object": "o"}
+        for i in range(10)
+    ]
+    with mock.patch.object(core, "memory_fact_add_call", return_value=True) as fact_mock:
+        stored = core.store_fact_assertions(items, cfg)
+    assert stored == 2
+    assert fact_mock.call_count == 2
+    print("[OK] store_fact_assertions respects config.max_extractions")
+
+
+def test_analyze_turn_routes_state_assertions_and_observations_separately():
+    """End-to-end split: state_assertions -> memory_fact_add;
+    results -> memory_store. Both fire for a turn that yields both.
+    """
+    cfg = _make_config("openai_compat", model="x")
+    payload = {
+        "state_assertions": [
+            {"subject": "inference-host", "predicate": "model",
+             "object": "qwen3-30b-a3b", "confidence": 0.95},
+        ],
+        "results": [
+            {"fact": "Use single quotes when shelling PowerShell from bash.",
+             "tags": ["shell"], "confidence": "high"},
+        ],
+        "unfulfilledPromises": [],
+        "shouldNudge": False,
+        "nudgeText": "",
+        "summary": "",
+    }
+    with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock, \
+            mock.patch.object(core, "memory_store_call", return_value=True) as mem_mock, \
+            mock.patch.object(core, "memory_fact_add_call", return_value=True) as fact_mock, \
+            mock.patch.object(core, "rag_ingest", return_value=True):
+        urlopen_mock.return_value.__enter__.return_value.read.return_value = _mock_openai_response(payload)
+        out = core.analyze_turn("u" * 200, "m" * 200, "/cwd", cfg)
+
+    assert out["stored"] == 1, "observation must route through memory_store"
+    assert out["facts_stored"] == 1, "state assertion must route through memory_fact_add"
+    assert mem_mock.call_count == 1
+    assert fact_mock.call_count == 1
+    # Confirm fact-add was called with the triple from the payload, not the observation text.
+    args, _ = fact_mock.call_args
+    assert args[0] == "inference-host"
+    assert args[1] == "model"
+    assert args[2] == "qwen3-30b-a3b"
+    print("[OK] analyze_turn routes state_assertions to memory_fact_add and results to memory_store")
+
+
+def test_analyze_turn_returns_facts_stored_field():
+    """Return contract: analyze_turn must include facts_stored alongside
+    stored. Adapters/loggers need both numbers to surface routing health.
+    """
+    cfg = _make_config("openai_compat", model="x")
+    with mock.patch.object(core, "call_analysis_llm", return_value=core.empty_analysis()):
+        out = core.analyze_turn("u" * 200, "m" * 200, "/cwd", cfg)
+    assert "facts_stored" in out
+    assert out["facts_stored"] == 0
+    print("[OK] analyze_turn return dict includes facts_stored")
+
+
 # -- Runner --------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -1552,6 +1797,19 @@ if __name__ == "__main__":
         test_analyze_turn_short_circuit_below_min_length,
         test_analyze_turn_persists_extractions_summary_and_nudge,
         test_analyze_turn_skips_summary_when_empty,
+        # core: fact-vs-memory extraction split (Fix #1)
+        test_build_analysis_prompt_includes_state_assertions_section,
+        test_empty_analysis_includes_state_assertions,
+        test_coerce_analysis_state_assertions_wrong_type_defaults_safe,
+        test_memory_fact_add_call_posts_correct_jsonrpc_shape,
+        test_memory_fact_add_call_returns_false_on_inner_rejection,
+        test_memory_fact_add_call_returns_false_on_network_error,
+        test_store_fact_assertions_skips_malformed_items,
+        test_store_fact_assertions_calls_fact_add_per_item,
+        test_store_fact_assertions_coerces_confidence_strings,
+        test_store_fact_assertions_caps_at_max_extractions,
+        test_analyze_turn_routes_state_assertions_and_observations_separately,
+        test_analyze_turn_returns_facts_stored_field,
         # core: worker-mode (skeleton; no NNA caller yet)
         test_attach_mission_tags_appends_when_mission_id_set,
         test_attach_mission_tags_includes_assignment_when_set,

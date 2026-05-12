@@ -235,16 +235,55 @@ def discover_model(config: AnalysisConfig) -> Optional[str]:
 def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
     """Build the combined extraction + promise-detection prompt.
 
-    The extraction half of this prompt is shaped around one principle:
-    every stored fact must be a self-contained statement that makes a
-    smaller local model smarter when retrieved weeks from now. Quality
-    is the bar, not quantity. A turn that yields 30 distinct standalone
-    facts should return 30.
+    Extraction emits two channels because NNM treats them differently:
+
+    - state_assertions: mutable facts about the world right now
+      (subject/predicate/object triples). Routed to memory_fact_add,
+      where conflicting later values auto-supersede the old one with a
+      timestamp. Example: ("inference-host", "model", "qwen3-30b-a3b").
+    - results: durable observations, rules, preferences, decisions.
+      Routed to memory_store. Carry tags, importance, and class
+      taxonomy; never auto-superseded.
+
+    The split exists because retrieval treats them differently too:
+    fact_query returns "what's true right now"; memory_search returns
+    narrative context that may be stale. If extraction sends a piece
+    of mutable state through the memory channel, retrievers will surface
+    its outdated form forever.
     """
     return (
-        "Analyze this conversation turn and return a single JSON object with TWO sections.\n"
+        "Analyze this conversation turn and return a single JSON object with FOUR sections.\n"
         "\n"
-        'SECTION 1: Learnable facts ("results")\n'
+        'SECTION 1A: State assertions ("state_assertions")\n'
+        "\n"
+        '  Each item is { "subject": "...", "predicate": "...", "object": "...", "confidence": 0.0-1.0 }\n'
+        "\n"
+        "  Rules for state_assertions:\n"
+        "    1. ONLY use this section for assertions about mutable state that is TRUE RIGHT NOW\n"
+        "       and could change later. Configuration choices, infrastructure state, deployed\n"
+        "       versions, current selections, current values.\n"
+        "    2. Subject is the entity (a server, service, component, project, person).\n"
+        "    3. Predicate is the aspect/relationship (\"port\", \"version\", \"model\", \"branch\").\n"
+        "    4. Object is the current value as a short string.\n"
+        "    5. Keep all three fields short and concrete; no full sentences.\n"
+        "    6. Confidence is a float 0.0-1.0. Default 0.9 if unsure.\n"
+        "    7. If the same predicate had a previous value mentioned in the turn, emit only the\n"
+        "       NEW assertion. Supersession is handled downstream by timestamp.\n"
+        "    8. DO NOT use this section for rules, preferences, decisions, or anything that does\n"
+        "       not change over time. Those go to SECTION 1B.\n"
+        "    9. Empty array is fine and common. Most turns produce zero state assertions.\n"
+        "\n"
+        "  Examples of well-formed state_assertions:\n"
+        '    - {"subject": "inference-host", "predicate": "model", "object": "qwen3-30b-a3b", "confidence": 0.95}\n'
+        '    - {"subject": "nnm", "predicate": "mcp-port", "object": "9500", "confidence": 1.0}\n'
+        '    - {"subject": "nna", "predicate": "default-provider", "object": "lmstudio", "confidence": 0.9}\n'
+        "\n"
+        "  Examples of BAD state_assertions (do not produce these):\n"
+        '    - {"subject": "user", "predicate": "prefers", "object": "terse responses"} (preference → SECTION 1B)\n'
+        '    - {"subject": "powershell", "predicate": "requires", "object": "single quotes"} (rule → SECTION 1B)\n'
+        '    - {"subject": "session", "predicate": "discussed", "object": "memory architecture"} (meta → drop)\n'
+        "\n"
+        'SECTION 1B: Learnable observations ("results")\n'
         "\n"
         '  Each item is { "fact": "...", "tags": ["..."], "confidence": "high|medium|low" }\n'
         "\n"
@@ -317,6 +356,9 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         "Return ONLY valid JSON with this exact shape; no markdown fences, no commentary:\n"
         "\n"
         "{\n"
+        '  "state_assertions": [\n'
+        '    { "subject": "...", "predicate": "...", "object": "...", "confidence": 0.9 }\n'
+        "  ],\n"
         '  "results": [\n'
         '    { "fact": "...", "tags": ["..."], "confidence": "high" }\n'
         "  ],\n"
@@ -467,6 +509,7 @@ def strip_markdown_fences(content: str) -> str:
 def empty_analysis() -> dict:
     """Return the canonical empty analysis shape."""
     return {
+        "state_assertions": [],
         "results": [],
         "unfulfilledPromises": [],
         "shouldNudge": False,
@@ -478,6 +521,11 @@ def empty_analysis() -> dict:
 def coerce_analysis(parsed: dict) -> dict:
     """Coerce LLM output into the canonical shape, filling defaults."""
     return {
+        "state_assertions": (
+            parsed.get("state_assertions", [])
+            if isinstance(parsed.get("state_assertions"), list)
+            else []
+        ),
         "results": parsed.get("results", []) if isinstance(parsed.get("results"), list) else [],
         "unfulfilledPromises": (
             parsed.get("unfulfilledPromises", [])
@@ -788,6 +836,124 @@ def memory_store_call(
     return True
 
 
+def memory_fact_add_call(
+    subject: str,
+    predicate: str,
+    obj: str,
+    confidence: float,
+    config: AnalysisConfig,
+) -> bool:
+    """POST a single memory_fact_add call to the MCP. Returns True on success.
+
+    Used by store_fact_assertions to land each extracted state assertion
+    as a temporal fact triple. Conflicting later values auto-supersede
+    via timestamp; that is the whole reason this channel exists separate
+    from memory_store.
+    """
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "method": "tools/call",
+        "params": {
+            "name": "memory_fact_add",
+            "arguments": {
+                "project": config.project,
+                "subject": subject,
+                "predicate": predicate,
+                "object": obj,
+                "confidence": confidence,
+            },
+        },
+    }).encode("utf-8")
+
+    try:
+        req = urllib.request.Request(
+            config.mcp_url,
+            data=payload,
+            headers=dict(config.mcp_headers),
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=config.timeout) as resp:
+            envelope = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
+        triple = f"{subject!r}/{predicate!r}/{obj!r}"
+        _log_analysis_failure(
+            f"memory_fact_add_failed: triple={triple} {type(exc).__name__}: {exc}"
+        )
+        return False
+    if not _mcp_call_stored(envelope):
+        try:
+            inner = envelope.get("result", {}).get("content", [{}])[0].get("text", "")[:200]
+        except Exception:  # noqa: BLE001
+            inner = "<unparseable>"
+        triple = f"{subject!r}/{predicate!r}/{obj!r}"
+        _log_analysis_failure(f"memory_fact_add_rejected: triple={triple} inner={inner!r}")
+        return False
+    return True
+
+
+def _coerce_fact_confidence(value) -> float:
+    """Coerce LLM-reported confidence into the 0.0-1.0 float fact_add expects.
+
+    Accepts floats, ints, numeric strings, and the high/medium/low string
+    vocabulary (mapped to 1.0/0.8/0.5). Unknown shapes default to 0.8.
+    """
+    if isinstance(value, bool):
+        return 0.8
+    if isinstance(value, (int, float)):
+        try:
+            return max(0.0, min(1.0, float(value)))
+        except (TypeError, ValueError):
+            return 0.8
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v == "high":
+            return 1.0
+        if v == "medium":
+            return 0.8
+        if v == "low":
+            return 0.5
+        try:
+            return max(0.0, min(1.0, float(v)))
+        except ValueError:
+            return 0.8
+    return 0.8
+
+
+def store_fact_assertions(items: list, config: AnalysisConfig) -> int:
+    """Store extracted state assertions as NNM temporal facts.
+
+    Each item must be a dict with non-empty string subject, predicate,
+    and object fields. Confidence is optional (default 0.8) and coerced
+    to the 0.0-1.0 float NNM expects.
+
+    The same runaway-hedge cap (config.max_extractions) applies — facts
+    and observations share the cap so a malfunctioning LLM cannot blow
+    out either channel.
+    """
+    stored = 0
+    for item in items[: config.max_extractions]:
+        if not isinstance(item, dict):
+            continue
+        subject = item.get("subject")
+        predicate = item.get("predicate")
+        obj = item.get("object")
+        if not all(isinstance(v, str) and v.strip() for v in (subject, predicate, obj)):
+            continue
+        confidence = _coerce_fact_confidence(item.get("confidence", 0.8))
+
+        if memory_fact_add_call(
+            subject.strip(),
+            predicate.strip(),
+            obj.strip(),
+            confidence,
+            config,
+        ):
+            stored += 1
+
+    return stored
+
+
 def _confidence_to_importance(confidence: str) -> str:
     """Map LLM-reported confidence to NNM memory importance.
 
@@ -987,6 +1153,7 @@ def analyze_worker_run(
 
     return {
         "stored": stored,
+        "facts_stored": 0,
         "nudge_stored": nudge_stored,
         "summary_stored": summary_stored,
         "analysis": analysis,
@@ -1009,6 +1176,7 @@ def analyze_turn(
     analysis = call_analysis_llm(user_prompt, model_response, config)
     conv_id = make_conversation_id(cwd)
     stored = store_extractions(analysis["results"], conv_id, config)
+    facts_stored = store_fact_assertions(analysis["state_assertions"], config)
     summary_stored = False
     if analysis.get("summary"):
         summary_stored = store_conversation_summary(
@@ -1019,6 +1187,7 @@ def analyze_turn(
         nudge_stored = store_pending_nudge(analysis["nudgeText"], conv_id, config)
     return {
         "stored": stored,
+        "facts_stored": facts_stored,
         "nudge_stored": nudge_stored,
         "summary_stored": summary_stored,
         "analysis": analysis,
