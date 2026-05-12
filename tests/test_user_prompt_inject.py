@@ -310,6 +310,187 @@ def test_main_substantive_prompt_does_not_walk_back():
     print("[OK] main leaves substantive prompts intact (no walk-back contamination)")
 
 
+# -- Fact query in parallel with memory search (Fix #2) ------------------
+
+def test_extract_subject_candidates_drops_stopwords_and_short_tokens():
+    text = "What is the model on the inference-host with port 9500"
+    out = inject._extract_subject_candidates(text)
+    # Stopwords ("what", "the", "with", "on") and short tokens must be dropped.
+    assert "the" not in out and "what" not in out and "on" not in out
+    # Hyphenated subject must survive as a single candidate.
+    assert "inference-host" in out
+    print("[OK] _extract_subject_candidates drops stopwords and preserves hyphenated subjects")
+
+
+def test_extract_subject_candidates_caps_at_max():
+    text = " ".join([f"alpha{i}beta{i}" for i in range(20)])
+    out = inject._extract_subject_candidates(text)
+    assert len(out) <= inject.FACT_QUERY_MAX_SUBJECTS
+    print("[OK] _extract_subject_candidates caps at FACT_QUERY_MAX_SUBJECTS")
+
+
+def test_extract_subject_candidates_dedupes_preserving_order():
+    out = inject._extract_subject_candidates("qwen3 qwen3 ollama qwen3")
+    assert out.count("qwen3") == 1
+    assert out.index("qwen3") < out.index("ollama")
+    print("[OK] _extract_subject_candidates dedupes while preserving first-occurrence order")
+
+
+def test_extract_subject_candidates_empty_text():
+    assert inject._extract_subject_candidates("") == []
+    assert inject._extract_subject_candidates("a b c") == []  # all too short
+    assert inject._extract_subject_candidates("the and but for") == []  # all stopwords
+    print("[OK] _extract_subject_candidates returns empty for noise-only input")
+
+
+def test_query_facts_for_subject_parses_response():
+    """Wire-shape regression guard: memory_fact_query response is wrapped
+    in content[].text exactly like memory_search; the parser must reach
+    into the inner facts array."""
+    cfg_facts = [
+        {"subject": "inference-host", "predicate": "model", "object": "qwen3", "confidence": 1.0},
+    ]
+    body = json.dumps({
+        "result": {
+            "content": [{"type": "text", "text": json.dumps({"facts": cfg_facts, "count": 1})}],
+            "isError": False,
+        }
+    }).encode("utf-8")
+
+    with mock.patch.object(inject.urllib.request, "urlopen") as urlopen_mock:
+        urlopen_mock.return_value.__enter__.return_value.read.return_value = body
+        out = inject._query_facts_for_subject("inference-host", "/cwd")
+
+    assert out == cfg_facts
+    print("[OK] _query_facts_for_subject extracts facts from wrapped MCP response")
+
+
+def test_query_facts_for_subject_returns_empty_on_network_error():
+    import urllib.error
+    with mock.patch.object(inject.urllib.request, "urlopen") as urlopen_mock:
+        urlopen_mock.side_effect = urllib.error.URLError("down")
+        out = inject._query_facts_for_subject("anything", "/cwd")
+    assert out == []
+    print("[OK] _query_facts_for_subject returns [] on MCP unreachable")
+
+
+def test_query_facts_dedupes_by_subject_predicate():
+    """If two extracted subjects somehow point at the same (subject,
+    predicate) pair, we keep only the first — facts are temporally
+    unique per pair."""
+    calls = []
+    def fake_query(subject, project):
+        calls.append(subject)
+        # Both queries return the same fact tuple.
+        return [{"subject": "host", "predicate": "model", "object": "qwen3", "confidence": 1.0}]
+
+    with mock.patch.object(inject, "_extract_subject_candidates", return_value=["host", "qwen3"]), \
+            mock.patch.object(inject, "_query_facts_for_subject", side_effect=fake_query):
+        out = inject._query_facts("doesn't matter", "/cwd")
+
+    assert len(out) == 1, "duplicate (subject, predicate) facts must be deduped"
+    assert calls == ["host", "qwen3"]
+    print("[OK] _query_facts dedupes by (subject, predicate) across subject candidates")
+
+
+def test_query_facts_returns_empty_when_no_candidates():
+    with mock.patch.object(inject, "_extract_subject_candidates", return_value=[]):
+        assert inject._query_facts("foo", "/cwd") == []
+    print("[OK] _query_facts skips when no candidate subjects survive extraction")
+
+
+def test_format_facts_emits_current_state_header():
+    facts = [
+        {"subject": "host", "predicate": "model", "object": "qwen3"},
+        {"subject": "host", "predicate": "port", "object": "9500"},
+    ]
+    out = inject._format_facts(facts)
+    assert out.startswith("Current state:")
+    assert "host" in out and "model" in out and "qwen3" in out
+    assert "9500" in out
+    print("[OK] _format_facts emits a 'Current state:' header followed by triples")
+
+
+def test_format_facts_empty_returns_empty_string():
+    assert inject._format_facts([]) == ""
+    # All-malformed facts also produce empty (no triples to render).
+    assert inject._format_facts([{"subject": "", "predicate": "", "object": ""}]) == ""
+    print("[OK] _format_facts returns empty string when there's nothing to render")
+
+
+def test_main_injects_facts_alongside_memories():
+    """End-to-end: hook output must contain BOTH a 'Current state:' block
+    (from fact_query) AND a 'From memory:' block (from memory_search),
+    separated by a blank line."""
+    hook_input = {
+        "prompt": "What model is the inference-host running right now?",
+        "cwd": "/cwd",
+    }
+    fake_memories = [{"content": "Prefer terse responses.", "similarity": 0.9}]
+    fake_facts = [{"subject": "inference-host", "predicate": "model",
+                   "object": "qwen3-30b-a3b", "confidence": 1.0}]
+
+    stdin = io.StringIO(json.dumps(hook_input))
+    stdout = io.StringIO()
+
+    def fake_exit(code=0):
+        raise SystemExit(code)
+
+    with mock.patch.object(inject.sys, "stdin", stdin), \
+            mock.patch.object(inject.sys, "stdout", stdout), \
+            mock.patch.object(inject.sys, "exit", side_effect=fake_exit), \
+            mock.patch.object(inject, "_search_memories", return_value=fake_memories), \
+            mock.patch.object(inject, "_filter_relevant", return_value=fake_memories), \
+            mock.patch.object(inject, "_query_facts", return_value=fake_facts), \
+            mock.patch.object(inject, "_log_execution"):
+        try:
+            inject.main()
+        except SystemExit:
+            pass
+
+    output = json.loads(stdout.getvalue())
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "Current state:" in context
+    assert "From memory:" in context
+    assert "qwen3-30b-a3b" in context
+    assert "Prefer terse" in context
+    # Facts block should precede memories block.
+    assert context.index("Current state:") < context.index("From memory:")
+    print("[OK] main injects facts block before memories block")
+
+
+def test_main_emits_facts_only_when_no_memories_match():
+    """Even when memory_search returns nothing, a fact match alone is
+    enough to fire the injection. Pre-fix this would short-circuit
+    entirely."""
+    hook_input = {"prompt": "long enough query about the inference host", "cwd": "/cwd"}
+    fake_facts = [{"subject": "inference-host", "predicate": "model", "object": "qwen3"}]
+
+    stdin = io.StringIO(json.dumps(hook_input))
+    stdout = io.StringIO()
+
+    def fake_exit(code=0):
+        raise SystemExit(code)
+
+    with mock.patch.object(inject.sys, "stdin", stdin), \
+            mock.patch.object(inject.sys, "stdout", stdout), \
+            mock.patch.object(inject.sys, "exit", side_effect=fake_exit), \
+            mock.patch.object(inject, "_search_memories", return_value=[]), \
+            mock.patch.object(inject, "_filter_relevant", return_value=[]), \
+            mock.patch.object(inject, "_query_facts", return_value=fake_facts), \
+            mock.patch.object(inject, "_log_execution"):
+        try:
+            inject.main()
+        except SystemExit:
+            pass
+
+    output = json.loads(stdout.getvalue())
+    context = output["hookSpecificOutput"]["additionalContext"]
+    assert "Current state:" in context
+    assert "From memory:" not in context
+    print("[OK] main emits a facts-only injection when no memories match")
+
+
 # -- Runner --------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -333,6 +514,19 @@ if __name__ == "__main__":
         test_main_walks_back_when_prompt_is_short,
         test_main_skips_when_walk_back_has_no_transcript,
         test_main_substantive_prompt_does_not_walk_back,
+        # Fix #2: parallel memory_fact_query
+        test_extract_subject_candidates_drops_stopwords_and_short_tokens,
+        test_extract_subject_candidates_caps_at_max,
+        test_extract_subject_candidates_dedupes_preserving_order,
+        test_extract_subject_candidates_empty_text,
+        test_query_facts_for_subject_parses_response,
+        test_query_facts_for_subject_returns_empty_on_network_error,
+        test_query_facts_dedupes_by_subject_predicate,
+        test_query_facts_returns_empty_when_no_candidates,
+        test_format_facts_emits_current_state_header,
+        test_format_facts_empty_returns_empty_string,
+        test_main_injects_facts_alongside_memories,
+        test_main_emits_facts_only_when_no_memories_match,
     ]
     for t in tests:
         t()

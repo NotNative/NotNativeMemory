@@ -20,6 +20,7 @@ Exit codes:
 import datetime
 import json
 import os
+import re
 import sys
 import urllib.request
 import urllib.error
@@ -69,6 +70,35 @@ AFFIRMATIVE_SET = frozenset({
 # give the embedding model a topical anchor, not to ship the entire prior
 # response into the query.
 WALKBACK_PRIOR_MAX_CHARS = 600
+
+# Subject extraction for memory_fact_query. The injection hook fires
+# fact_query in parallel with memory_search so the model gets "current
+# state" alongside semantic background. Facts are keyed by subject,
+# which means we need a small candidate list pulled from the prompt
+# text rather than a free-text query.
+FACT_QUERY_MAX_SUBJECTS = int(os.environ.get("MEMORY_PROMPT_FACT_MAX_SUBJECTS", "5"))
+FACT_QUERY_MIN_TOKEN_LEN = 3
+
+# Stopwords filtered out of subject candidates. Kept short by design;
+# the goal is to drop the worst noise, not to be a real NLP pipeline.
+# Anything that survives this list is a candidate; the fact_query call
+# itself is cheap, so over-extraction is fine.
+_STOPWORDS = frozenset({
+    "the", "and", "but", "for", "are", "was", "were", "what", "when", "where",
+    "why", "how", "this", "that", "with", "from", "into", "about", "would",
+    "could", "should", "have", "has", "had", "you", "your", "yours", "they",
+    "them", "their", "ours", "let", "lets", "please", "thank", "thanks",
+    "want", "need", "needs", "needed", "make", "made", "use", "used", "using",
+    "can", "will", "wont", "won", "don", "doesnt", "doesn", "didn", "didnt",
+    "ive", "isnt", "isn", "arent", "aren", "wasnt", "wasn",
+    "all", "any", "some", "one", "two", "three", "four", "five",
+    "got", "get", "gets", "getting",
+    "now", "still", "also", "just", "only", "very", "much", "more", "less",
+    "okay", "yes", "yep", "yeah", "sure", "proceed", "continue", "next",
+    "going", "goes", "went",
+    # NNM-specific noise that surfaces too often to be useful as a subject
+    "memory", "memories", "user", "system", "prompt", "task", "tool",
+})
 
 TIMEOUT_SECONDS = 5
 
@@ -183,6 +213,122 @@ def _stringify_content(content) -> str:
         if block.get("type") == "text":
             parts.append(str(block.get("text", "")))
     return "\n".join(p for p in parts if p)
+
+
+def _extract_subject_candidates(text: str) -> list:
+    """Pull up to FACT_QUERY_MAX_SUBJECTS candidate subjects from text.
+
+    Heuristic: tokenize on non-word chars, lowercase, drop stopwords and
+    short tokens, dedupe preserving order, cap at the configured max.
+    Hyphenated tokens ("inference-host", "lm-studio") are preserved as
+    a single subject candidate, because fact subjects often look like that.
+    """
+    if not text:
+        return []
+    # Split on whitespace + punctuation but keep hyphens inside tokens
+    # so "inference-host" survives as one candidate.
+    raw_tokens = re.findall(r"[A-Za-z][A-Za-z0-9\-_.]*", text)
+    seen = set()
+    candidates = []
+    for tok in raw_tokens:
+        norm = tok.strip("-_.").lower()
+        if len(norm) < FACT_QUERY_MIN_TOKEN_LEN:
+            continue
+        if norm in _STOPWORDS:
+            continue
+        if norm in seen:
+            continue
+        seen.add(norm)
+        candidates.append(norm)
+        if len(candidates) >= FACT_QUERY_MAX_SUBJECTS:
+            break
+    return candidates
+
+
+def _query_facts_for_subject(subject: str, project: str) -> list:
+    """Single memory_fact_query call. Returns the list of fact dicts or [].
+
+    Missing/error responses are silently treated as empty so a partial
+    failure in one subject doesn't poison the whole injection.
+    """
+    payload = json.dumps({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "memory_fact_query",
+            "arguments": {
+                "subject": subject,
+                "project": project,
+            },
+        },
+    }).encode("utf-8")
+
+    req = urllib.request.Request(
+        MCP_URL,
+        data=payload,
+        headers=dict(_HEADERS),
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+    except (urllib.error.URLError, OSError, json.JSONDecodeError):
+        return []
+
+    for block in body.get("result", {}).get("content", []):
+        if block.get("type") == "text":
+            try:
+                inner = json.loads(block["text"])
+                return inner.get("facts", []) or []
+            except (json.JSONDecodeError, KeyError):
+                return []
+    return []
+
+
+def _query_facts(query: str, project: str) -> list:
+    """Run memory_fact_query for each subject candidate extracted from
+    the query text. Returns a deduped list of fact dicts.
+
+    Dedupe key is (subject, predicate) — for any subject/predicate pair
+    only the most recent fact is current (valid_to NULL), so duplicates
+    here only happen when multiple subjects share a predicate, which is
+    a legitimate signal worth keeping.
+    """
+    subjects = _extract_subject_candidates(query)
+    if not subjects:
+        return []
+
+    seen = set()
+    facts = []
+    for subject in subjects:
+        for fact in _query_facts_for_subject(subject, project):
+            key = (fact.get("subject"), fact.get("predicate"))
+            if key in seen:
+                continue
+            seen.add(key)
+            facts.append(fact)
+    return facts
+
+
+def _format_facts(facts: list) -> str:
+    """Format facts into a 'Current state:' block.
+
+    Plain subject — predicate: object lines, one per fact. The framing
+    deliberately differs from semantic memories: facts are present-tense
+    declarative state, memories are narrative context.
+    """
+    if not facts:
+        return ""
+    lines = ["Current state:"]
+    for fact in facts:
+        subject = fact.get("subject", "")
+        predicate = fact.get("predicate", "")
+        obj = fact.get("object", "")
+        if not (subject and predicate and obj):
+            continue
+        lines.append(f"- {subject} — {predicate}: {obj}")
+    return "\n".join(lines) if len(lines) > 1 else ""
 
 
 def _search_memories(query: str, project: str) -> list:
@@ -318,8 +464,13 @@ def main():
     # memories stay contained.
     project_cwd = hook_input.get("cwd") or os.getcwd()
 
+    # Fire memory_search (semantic context) and memory_fact_query
+    # (current state) against the same query basis. Facts answer
+    # "what is true right now"; memories answer "what's relevant
+    # background to this topic". Both belong in the injection.
     results = _search_memories(query, project_cwd)
     relevant = _filter_relevant(results)
+    facts = _query_facts(query, project_cwd)
 
     top_similarity = max(
         (m.get("similarity", 0) for m in results),
@@ -327,13 +478,20 @@ def main():
     )
     _log_execution(len(prompt), len(results), len(relevant), top_similarity)
 
-    if not relevant:
+    blocks = []
+    facts_block = _format_facts(facts)
+    if facts_block:
+        blocks.append(facts_block)
+    if relevant:
+        blocks.append(_format_memories(relevant))
+
+    if not blocks:
         sys.exit(0)
 
     output = {
         "hookSpecificOutput": {
             "hookEventName": "UserPromptSubmit",
-            "additionalContext": _format_memories(relevant),
+            "additionalContext": "\n\n".join(blocks),
         }
     }
     print(json.dumps(output))
