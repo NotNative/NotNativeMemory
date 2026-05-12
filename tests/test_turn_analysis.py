@@ -1732,6 +1732,101 @@ def test_analyze_turn_returns_facts_stored_field():
     print("[OK] analyze_turn return dict includes facts_stored")
 
 
+# -- Source attribution (Fix #5) ------------------------------------------
+# The extraction prompt now asks the LLM to label each item with its
+# provenance. Pre-fix every extraction was hardcoded source='model-inferred',
+# erasing the distinction between user-stated gospel and inferred guesses.
+
+
+def test_session_prompt_includes_source_attribution_vocabulary():
+    """Tier 2: snapshot the source vocabulary. The three labels are the
+    contract with the downstream curation pipeline; renaming any of them
+    silently breaks source-keyed filtering on the server."""
+    prompt = core.build_analysis_prompt("u", "m")
+    assert '"source"' in prompt
+    assert "user-stated" in prompt
+    assert "tool-result" in prompt
+    assert "model-inferred" in prompt
+    # The negative-steering line about not labeling inferences as user-stated
+    # is load-bearing: without it the LLM tends to over-attribute to the user.
+    assert "DO NOT label your own inferences as user-stated" in prompt
+    print("[OK] session prompt includes source attribution + negative-steering guidance")
+
+
+def test_worker_prompt_includes_source_attribution_vocabulary():
+    """Workers have no human in the loop so 'user-stated' should be
+    explicitly forbidden. The vocabulary still pins tool-result + model-inferred."""
+    prompt = core.build_worker_analysis_prompt("envelope", "output")
+    assert '"source"' in prompt
+    assert "tool-result" in prompt
+    assert "model-inferred" in prompt
+    # Workers must NEVER attribute to user-stated.
+    assert 'Never use "user-stated"' in prompt or "no human in the loop" in prompt
+    print("[OK] worker prompt includes source attribution + forbids user-stated")
+
+
+def test_coerce_source_valid_values_pass_through():
+    assert core._coerce_source("user-stated") == "user-stated"
+    assert core._coerce_source("tool-result") == "tool-result"
+    assert core._coerce_source("model-inferred") == "model-inferred"
+    # Mixed case is normalized.
+    assert core._coerce_source("USER-STATED") == "user-stated"
+    print("[OK] _coerce_source passes valid labels through (case-insensitive)")
+
+
+def test_coerce_source_unknown_defaults_to_model_inferred():
+    """Defaulting to model-inferred is the pessimistic choice: never
+    silently promote an unknown label to gospel."""
+    for bad in [None, "", "user", "stated", "gospel", 42, ["user-stated"]]:
+        assert core._coerce_source(bad) == "model-inferred", f"{bad!r} must default"
+    print("[OK] _coerce_source defaults unknown values to 'model-inferred'")
+
+
+def test_store_extractions_passes_per_item_source_through():
+    """End-to-end: each item's source label reaches memory_store_call.
+    This is the contract that lets the server distinguish gospel from
+    inference at curation time."""
+    cfg = _make_config("openai_compat")
+    items = [
+        {"fact": "User-stated rule.", "source": "user-stated", "confidence": "high"},
+        {"fact": "Tool-observed pattern.", "source": "tool-result", "confidence": "medium"},
+        {"fact": "Model-guessed rule.", "source": "model-inferred", "confidence": "low"},
+    ]
+    captured = []
+
+    def _capture(content, tags, importance, source, config):
+        captured.append(source)
+        return True
+
+    with mock.patch.object(core, "memory_store_call", side_effect=_capture):
+        core.store_extractions(items, "conv12345", cfg)
+
+    assert captured == ["user-stated", "tool-result", "model-inferred"]
+    print("[OK] store_extractions passes per-item source label through to memory_store_call")
+
+
+def test_store_extractions_unknown_source_defaults_to_model_inferred():
+    """An item with no source field, or a typo'd label, must default to
+    model-inferred — preserves the pessimistic-default invariant."""
+    cfg = _make_config("openai_compat")
+    items = [
+        {"fact": "No source field.", "confidence": "high"},
+        {"fact": "Typo'd source.", "source": "user-said", "confidence": "high"},
+        {"fact": "Non-string source.", "source": 42, "confidence": "high"},
+    ]
+    captured = []
+
+    def _capture(content, tags, importance, source, config):
+        captured.append(source)
+        return True
+
+    with mock.patch.object(core, "memory_store_call", side_effect=_capture):
+        core.store_extractions(items, "conv12345", cfg)
+
+    assert captured == ["model-inferred", "model-inferred", "model-inferred"]
+    print("[OK] store_extractions defaults unknown/missing source to 'model-inferred'")
+
+
 # -- Runner --------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -1810,6 +1905,13 @@ if __name__ == "__main__":
         test_store_fact_assertions_caps_at_max_extractions,
         test_analyze_turn_routes_state_assertions_and_observations_separately,
         test_analyze_turn_returns_facts_stored_field,
+        # core: source attribution (Fix #5)
+        test_session_prompt_includes_source_attribution_vocabulary,
+        test_worker_prompt_includes_source_attribution_vocabulary,
+        test_coerce_source_valid_values_pass_through,
+        test_coerce_source_unknown_defaults_to_model_inferred,
+        test_store_extractions_passes_per_item_source_through,
+        test_store_extractions_unknown_source_defaults_to_model_inferred,
         # core: worker-mode (skeleton; no NNA caller yet)
         test_attach_mission_tags_appends_when_mission_id_set,
         test_attach_mission_tags_includes_assignment_when_set,

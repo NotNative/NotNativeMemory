@@ -285,7 +285,17 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         "\n"
         'SECTION 1B: Learnable observations ("results")\n'
         "\n"
-        '  Each item is { "fact": "...", "tags": ["..."], "confidence": "high|medium|low" }\n'
+        '  Each item is { "fact": "...", "tags": ["..."], "confidence": "high|medium|low", "source": "user-stated|tool-result|model-inferred" }\n'
+        "\n"
+        "  Choosing source:\n"
+        '    - "user-stated": the user explicitly said the rule, preference, or decision in the\n'
+        "      USER half of this turn. Highest curation value; downstream treats these as gospel.\n"
+        '    - "tool-result": the lesson comes from a concrete tool output in the MODEL half\n'
+        "      (file contents, command stderr, API response). Verifiable and stable.\n"
+        '    - "model-inferred": neither of the above — you inferred the lesson from reasoning\n'
+        "      about the turn. Default when in doubt; downstream applies stronger curation.\n"
+        "    DO NOT label your own inferences as user-stated; that pollutes the source signal\n"
+        "    and removes the model from later supervision loops.\n"
         "\n"
         "  Rules for each fact:\n"
         "    1. One self-contained sentence that reads correctly in isolation, weeks later.\n"
@@ -360,7 +370,7 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         '    { "subject": "...", "predicate": "...", "object": "...", "confidence": 0.9 }\n'
         "  ],\n"
         '  "results": [\n'
-        '    { "fact": "...", "tags": ["..."], "confidence": "high" }\n'
+        '    { "fact": "...", "tags": ["..."], "confidence": "high", "source": "model-inferred" }\n'
         "  ],\n"
         '  "unfulfilledPromises": [\n'
         '    { "promise": "...", "reason": "tools called but no results delivered" }\n'
@@ -403,7 +413,13 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         "\n"
         'SECTION 1: Learnable facts ("results")\n'
         "\n"
-        '  Each item is { "fact": "...", "tags": ["..."], "confidence": "high|medium|low" }\n'
+        '  Each item is { "fact": "...", "tags": ["..."], "confidence": "high|medium|low", "source": "tool-result|model-inferred" }\n'
+        "\n"
+        "  Source attribution for worker runs:\n"
+        '    - "tool-result": the lesson comes from a concrete observed tool output. Most worker\n'
+        "      knowledge falls here — that's the whole point of a worker.\n"
+        '    - "model-inferred": you inferred the pattern from reasoning rather than direct\n'
+        '      tool evidence. Use sparingly. Never use "user-stated" — workers have no human in the loop.\n'
         "\n"
         "  What to extract from a worker run:\n"
         "    1. Vendor and integration quirks: site-specific scrape gotchas,\n"
@@ -474,7 +490,7 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         "\n"
         "{\n"
         '  "results": [\n'
-        '    { "fact": "...", "tags": ["..."], "confidence": "high" }\n'
+        '    { "fact": "...", "tags": ["..."], "confidence": "high", "source": "tool-result" }\n'
         "  ],\n"
         '  "unfulfilledPromises": [\n'
         '    { "promise": "...", "reason": "tools called but no results delivered" }\n'
@@ -969,6 +985,24 @@ def _confidence_to_importance(confidence: str) -> str:
     return "normal"
 
 
+_VALID_SOURCES = frozenset({"user-stated", "tool-result", "model-inferred"})
+
+
+def _coerce_source(value) -> str:
+    """Map the LLM's per-item source label to a valid NNM source kind.
+
+    Defaults to 'model-inferred' on anything unrecognized. The default
+    is intentionally pessimistic: misclassifying a model-inferred fact
+    as user-stated removes it from downstream supervision; the reverse
+    just costs us a curation pass.
+    """
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in _VALID_SOURCES:
+            return v
+    return "model-inferred"
+
+
 def store_extractions(items: list, conversation_id: str, config: AnalysisConfig) -> int:
     """Store extracted facts to NotNativeMemory as discrete memories.
 
@@ -976,11 +1010,13 @@ def store_extractions(items: list, conversation_id: str, config: AnalysisConfig)
     Optional fields:
       - 'tags' (list of strings): used verbatim as memory tags.
       - 'confidence' (high|medium|low): mapped to importance.
+      - 'source' (user-stated|tool-result|model-inferred): attribution.
+        Unrecognized values default to 'model-inferred'.
 
     Each fact is stored verbatim as the memory content. No template wrapping,
-    no metadata headers in the body. Source is recorded as 'model-inferred'
-    so downstream curation can distinguish extracted facts from user-stated
-    or tool-result memories.
+    no metadata headers in the body. Source attribution lets downstream
+    curation distinguish gospel (user-stated), verifiable (tool-result),
+    and inference (model-inferred) without re-reading every memory.
 
     The conversation_id is intentionally not embedded in the memory body or
     title because memories already carry source_session_id structurally;
@@ -1008,8 +1044,9 @@ def store_extractions(items: list, conversation_id: str, config: AnalysisConfig)
             tags = []
 
         importance = _confidence_to_importance(item.get("confidence", "medium"))
+        source = _coerce_source(item.get("source"))
 
-        if memory_store_call(fact, tags, importance, "model-inferred", config):
+        if memory_store_call(fact, tags, importance, source, config):
             stored += 1
 
     return stored
