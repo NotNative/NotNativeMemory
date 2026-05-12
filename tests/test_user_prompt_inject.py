@@ -451,11 +451,12 @@ def test_main_injects_facts_alongside_memories():
     output = json.loads(stdout.getvalue())
     context = output["hookSpecificOutput"]["additionalContext"]
     assert "Current state:" in context
-    assert "From memory:" in context
+    # Class-less memory falls through to the background bucket header.
+    assert "Background context (may be stale):" in context
     assert "qwen3-30b-a3b" in context
     assert "Prefer terse" in context
     # Facts block should precede memories block.
-    assert context.index("Current state:") < context.index("From memory:")
+    assert context.index("Current state:") < context.index("Background context")
     print("[OK] main injects facts block before memories block")
 
 
@@ -488,7 +489,102 @@ def test_main_emits_facts_only_when_no_memories_match():
     context = output["hookSpecificOutput"]["additionalContext"]
     assert "Current state:" in context
     assert "From memory:" not in context
+    assert "Background context" not in context  # no memories means no memory section
     print("[OK] main emits a facts-only injection when no memories match")
+
+
+# -- Class-aware injection framing (Fix #3) -------------------------------
+
+def test_class_headers_pin_load_bearing_strings():
+    """Tier 2: snapshot the headers. These strings reach the model
+    verbatim every turn; drift here changes how every memory is framed.
+
+    Order is load-bearing too: rules first (constraints) → preferences
+    (style) → background (optional). The model reads top-to-bottom.
+    """
+    keys = [k for k, _ in inject._CLASS_HEADERS]
+    headers = [h for _, h in inject._CLASS_HEADERS]
+    assert keys == ["rule", "preference", "memory"], (
+        "class order must be rule → preference → memory; constraints first"
+    )
+    assert headers[0] == "Standing rules:"
+    assert headers[1] == "User preferences:"
+    assert headers[2] == "Background context (may be stale):"
+    print("[OK] _CLASS_HEADERS snapshot: order + verbatim headers")
+
+
+def test_bucket_memories_by_class_routes_each_class():
+    memories = [
+        {"content": "Never use em-dashes.", "class": "rule"},
+        {"content": "Prefer terse responses.", "class": "preference"},
+        {"content": "We chose HS256 last quarter.", "class": "memory"},
+    ]
+    buckets = inject._bucket_memories_by_class(memories)
+    assert len(buckets["rule"]) == 1 and buckets["rule"][0]["content"].startswith("Never")
+    assert len(buckets["preference"]) == 1
+    assert len(buckets["memory"]) == 1
+    print("[OK] _bucket_memories_by_class routes each class to its own bucket")
+
+
+def test_bucket_memories_unknown_or_missing_class_falls_into_memory():
+    """Unclassified memories must not be silently dropped — they fall
+    into the background bucket so the model still sees them."""
+    memories = [
+        {"content": "no class field"},
+        {"content": "explicit null class", "class": None},
+        {"content": "unknown class name", "class": "wat"},
+    ]
+    buckets = inject._bucket_memories_by_class(memories)
+    assert buckets["rule"] == [] and buckets["preference"] == []
+    assert len(buckets["memory"]) == 3
+    print("[OK] _bucket_memories_by_class falls unknown/missing classes into 'memory'")
+
+
+def test_bucket_memories_preserves_order_within_bucket():
+    memories = [
+        {"content": "first rule", "class": "rule"},
+        {"content": "first pref", "class": "preference"},
+        {"content": "second rule", "class": "rule"},
+        {"content": "second pref", "class": "preference"},
+    ]
+    buckets = inject._bucket_memories_by_class(memories)
+    assert [m["content"] for m in buckets["rule"]] == ["first rule", "second rule"]
+    assert [m["content"] for m in buckets["preference"]] == ["first pref", "second pref"]
+    print("[OK] _bucket_memories_by_class preserves arrival order within each bucket")
+
+
+def test_format_memories_emits_all_three_sections_in_order():
+    memories = [
+        {"content": "be terse", "class": "preference"},
+        {"content": "no em-dashes", "class": "rule"},
+        {"content": "background note", "class": "memory"},
+    ]
+    out = inject._format_memories(memories)
+    # Rules must come first regardless of input order; preferences second;
+    # background last. This is the binding-constraints-first contract.
+    assert out.index("Standing rules:") < out.index("User preferences:")
+    assert out.index("User preferences:") < out.index("Background context")
+    assert "no em-dashes" in out
+    assert "be terse" in out
+    assert "background note" in out
+    print("[OK] _format_memories emits sections in rule -> preference -> background order")
+
+
+def test_format_memories_skips_empty_buckets():
+    """Only non-empty buckets get a header. A turn that returns 2
+    rules and zero preferences must not print an empty 'User preferences:'
+    section — that would be misleading framing."""
+    memories = [{"content": "no em-dashes", "class": "rule"}]
+    out = inject._format_memories(memories)
+    assert "Standing rules:" in out
+    assert "User preferences:" not in out
+    assert "Background context" not in out
+    print("[OK] _format_memories skips headers for empty class buckets")
+
+
+def test_format_memories_empty_input_returns_empty_string():
+    assert inject._format_memories([]) == ""
+    print("[OK] _format_memories returns empty string when no memories")
 
 
 # -- Runner --------------------------------------------------------------
@@ -527,6 +623,14 @@ if __name__ == "__main__":
         test_format_facts_empty_returns_empty_string,
         test_main_injects_facts_alongside_memories,
         test_main_emits_facts_only_when_no_memories_match,
+        # Fix #3: class-aware injection framing
+        test_class_headers_pin_load_bearing_strings,
+        test_bucket_memories_by_class_routes_each_class,
+        test_bucket_memories_unknown_or_missing_class_falls_into_memory,
+        test_bucket_memories_preserves_order_within_bucket,
+        test_format_memories_emits_all_three_sections_in_order,
+        test_format_memories_skips_empty_buckets,
+        test_format_memories_empty_input_returns_empty_string,
     ]
     for t in tests:
         t()

@@ -394,19 +394,56 @@ def _filter_relevant(results: list) -> list:
     return filtered[:MAX_MEMORIES]
 
 
-def _format_memories(memories: list) -> str:
-    """Format memories into a concise context block.
+# Class-aware framing. Memories carry a "class" field set by the
+# server's classify pipeline (rule / preference / memory). Bucketing
+# the injection by class gives the model a stronger prior: rules are
+# constraints, preferences are user-stated choices, plain memories
+# are background that may be stale. Pre-fix everything landed in one
+# undifferentiated "From memory:" bullet list.
+_CLASS_HEADERS = (
+    ("rule", "Standing rules:"),
+    ("preference", "User preferences:"),
+    ("memory", "Background context (may be stale):"),
+)
 
-    Plain `From memory:` header + one bullet per item. No importance,
-    scope, similarity, or tag metadata — small local models read those
-    prefixes as noise. Metadata stays available server-side for
-    retrieval and curation; the consumer only sees the content.
+
+def _bucket_memories_by_class(memories: list) -> dict:
+    """Group memories into class buckets, preserving order within each.
+
+    Memories with class=None or an unknown class drop into the 'memory'
+    bucket so they still surface — losing them silently would be worse
+    than mis-labeling them as background.
     """
-    lines = ["From memory:"]
+    buckets = {key: [] for key, _ in _CLASS_HEADERS}
     for mem in memories:
-        content = mem.get("content", "")
-        lines.append(f"- {content}")
-    return "\n".join(lines)
+        cls = mem.get("class")
+        if cls not in buckets:
+            cls = "memory"
+        buckets[cls].append(mem)
+    return buckets
+
+
+def _format_memories(memories: list) -> str:
+    """Format memories into class-aware sections.
+
+    One section per non-empty bucket, in fixed order: rules → preferences
+    → background. Empty buckets are skipped. The fixed order matters:
+    rules are non-negotiable, preferences shape style, background is
+    optional reading. The model reads top-to-bottom; the most binding
+    constraints come first.
+    """
+    buckets = _bucket_memories_by_class(memories)
+    sections = []
+    for key, header in _CLASS_HEADERS:
+        items = buckets[key]
+        if not items:
+            continue
+        lines = [header]
+        for mem in items:
+            content = mem.get("content", "")
+            lines.append(f"- {content}")
+        sections.append("\n".join(lines))
+    return "\n\n".join(sections)
 
 
 def _log_execution(
