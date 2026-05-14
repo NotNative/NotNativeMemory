@@ -360,7 +360,7 @@ def _tool_auth_and_project(
     return owner, project_dir, None
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @instrumented("memory_store")
 async def memory_store(
     content: str,
@@ -521,7 +521,7 @@ async def memory_store(
     return response
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @instrumented("memory_search")
 async def memory_search(
     query: str,
@@ -737,7 +737,7 @@ async def memory_list(
     return {"memories": results, "count": len(results)}
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @instrumented("memory_fact_add")
 async def memory_fact_add(
     subject: str,
@@ -826,7 +826,7 @@ async def memory_fact_add(
     return {"stored": True, **result}
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @instrumented("memory_fact_query")
 async def memory_fact_query(
     subject: str,
@@ -1210,7 +1210,7 @@ async def memory_project_delete(project_id: str) -> dict:
     return counts
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @instrumented("memory_context")
 async def memory_context(
     project: Optional[str] = None,
@@ -1933,7 +1933,7 @@ async def rag_ingest_file(
     return {"stored": True, **result}
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @instrumented("rag_search")
 async def rag_search(
     query: str,
@@ -2152,7 +2152,7 @@ async def rag_list(
     return {"results": results, "count": len(results)}
 
 
-@mcp.tool()
+@mcp.tool(meta={"anthropic/alwaysLoad": True})
 @instrumented("recall")
 async def recall(
     query: str,
