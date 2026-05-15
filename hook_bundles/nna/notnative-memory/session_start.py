@@ -27,22 +27,52 @@ Exit codes:
     1 - non-fatal error (session proceeds without injection)
 """
 
+import datetime
 import json
 import os
 import sys
+import traceback
 import urllib.request
 import urllib.error
 
-# -- Load config from hooks.env alongside this script ----------------------
+# Windows cp1252 stdout crashes on non-ASCII memory content (arrows, em-dashes).
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except (AttributeError, OSError):
+    pass
+
 _HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
-_ENV_FILE = os.path.join(_HOOK_DIR, "hooks.env")
-if os.path.exists(_ENV_FILE):
-    with open(_ENV_FILE, "r") as _f:
-        for _line in _f:
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _key, _val = _line.split("=", 1)
-                os.environ.setdefault(_key.strip(), _val.strip())
+_ERROR_LOG = os.path.join(_HOOK_DIR, "last_error.log")
+
+
+def _log_traceback(label: str) -> None:
+    """Append the current exception's traceback to last_error.log and
+    mirror it to stderr. Hook failures otherwise surface only as a
+    single-line 'Traceback (most recent call last):' in the harness
+    chrome with the body truncated."""
+    try:
+        with open(_ERROR_LOG, "a", encoding="utf-8") as lf:
+            lf.write(f"\n--- {datetime.datetime.now().isoformat()} {label} ---\n")
+            traceback.print_exc(file=lf)
+    except Exception:
+        pass
+    traceback.print_exc(file=sys.stderr)
+
+
+# -- Load config from hooks.env alongside this script ----------------------
+try:
+    _ENV_FILE = os.path.join(_HOOK_DIR, "hooks.env")
+    if os.path.exists(_ENV_FILE):
+        with open(_ENV_FILE, "r") as _f:
+            for _line in _f:
+                _line = _line.strip()
+                if _line and not _line.startswith("#") and "=" in _line:
+                    _key, _val = _line.split("=", 1)
+                    os.environ.setdefault(_key.strip(), _val.strip())
+except BaseException:
+    _log_traceback("session_start env-load")
+    sys.exit(1)
 
 MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://localhost:9500/mcp")
 MAX_TOKENS = int(os.environ.get("MEMORY_SESSION_MAX_TOKENS", "600"))
@@ -167,4 +197,10 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except SystemExit:
+        raise
+    except BaseException:
+        _log_traceback("session_start main")
+        sys.exit(1)
