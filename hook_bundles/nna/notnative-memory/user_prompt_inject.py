@@ -38,7 +38,7 @@ if os.path.exists(_ENV_FILE):
 
 # -- Configuration ---------------------------------------------------------
 
-MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://localhost:9500/mcp")
+MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://127.0.0.1:9500/mcp")
 
 # Threshold tuned for user-prompt noise: user messages are longer and
 # more varied than tool arguments, so a higher floor filters chit-chat.

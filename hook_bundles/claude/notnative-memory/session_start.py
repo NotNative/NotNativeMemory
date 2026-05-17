@@ -71,7 +71,7 @@ except BaseException:
     _log_traceback("session_start import")
     sys.exit(1)
 
-MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://localhost:9500/mcp")
+MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://127.0.0.1:9500/mcp")
 MAX_TOKENS = int(os.environ.get("MEMORY_SESSION_MAX_TOKENS", "600"))
 TIMEOUT_SECONDS = 5
 

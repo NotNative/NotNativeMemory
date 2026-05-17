@@ -125,7 +125,7 @@ This is created on first install by copying `hooks.env.example` from the repo an
 Available keys (full reference is in `hooks.env.example`):
 
 ```
-MEMORY_MCP_URL=http://localhost:9500/mcp
+MEMORY_MCP_URL=http://127.0.0.1:9500/mcp
 MEMORY_MCP_TOKEN=                 # see Authentication section above
 
 # UserPromptSubmit (user_prompt_inject.py)

@@ -32,7 +32,7 @@ if os.path.exists(_ENV_FILE):
                 _key, _val = _line.split("=", 1)
                 os.environ.setdefault(_key.strip(), _val.strip())
 
-MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://localhost:9500/mcp")
+MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://127.0.0.1:9500/mcp")
 MAX_MEMORIES = int(os.environ.get("MEMORY_COMPACT_MAX_RESULTS", "5"))
 TIMEOUT_SECONDS = 5
 

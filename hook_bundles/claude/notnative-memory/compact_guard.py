@@ -29,7 +29,7 @@ from _internal.env_loader import load_hooks_env  # noqa: E402
 
 load_hooks_env(__file__)
 
-MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://localhost:9500/mcp")
+MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://127.0.0.1:9500/mcp")
 MAX_MEMORIES = int(os.environ.get("MEMORY_COMPACT_MAX_RESULTS", "5"))
 TIMEOUT_SECONDS = 5
 

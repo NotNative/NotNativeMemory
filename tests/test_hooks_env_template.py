@@ -74,6 +74,9 @@ def run() -> int:
         claude_text = fh.read()
     claude_env = _parse_env(claude_text)
 
+    check("[claude] MEMORY_MCP_URL uses 127.0.0.1 (IPv4) not localhost",
+          "127.0.0.1" in claude_env.get("MEMORY_MCP_URL", "")
+          and "localhost" not in claude_env.get("MEMORY_MCP_URL", ""))
     check("[claude] OPENAI_BASE_URL set (not commented)",
           "OPENAI_BASE_URL" in claude_env and claude_env["OPENAI_BASE_URL"])
     check("[claude] OPENAI_BASE_URL points at a /v1 endpoint",
@@ -107,6 +110,11 @@ def run() -> int:
 
     check("[nna] MEMORY_MCP_URL reflects the passed argument",
           nna_env.get("MEMORY_MCP_URL") == "http://test:9500/mcp")
+
+    import inspect
+    install_default = inspect.signature(mod.merge).parameters["mcp_url"].default
+    check("[nna] merge() default mcp_url uses 127.0.0.1 (IPv4) not localhost",
+          "127.0.0.1" in install_default and "localhost" not in install_default)
     check("[nna] OPENAI_BASE_URL set (not commented)",
           "OPENAI_BASE_URL" in nna_env and nna_env["OPENAI_BASE_URL"])
     check("[nna] OPENAI_BASE_URL points at a /v1 endpoint",

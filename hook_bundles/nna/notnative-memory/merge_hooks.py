@@ -13,7 +13,7 @@ Arguments:
     install_path  - Absolute path to the NotNativeMemory install
                     directory. Used to resolve script paths in the
                     manifest and generate hooks.env.
-    mcp_url       - MCP server URL. Default: http://localhost:9500/mcp
+    mcp_url       - MCP server URL. Default: http://127.0.0.1:9500/mcp
 """
 
 import json
@@ -172,7 +172,7 @@ _OBSOLETE_FILES = [
 ]
 
 
-def merge(install_path: str, mcp_url: str = "http://localhost:9500/mcp"):
+def merge(install_path: str, mcp_url: str = "http://127.0.0.1:9500/mcp"):
     """Install NotNativeMemory hooks into NNA's drop-in directory."""
     if not install_path:
         raise ValueError("install_path cannot be empty")
@@ -239,5 +239,5 @@ if __name__ == "__main__":
         sys.exit(1)
 
     path = sys.argv[1]
-    url = sys.argv[2] if len(sys.argv) > 2 else "http://localhost:9500/mcp"
+    url = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:9500/mcp"
     merge(path, url)

@@ -61,7 +61,7 @@ class AnalysisConfig:
         model: Optional[str],            # may be None for openai_compat (auto-discover)
         headers: dict,                   # auth + content-type
         models_url: Optional[str] = None,  # for auto-discovery (openai_compat only)
-        mcp_url: str = "http://localhost:9500/mcp",
+        mcp_url: str = "http://127.0.0.1:9500/mcp",
         mcp_headers: Optional[dict] = None,
         temperature: float = 0.1,
         max_tokens: int = DEFAULT_MAX_TOKENS,
@@ -171,7 +171,7 @@ def resolve_config_from_env(env: Optional[dict] = None) -> AnalysisConfig:
         # openai_compat without override — defer to auto-discover at call time.
         model = None
 
-    mcp_url = e.get("MEMORY_MCP_URL", "http://localhost:9500/mcp")
+    mcp_url = e.get("MEMORY_MCP_URL", "http://127.0.0.1:9500/mcp")
     mcp_token = e.get("MEMORY_MCP_TOKEN", "").strip()
     mcp_headers = {
         "Content-Type": "application/json",

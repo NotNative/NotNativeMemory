@@ -227,7 +227,7 @@ Installer-generated defaults seed the analyzer with a working local LLM endpoint
 
 | Key | Default | Purpose |
 |---|---|---|
-| `MEMORY_MCP_URL` | `http://localhost:9500/mcp` (or installer arg) | NNM MCP endpoint the hooks POST to. |
+| `MEMORY_MCP_URL` | `http://127.0.0.1:9500/mcp` (or installer arg) | NNM MCP endpoint the hooks POST to. |
 | `OPENAI_BASE_URL` | `http://127.0.0.1:1234/v1` (LM Studio) | OpenAI-compat LLM endpoint for turn analysis. |
 | `OPENAI_API_KEY` | `lm-studio` | Placeholder accepted by LM Studio; real key for cloud backends. |
 | `MEMORY_EXTRACT_MODEL` | unset | Auto-discovered via `/v1/models` when blank; pin a specific id when multiple are loaded. |

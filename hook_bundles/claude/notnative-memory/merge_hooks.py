@@ -35,7 +35,7 @@ Usage:
 Arguments:
     repo_path  - Absolute path to the NotNativeMemory checkout.
     mcp_url    - Optional MCP server URL. Default:
-                 http://localhost:9500/mcp. Only applied when
+                 http://127.0.0.1:9500/mcp. Only applied when
                  hooks.env doesn't already exist.
 """
 
@@ -227,7 +227,7 @@ def _ensure_hooks_env(deploy_dir: str, mcp_url: str) -> Tuple[str, bool]:
 
     # Copy example to live config, then patch in the user-supplied MCP URL.
     shutil.copy2(example_path, env_path)
-    if mcp_url and mcp_url != "http://localhost:9500/mcp":
+    if mcp_url and mcp_url != "http://127.0.0.1:9500/mcp":
         _patch_env_value(env_path, "MEMORY_MCP_URL", mcp_url)
     return env_path, True
 
@@ -329,7 +329,7 @@ def _upsert_hook_registrations(settings: dict, deploy_dir: str) -> int:
 
 def install(
     repo_path: str,
-    mcp_url: str = "http://localhost:9500/mcp",
+    mcp_url: str = "http://127.0.0.1:9500/mcp",
 ) -> int:
     """Run the full install. Returns the number of changes made."""
     if not repo_path:
@@ -376,5 +376,5 @@ if __name__ == "__main__":
         sys.exit(1)
 
     path = sys.argv[1]
-    url = sys.argv[2] if len(sys.argv) > 2 else "http://localhost:9500/mcp"
+    url = sys.argv[2] if len(sys.argv) > 2 else "http://127.0.0.1:9500/mcp"
     install(path, url)
