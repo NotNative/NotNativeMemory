@@ -370,6 +370,14 @@ Each user/assistant exchange becomes a memory, auto-classified and deduplicated 
 
 **Memory tools don't appear in LM Studio** - Check `~/.lmstudio/mcp.json`. Save the file and LM Studio will auto-reload.
 
+**Hook calls hang / time out when the MCP is on the same machine (Windows)** - Windows' default IPv6 prefix-policy table prefers `::1` over `127.0.0.1` when a client resolves `localhost`. If the MCP server only binds to IPv4 (the default), same-host clients land on `::1`, the SYN goes nowhere, and the call eventually times out. Symptoms include 401-with-no-server-side-hit, mysterious analyzer drops, and hook subprocesses that finish at exactly their configured timeout. Fix from an **elevated** PowerShell prompt:
+
+```
+netsh interface ipv6 set prefixpolicy ::ffff:0:0/96 60 4
+```
+
+This bumps the precedence of IPv4-mapped addresses so IPv4 wins. System-wide change — revert with `netsh interface ipv6 set prefixpolicy ::ffff:0:0/96 35 4`. The Windows installer surfaces this advice automatically when the MCP URL is loopback.
+
 ## Uninstall
 
 The uninstaller reads `.install-manifest.json` and only removes what was installed, so it's safe whatever mode you picked.

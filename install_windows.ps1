@@ -242,6 +242,14 @@ if ($installMode -eq "client") {
     Write-Host ""
     Write-Info "Hooks configured to use: $MCP_URL"
     Write-Info "Make sure the remote MCP server is running."
+
+    # When the MCP URL is loopback (client + server on the same box) Windows'
+    # default IPv6 prefix policy can make 'localhost' resolve to ::1 first;
+    # if the server only binds to 127.0.0.1 the client times out. Surface a
+    # one-line netsh fix the user can run in an elevated shell. No auto-apply.
+    . "$SCRIPT_DIR\install_lib\loopback_advice.ps1"
+    Show-LoopbackIPv6AdviceIfNeeded -Url $MCP_URL | Out-Null
+
     Write-Host ""
     exit 0
 }
