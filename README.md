@@ -376,7 +376,7 @@ Each user/assistant exchange becomes a memory, auto-classified and deduplicated 
 netsh interface ipv6 set prefixpolicy ::ffff:0:0/96 60 4
 ```
 
-This bumps the precedence of IPv4-mapped addresses so IPv4 wins. System-wide change — revert with `netsh interface ipv6 set prefixpolicy ::ffff:0:0/96 35 4`. The Windows installer surfaces this advice automatically when the MCP URL is loopback.
+This bumps the precedence of IPv4-mapped addresses so IPv4 wins. System-wide change — revert with `netsh interface ipv6 set prefixpolicy ::ffff:0:0/96 35 4`. The Windows installer surfaces this advice automatically when the MCP URL is loopback AND the in-installer connection test cannot reach it — i.e. exactly the situation where this is the likely culprit.
 
 ## Uninstall
 

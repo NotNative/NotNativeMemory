@@ -209,6 +209,7 @@ if ($installMode -eq "client") {
 
     # Test connectivity
     Write-Step "Testing MCP server connection..."
+    $connectionFailed = $false
     try {
         $testPayload = '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}'
         $response = Invoke-WebRequest -Uri $MCP_URL -Method POST -Body $testPayload -ContentType "application/json" -Headers @{"Accept"="application/json"} -TimeoutSec 10 -UseBasicParsing -ErrorAction Stop
@@ -216,6 +217,7 @@ if ($installMode -eq "client") {
             Write-Info "Connection successful"
         }
     } catch {
+        $connectionFailed = $true
         Write-Warn "Could not reach $MCP_URL - server may not be running."
         Write-Info "Hooks will be configured anyway. Start the remote server before using."
     }
@@ -243,12 +245,16 @@ if ($installMode -eq "client") {
     Write-Info "Hooks configured to use: $MCP_URL"
     Write-Info "Make sure the remote MCP server is running."
 
-    # When the MCP URL is loopback (client + server on the same box) Windows'
-    # default IPv6 prefix policy can make 'localhost' resolve to ::1 first;
-    # if the server only binds to 127.0.0.1 the client times out. Surface a
-    # one-line netsh fix the user can run in an elevated shell. No auto-apply.
-    . "$SCRIPT_DIR\install_lib\loopback_advice.ps1"
-    Show-LoopbackIPv6AdviceIfNeeded -Url $MCP_URL | Out-Null
+    # When the MCP URL is loopback AND the connection test just failed,
+    # the most likely culprit on Windows is the IPv6 prefix policy that
+    # resolves 'localhost' to ::1 before 127.0.0.1. If the server only
+    # binds to IPv4 the same-host client times out. Surface a one-line
+    # netsh fix the user can run in an elevated shell. No auto-apply,
+    # and no advice on a successful connection or a routable URL.
+    if ($connectionFailed) {
+        . "$SCRIPT_DIR\install_lib\loopback_advice.ps1"
+        Show-LoopbackIPv6AdviceIfNeeded -Url $MCP_URL | Out-Null
+    }
 
     Write-Host ""
     exit 0
