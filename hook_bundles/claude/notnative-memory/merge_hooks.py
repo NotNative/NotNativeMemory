@@ -72,22 +72,26 @@ _DESIRED_HOOKS = {
     "UserPromptSubmit": {
         "matcher": "",
         "script": "user_prompt_inject.py",
-        "timeout": 10,
+        "timeout": 60,
     },
     "SessionStart": {
         "matcher": "",
         "script": "session_start.py",
-        "timeout": 10,
+        "timeout": 60,
     },
     "PreCompact": {
         "matcher": "",
         "script": "compact_guard.py",
-        "timeout": 10,
+        "timeout": 60,
     },
+    # Stop fires turn_analysis which makes a per-turn LLM call. Reasoning
+    # models can spend 30-60s on hidden CoT before emitting the final JSON;
+    # 90s leaves headroom so the harness doesn't kill the subprocess mid-call
+    # and silently lose the row that would have been written.
     "Stop": {
         "matcher": "",
         "script": "turn_analysis.py",
-        "timeout": 15,
+        "timeout": 90,
     },
     "PreToolUse": {
         "matcher": "",

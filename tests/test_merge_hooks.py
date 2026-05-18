@@ -180,6 +180,40 @@ def test_install_idempotent_on_settings_json():
     print("[OK] install is idempotent — re-runs don't duplicate hook entries")
 
 
+def test_install_writes_stop_hook_with_reasoning_safe_timeout():
+    """The Stop hook fires turn_analysis, which runs a per-turn LLM call.
+
+    Reasoning models routinely spend 30-60s on hidden CoT before producing
+    the final JSON. The harness kills the subprocess at the registered
+    timeout, so anything below ~60s silently truncates the analyzer call
+    and the resulting `extracted=N` log row never gets written. 90s leaves
+    headroom for slow local backends without making cloud calls feel
+    unresponsive. Regression guard: do not drop this back below 60.
+    """
+    with tempfile.TemporaryDirectory() as tmp:
+        repo = _make_fake_repo(tmp)
+        fake_home = os.path.join(tmp, "home")
+
+        with mock.patch.object(merge_hooks, "_claude_home", return_value=os.path.join(fake_home, ".claude")):
+            merge_hooks.install(repo, "http://localhost:9500/mcp")
+
+        settings_path = os.path.join(fake_home, ".claude", "settings.json")
+        with open(settings_path, "r", encoding="utf-8") as fh:
+            settings = json.load(fh)
+
+        stop_timeouts = [
+            h["timeout"]
+            for group in settings["hooks"]["Stop"]
+            for h in group.get("hooks", [])
+        ]
+        assert stop_timeouts, "Stop hook should be registered"
+        assert all(t >= 60 for t in stop_timeouts), (
+            f"Stop timeout must be >= 60s for reasoning-model analyzer calls. "
+            f"Got {stop_timeouts}."
+        )
+    print("[OK] install registers Stop hook with reasoning-safe timeout (>= 60s)")
+
+
 def test_install_sweeps_retired_hooks():
     with tempfile.TemporaryDirectory() as tmp:
         repo = _make_fake_repo(tmp)
@@ -209,9 +243,18 @@ def test_install_sweeps_retired_hooks():
             with open(os.path.join(claude_dir, "settings.json"), "r", encoding="utf-8") as fh:
                 settings = json.load(fh)
 
-        # PreToolUse entry should be gone (memory_inject.py is retired).
-        assert "PreToolUse" not in settings["hooks"]
-    print("[OK] install sweeps retired hooks from settings.json")
+        # The retired memory_inject.py PreToolUse entry should be gone, but
+        # the legitimate pre_tool_safety.py PreToolUse entry that
+        # _DESIRED_HOOKS adds should be the only PreToolUse group left.
+        pretooluse_groups = settings["hooks"].get("PreToolUse", [])
+        assert len(pretooluse_groups) == 1, (
+            f"PreToolUse should have exactly one group (pre_tool_safety.py); "
+            f"got {len(pretooluse_groups)}"
+        )
+        cmd = pretooluse_groups[0]["hooks"][0]["command"]
+        assert "pre_tool_safety.py" in cmd, f"unexpected PreToolUse command: {cmd}"
+        assert "memory_inject.py" not in cmd, "retired memory_inject.py must not survive sweep"
+    print("[OK] install sweeps retired hooks and keeps the live pre_tool_safety entry")
 
 
 def test_patch_env_value_existing_key():

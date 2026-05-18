@@ -36,6 +36,13 @@
       "command": "python turn_analysis.py",
       "blocking": false,
       "timeout_ms": 90000
+    },
+    {
+      "event": "tool.call",
+      "phase": "pre",
+      "command": "python pre_tool_safety.py",
+      "blocking": true,
+      "timeout_ms": 5000
     }
   ]
 }

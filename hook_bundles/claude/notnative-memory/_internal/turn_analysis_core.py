@@ -625,10 +625,13 @@ def _call_analysis_llm_with_prompt(
             "max_tokens": config.max_tokens,
         }
         if config.disable_reasoning:
-            # LM Studio / vLLM / llama.cpp Qwen3 honor this kwarg to skip
-            # the hidden <think> phase. Reasoning is wasted compute for a
-            # classifier prompt and burns the subprocess timeout budget.
+            # Two-pronged: chat_template_kwargs is what vLLM and llama.cpp
+            # Qwen3 templates check; reasoning_effort is what LM Studio's
+            # reasoning-model adapter (Nemotron, gpt-oss, etc.) honors.
+            # Unknown fields are ignored by each backend, so sending both
+            # is safe and lets one flag cover both ecosystems.
             body["chat_template_kwargs"] = {"enable_thinking": False}
+            body["reasoning_effort"] = "off"
 
     payload = json.dumps(body).encode("utf-8")
     try:

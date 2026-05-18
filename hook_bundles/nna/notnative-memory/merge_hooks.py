@@ -16,6 +16,7 @@ Arguments:
     mcp_url       - MCP server URL. Default: http://127.0.0.1:9500/mcp
 """
 
+import datetime
 import json
 import os
 import shutil
@@ -93,60 +94,32 @@ def _write_hooks_env(target_dir: str, mcp_url: str) -> None:
     print(f"  Saved hooks.env (MCP URL: {mcp_url})")
 
 
-def _write_manifest(target_dir: str) -> None:
-    """Write the drop-in manifest for NNA's event bus hook loader."""
-    manifest = {
-        "name": "notnative-memory",
-        "version": "1.0.0",
-        "subscriptions": [
-            {
-                "event": "user.prompt.submit",
-                "phase": "pre",
-                "command": "python user_prompt_inject.py",
-                "blocking": True,
-                "timeout_ms": 10000,
-            },
-            {
-                "event": "session.start",
-                "phase": "post",
-                "command": "python session_start.py",
-                "blocking": True,
-                "timeout_ms": 10000,
-            },
-            {
-                "event": "compaction",
-                "phase": "pre",
-                "command": "python compact_guard.py",
-                "blocking": True,
-                "timeout_ms": 10000,
-            },
-            {
-                "event": "session.end",
-                "phase": "pre",
-                "command": "python compact_guard.py",
-                "blocking": True,
-                "timeout_ms": 10000,
-            },
-            {
-                "event": "user.prompt.submit",
-                "phase": "post",
-                "command": "python turn_analysis.py",
-                "blocking": False,
-                "timeout_ms": 15000,
-            },
-            {
-                "event": "tool.call",
-                "phase": "pre",
-                "command": "python pre_tool_safety.py",
-                "blocking": True,
-                "timeout_ms": 5000,
-            },
-        ],
-    }
-    manifest_file = os.path.join(target_dir, "manifest.json")
-    with open(manifest_file, "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)
-    print("  Wrote manifest.json")
+def _copy_manifest(source_dir: str, target_dir: str) -> None:
+    """Copy manifest.json from the repo bundle into the install dir.
+
+    The repo's manifest.json is the single source of truth for subscriptions
+    and timeouts. Previously this function hardcoded a manifest that drifted
+    away from the JSON on disk; copying eliminates that drift.
+    """
+    src = os.path.join(source_dir, "manifest.json")
+    dst = os.path.join(target_dir, "manifest.json")
+    if not os.path.exists(src):
+        raise FileNotFoundError(f"manifest.json missing from bundle: {src}")
+    shutil.copy2(src, dst)
+    print("  Copied manifest.json")
+
+
+def _write_version(target_dir: str, install_path: str) -> None:
+    """Stamp install timestamp + source repo path so drift is diagnosable.
+
+    Matches the VERSION marker the Claude bundle writes. Lets us tell at
+    a glance which repo checkout produced a given installed copy.
+    """
+    version_file = os.path.join(target_dir, "VERSION")
+    normalized = install_path.replace(chr(92), "/")
+    with open(version_file, "w", encoding="utf-8") as fh:
+        fh.write(f"installed_at={datetime.datetime.now().isoformat(timespec='seconds')}\n")
+        fh.write(f"source_repo={normalized}\n")
 
 
 # Python scripts to copy from this directory into the target
@@ -221,13 +194,21 @@ def merge(install_path: str, mcp_url: str = "http://127.0.0.1:9500/mcp"):
             except OSError as exc:
                 print(f"  Warning: could not remove {obsolete}: {exc}", file=sys.stderr)
 
-    # Write manifest
-    _write_manifest(target_dir)
+    # Copy manifest from the bundle (source of truth on disk).
+    _copy_manifest(source_dir, target_dir)
     changes_made += 1
 
-    # Write hooks.env
-    _write_hooks_env(target_dir, mcp_url)
+    # Preserve user-edited hooks.env across re-installs (matches Claude
+    # bundle). Write the canonical default only when no file exists yet.
+    env_file = os.path.join(target_dir, "hooks.env")
+    if os.path.exists(env_file):
+        print(f"  Preserved existing {env_file}")
+    else:
+        _write_hooks_env(target_dir, mcp_url)
     changes_made += 1
+
+    # Stamp VERSION so drift is diagnosable.
+    _write_version(target_dir, install_path)
 
     print(f"  Installed to {target_dir}")
     return changes_made
