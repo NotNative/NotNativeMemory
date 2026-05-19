@@ -330,16 +330,14 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         '       double-quoted strings before PowerShell sees them." (run-on; same idea fits in one short sentence)\n'
         '    - "OK." (trivial)\n'
         "\n"
-        'SECTION 2: Promise tracking ("unfulfilledPromises", "shouldNudge", "nudgeText")\n'
-        "\n"
-        '  Did the assistant commit to a future action ("I\'ll look up X", "let me check Y")?\n'
-        "  Were those actions completed with substantive results?\n"
-        "  If tools were called but no meaningful answer delivered, flag as incomplete.\n"
-        '  Set "shouldNudge" true ONLY when the next turn could meaningfully act on it.\n'
-        '  "nudgeText" should be a single sentence the assistant could say next turn\n'
-        '  (e.g. "Earlier I said I\'d check X; want me to follow through?").\n'
-        "\n"
-        'SECTION 3: Conversation summary ("summary")\n'
+        # SECTION 2 (Promise tracking) was removed 2026-05-19: that
+        # responsibility relocated to NNA proper as an agent-loop
+        # accountability concern, not a memory-curation one. See NNA's
+        # src/services/promise-detector/ for the replacement, and the
+        # original audit at docs/EventBus_Audit_2026-05-18.md in NNA.
+        # The summary section keeps its original number (2 now, was 3)
+        # so existing downstream consumers don't have to relearn an index.
+        'SECTION 2: Conversation summary ("summary")\n'
         "\n"
         "  A compact distilled summary of THIS turn's dialogue, written so a model\n"
         "  reading it weeks later can recall the shape of the discussion.\n"
@@ -372,11 +370,6 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         '  "results": [\n'
         '    { "fact": "...", "tags": ["..."], "confidence": "high", "source": "model-inferred" }\n'
         "  ],\n"
-        '  "unfulfilledPromises": [\n'
-        '    { "promise": "...", "reason": "tools called but no results delivered" }\n'
-        "  ],\n"
-        '  "shouldNudge": false,\n'
-        '  "nudgeText": "",\n'
         '  "summary": ""\n'
         "}\n"
         "\n"
@@ -459,15 +452,10 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         '    - "Stripe checkout sessions older than 24h return 410 GONE; skip the retrieve, don\'t retry."\n'
         '    - "Cloudflare-protected vendor pages need the headless-browser tool, not raw requests."\n'
         "\n"
-        'SECTION 2: Promise tracking ("unfulfilledPromises", "shouldNudge", "nudgeText")\n'
-        "\n"
-        "  Did the worker commit to a follow-up action that did not get done?\n"
-        "  If a tool was invoked but its result was not consumed, flag it.\n"
-        '  Set "shouldNudge" true ONLY when a downstream worker or chat session\n'
-        "  could meaningfully act on the unfulfilled commitment.\n"
-        '  "nudgeText" should be one sentence describing the missing follow-up.\n'
-        "\n"
-        'SECTION 3: Worker run summary ("summary")\n'
+        # SECTION 2 (Promise tracking) removed 2026-05-19; see the
+        # session-mode prompt above for the rationale and pointer to
+        # NNA's replacement implementation.
+        'SECTION 2: Worker run summary ("summary")\n'
         "\n"
         "  A compact narrative of what the worker did and what conclusion it\n"
         "  reached. 1-3 sentences. Cover the outcome and the shape of the work,\n"
@@ -492,11 +480,6 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         '  "results": [\n'
         '    { "fact": "...", "tags": ["..."], "confidence": "high", "source": "tool-result" }\n'
         "  ],\n"
-        '  "unfulfilledPromises": [\n'
-        '    { "promise": "...", "reason": "tools called but no results delivered" }\n'
-        "  ],\n"
-        '  "shouldNudge": false,\n'
-        '  "nudgeText": "",\n'
         '  "summary": ""\n'
         "}\n"
         "\n"
@@ -523,19 +506,28 @@ def strip_markdown_fences(content: str) -> str:
 
 
 def empty_analysis() -> dict:
-    """Return the canonical empty analysis shape."""
+    """Return the canonical empty analysis shape.
+
+    Note: prior versions also returned ``unfulfilledPromises``,
+    ``shouldNudge``, and ``nudgeText``. Promise detection moved to NNA
+    proper 2026-05-19; those fields are gone. Adapters that still read
+    them should treat ``analysis.get("shouldNudge", False)`` as falsy.
+    """
     return {
         "state_assertions": [],
         "results": [],
-        "unfulfilledPromises": [],
-        "shouldNudge": False,
-        "nudgeText": "",
         "summary": "",
     }
 
 
 def coerce_analysis(parsed: dict) -> dict:
-    """Coerce LLM output into the canonical shape, filling defaults."""
+    """Coerce LLM output into the canonical shape, filling defaults.
+
+    Drops any ``unfulfilledPromises`` / ``shouldNudge`` / ``nudgeText``
+    keys an older LLM prompt template might still emit — they're
+    silently ignored rather than surfaced, so an old model output
+    doesn't crash a current adapter.
+    """
     return {
         "state_assertions": (
             parsed.get("state_assertions", [])
@@ -543,13 +535,6 @@ def coerce_analysis(parsed: dict) -> dict:
             else []
         ),
         "results": parsed.get("results", []) if isinstance(parsed.get("results"), list) else [],
-        "unfulfilledPromises": (
-            parsed.get("unfulfilledPromises", [])
-            if isinstance(parsed.get("unfulfilledPromises"), list)
-            else []
-        ),
-        "shouldNudge": bool(parsed.get("shouldNudge", False)),
-        "nudgeText": str(parsed.get("nudgeText", "") or ""),
         "summary": str(parsed.get("summary", "") or ""),
     }
 
@@ -1082,24 +1067,11 @@ def store_conversation_summary(
     )
 
 
-def store_pending_nudge(
-    nudge_text: str, conversation_id: str, config: AnalysisConfig
-) -> bool:
-    """Store an unfulfilled-promise nudge as a high-importance memory."""
-    if not nudge_text.strip():
-        return False
-    title = f"pending_nudge:{conversation_id[:8]}"
-    content = (
-        "[PENDING NUDGE] An earlier turn made a commitment that was not delivered.\n"
-        f"Suggested follow-up: {nudge_text.strip()}"
-    )
-    return rag_ingest(
-        title=title,
-        content=content,
-        tags=["pending_nudge", "cat:promise"],
-        importance="high",
-        config=config,
-    )
+# store_pending_nudge was removed 2026-05-19 along with promise
+# detection. NNA's promise detector (src/services/promise-detector/)
+# now posts equivalent high-importance memories with the same
+# ['pending_nudge', 'cat:promise'] tags via memory_store, so the
+# next user_prompt_inject.py call surfaces the nudge unchanged.
 
 
 def _attach_mission_tags(
@@ -1185,16 +1157,14 @@ def analyze_worker_run(
             analysis["summary"], conv_id, config,
         )
 
-    nudge_stored = False
-    if analysis["shouldNudge"] and analysis["nudgeText"]:
-        nudge_stored = store_pending_nudge(
-            analysis["nudgeText"], conv_id, config,
-        )
-
+    # nudge_stored kept as a stable key in the return dict so existing
+    # adapters reading {"nudge_stored": bool} don't crash; promise
+    # detection moved to NNA proper 2026-05-19 so this side always
+    # reports False now.
     return {
         "stored": stored,
         "facts_stored": 0,
-        "nudge_stored": nudge_stored,
+        "nudge_stored": False,
         "summary_stored": summary_stored,
         "analysis": analysis,
     }
@@ -1206,12 +1176,16 @@ def analyze_turn(
     cwd: str,
     config: AnalysisConfig,
 ) -> dict:
-    """End-to-end: analyze the turn and persist extractions, summary, and nudges.
+    """End-to-end: analyze the turn and persist extractions + summary.
 
     Returns a dict
-        { "stored": int, "nudge_stored": bool, "summary_stored": bool,
-          "analysis": dict }
+        { "stored": int, "facts_stored": int, "nudge_stored": bool,
+          "summary_stored": bool, "analysis": dict }
     so adapters can log/metric the outcome without re-running.
+
+    ``nudge_stored`` is always False since promise detection moved to
+    NNA 2026-05-19; key kept for backward-compat with adapters that
+    read it unconditionally.
     """
     analysis = call_analysis_llm(user_prompt, model_response, config)
     conv_id = make_conversation_id(cwd)
@@ -1222,13 +1196,10 @@ def analyze_turn(
         summary_stored = store_conversation_summary(
             analysis["summary"], conv_id, config,
         )
-    nudge_stored = False
-    if analysis["shouldNudge"] and analysis["nudgeText"]:
-        nudge_stored = store_pending_nudge(analysis["nudgeText"], conv_id, config)
     return {
         "stored": stored,
         "facts_stored": facts_stored,
-        "nudge_stored": nudge_stored,
+        "nudge_stored": False,
         "summary_stored": summary_stored,
         "analysis": analysis,
     }

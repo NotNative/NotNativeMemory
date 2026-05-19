@@ -65,9 +65,13 @@ def test_build_analysis_prompt_includes_both_sides():
     assert user in prompt
     assert model in prompt
     assert "Learnable observations" in prompt
-    assert "Promise tracking" in prompt
-    assert "shouldNudge" in prompt
-    print("[OK] build_analysis_prompt covers both sections")
+    # Promise tracking was removed 2026-05-19 — relocated to NNA proper
+    # (src/services/promise-detector/). The prompt MUST NOT still ask
+    # the model to emit it, or NNA's promise-detector run will fight
+    # the NNM analyzer over the same conversation.
+    assert "Promise tracking" not in prompt
+    assert "shouldNudge" not in prompt
+    print("[OK] build_analysis_prompt covers extraction sections, no promise")
 
 
 def test_build_analysis_prompt_specifies_new_schema_and_quality_bar():
@@ -104,7 +108,8 @@ def test_build_worker_analysis_prompt_steers_toward_vendor_quirks():
     # Schema must match the session prompt so storage is symmetric.
     assert '"fact"' in prompt
     assert '"summary"' in prompt
-    assert '"shouldNudge"' in prompt
+    # Worker prompt also lost the promise/nudge section 2026-05-19.
+    assert '"shouldNudge"' not in prompt
     # Must explicitly forbid run-specific transient data.
     assert "transient" in lower or "$4.99" in prompt or "Run-specific" in prompt
     print("[OK] build_worker_analysis_prompt steers toward vendor/operational extraction")
@@ -214,9 +219,6 @@ def test_coerce_analysis_full_shape():
     parsed = {
         "state_assertions": [{"subject": "s", "predicate": "p", "object": "o", "confidence": 0.9}],
         "results": [{"type": "behavioral"}],
-        "unfulfilledPromises": [{"promise": "x"}],
-        "shouldNudge": True,
-        "nudgeText": "follow up",
         "summary": "A short summary of the turn.",
     }
     out = core.coerce_analysis(parsed)
@@ -229,9 +231,6 @@ def test_coerce_analysis_missing_keys_default_safe():
     assert out == {
         "state_assertions": [],
         "results": [],
-        "unfulfilledPromises": [],
-        "shouldNudge": False,
-        "nudgeText": "",
         "summary": "",
     }
     print("[OK] coerce_analysis fills missing keys with safe defaults")
@@ -240,17 +239,28 @@ def test_coerce_analysis_missing_keys_default_safe():
 def test_coerce_analysis_wrong_types_default_safe():
     out = core.coerce_analysis({
         "results": "not a list",
-        "unfulfilledPromises": 42,
-        "shouldNudge": "truthy-string",
-        "nudgeText": None,
         "summary": None,
     })
     assert out["results"] == []
-    assert out["unfulfilledPromises"] == []
-    assert out["shouldNudge"] is True  # bool() of non-empty string
-    assert out["nudgeText"] == ""
     assert out["summary"] == ""
     print("[OK] coerce_analysis defends against wrong field types")
+
+
+def test_coerce_analysis_drops_legacy_promise_fields():
+    """Old prompt templates (or stale fine-tuned models) might still emit
+    promise fields. Coerce must silently drop them rather than surface
+    them — promise detection moved to NNA and surfacing them here would
+    fight the NNA path."""
+    out = core.coerce_analysis({
+        "results": [],
+        "unfulfilledPromises": [{"promise": "x"}],
+        "shouldNudge": True,
+        "nudgeText": "ignored",
+    })
+    assert "unfulfilledPromises" not in out
+    assert "shouldNudge" not in out
+    assert "nudgeText" not in out
+    print("[OK] coerce_analysis silently drops legacy promise fields")
 
 
 # -- Config resolution ----------------------------------------------------
@@ -762,9 +772,6 @@ def test_call_analysis_llm_openai_shape():
     cfg = _make_config("openai_compat", model="qwen-something")
     payload = {
         "results": [{"fact": "Bash escapes corrupt double-quoted PowerShell strings; use single quotes.", "tags": ["shell", "powershell"], "confidence": "high"}],
-        "unfulfilledPromises": [],
-        "shouldNudge": False,
-        "nudgeText": "",
     }
     with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
         urlopen_mock.return_value.__enter__.return_value.read.return_value = _mock_openai_response(payload)
@@ -775,17 +782,16 @@ def test_call_analysis_llm_openai_shape():
 
 def test_call_analysis_llm_anthropic_shape():
     cfg = _make_config("anthropic_messages", model="claude-haiku-4-5-20251001")
+    # Summary is now the only non-results section after the promise rip,
+    # so use it as the parse-success witness.
     payload = {
         "results": [],
-        "unfulfilledPromises": [],
-        "shouldNudge": True,
-        "nudgeText": "follow up on X",
+        "summary": "A short distilled summary.",
     }
     with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
         urlopen_mock.return_value.__enter__.return_value.read.return_value = _mock_anthropic_response(payload)
         out = core.call_analysis_llm("u" * 200, "m" * 200, cfg)
-    assert out["shouldNudge"] is True
-    assert out["nudgeText"] == "follow up on X"
+    assert out["summary"] == "A short distilled summary."
     print("[OK] call_analysis_llm parses Anthropic Messages response")
 
 
@@ -821,13 +827,11 @@ def test_call_analysis_llm_empty_on_invalid_json():
 
 # -- Storage helpers ------------------------------------------------------
 
-def test_store_pending_nudge_skips_empty_text():
-    cfg = _make_config("openai_compat")
-    with mock.patch.object(core, "rag_ingest") as ingest_mock:
-        result = core.store_pending_nudge("   ", "conv12345", cfg)
-    assert result is False
-    ingest_mock.assert_not_called()
-    print("[OK] store_pending_nudge skips empty/whitespace text")
+# test_store_pending_nudge_* removed 2026-05-19: store_pending_nudge
+# was deleted along with promise detection (relocated to NNA proper).
+# The equivalent NNA-side coverage lives in
+# src/services/promise-detector/promiseDetector.test.ts under the
+# "storePendingNudge" describe block.
 
 
 def test_store_conversation_summary_skips_empty_text():
@@ -888,16 +892,8 @@ def test_store_conversation_summary_strips_surrounding_whitespace():
     print("[OK] store_conversation_summary strips surrounding whitespace before storing")
 
 
-def test_store_pending_nudge_high_importance_and_tagged():
-    cfg = _make_config("openai_compat")
-    with mock.patch.object(core, "rag_ingest", return_value=True) as ingest_mock:
-        result = core.store_pending_nudge("Earlier I said I'd check X.", "conv12345", cfg)
-    assert result is True
-    _, kwargs = ingest_mock.call_args
-    assert kwargs["importance"] == "high"
-    assert "pending_nudge" in kwargs["tags"]
-    assert kwargs["title"].startswith("pending_nudge:")
-    print("[OK] store_pending_nudge writes with importance=high + pending_nudge tag")
+# test_store_pending_nudge_high_importance_and_tagged removed 2026-05-19;
+# see the deletion note on the earlier test above.
 
 
 def test_store_extractions_skips_malformed_items():
@@ -1156,15 +1152,14 @@ def test_analyze_turn_short_circuit_below_min_length():
     print("[OK] analyze_turn short-circuits below min length")
 
 
-def test_analyze_turn_persists_extractions_summary_and_nudge():
-    """End-to-end: extractions -> memories; summary -> RAG; nudge -> RAG.
+def test_analyze_turn_persists_extractions_and_summary():
+    """End-to-end: extractions -> memories; summary -> RAG.
 
-    The three-way split is intentional and load-bearing:
-      - Memories carry thermal/dedup/conflict semantics for discrete facts.
-      - Summaries land in RAG as narrative artifacts (longer than a fact,
-        searchable but not consolidated).
-      - Nudges live on RAG as session-bridging meta-state until the
-        promise-detection migration to NNA happens.
+    Promise/nudge handling moved to NNA proper 2026-05-19; this side
+    no longer touches the nudge path. ``nudge_stored`` is always False
+    in the return dict (kept for adapter compatibility) regardless of
+    what the LLM emits — even legacy promise fields are dropped at the
+    coerce step before they get a chance to influence storage.
     """
     cfg = _make_config("openai_compat", model="x")
     payload = {
@@ -1175,6 +1170,8 @@ def test_analyze_turn_persists_extractions_summary_and_nudge():
                 "confidence": "high",
             }
         ],
+        # Legacy promise fields included to verify coerce strips them
+        # and analyze_turn never invokes a nudge writer.
         "unfulfilledPromises": [{"promise": "p", "reason": "r"}],
         "shouldNudge": True,
         "nudgeText": "follow up",
@@ -1186,12 +1183,14 @@ def test_analyze_turn_persists_extractions_summary_and_nudge():
         urlopen_mock.return_value.__enter__.return_value.read.return_value = _mock_openai_response(payload)
         out = core.analyze_turn("u" * 200, "m" * 200, "/some/cwd", cfg)
     assert out["stored"] == 1
-    assert out["nudge_stored"] is True
+    # Always False post-relocation — NNA owns the nudge path now.
+    assert out["nudge_stored"] is False
     assert out["summary_stored"] is True
-    # Extraction goes to memories; summary + nudge both go to RAG (2 RAG calls).
+    # One memory store for the extraction; one RAG ingest for the summary.
+    # No nudge ingest path runs anymore.
     assert mem_mock.call_count == 1
-    assert rag_mock.call_count == 2
-    print("[OK] analyze_turn routes extractions to memories; summary and nudge to RAG")
+    assert rag_mock.call_count == 1
+    print("[OK] analyze_turn routes extractions to memories; summary to RAG; no nudge path")
 
 
 def test_attach_mission_tags_appends_when_mission_id_set():
@@ -1279,8 +1278,9 @@ def test_call_worker_analysis_llm_uses_worker_prompt():
 
 
 def test_analyze_worker_run_persists_with_mission_tags():
-    """End-to-end worker analysis: extractions land as memories with mission tags;
-    summary lands in RAG; nudge lands in RAG.
+    """End-to-end worker analysis: extractions land as memories with
+    mission tags; summary lands in RAG. The nudge path no longer runs on
+    this side — promise detection moved to NNA proper 2026-05-19.
     """
     cfg = _make_config("openai_compat", model="x")
     payload = {
@@ -1291,6 +1291,8 @@ def test_analyze_worker_run_persists_with_mission_tags():
                 "confidence": "high",
             }
         ],
+        # Legacy promise fields included to verify they're silently dropped
+        # rather than triggering a write path that no longer exists.
         "unfulfilledPromises": [],
         "shouldNudge": True,
         "nudgeText": "follow up on B-tier endpoint",
@@ -1314,12 +1316,14 @@ def test_analyze_worker_run_persists_with_mission_tags():
 
     assert out["stored"] == 1
     assert out["summary_stored"] is True
-    assert out["nudge_stored"] is True
+    # Always False post-relocation — adapters that read this key
+    # unconditionally still see a bool, just always falsy.
+    assert out["nudge_stored"] is False
     # Memory call received mission/assignment tags merged with the LLM tags.
     assert captured_tags == [["scrape", "vendor:acme", "mission:mission-abc", "assignment:asg-1"]]
-    # Two RAG calls: summary + nudge. Memory call: 1 extraction.
-    assert rag_mock.call_count == 2
-    print("[OK] analyze_worker_run tags extractions with mission/assignment and routes to memory + RAG")
+    # One RAG call (summary only); the nudge path is gone.
+    assert rag_mock.call_count == 1
+    print("[OK] analyze_worker_run tags extractions with mission/assignment, routes to memory + RAG summary, no nudge")
 
 
 def test_analyze_worker_run_skips_writes_when_below_min_length():
