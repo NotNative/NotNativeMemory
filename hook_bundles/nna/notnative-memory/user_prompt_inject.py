@@ -106,6 +106,50 @@ LOG_PATH = os.environ.get(
     os.path.expanduser("~/.nna/memory_prompt_hook.log"),
 )
 
+_STATE_DIR = os.path.expanduser("~/.nna/state")
+_LAST_REMINDED_FILE = os.path.join(_STATE_DIR, "last_reminded_session")
+
+# The deferred-tools reminder used to be the entire point of session_start.py
+# (now deleted). Folded in here so it lands on the first user prompt of each
+# session — same effective injection point, one fewer dead hook. Gated by
+# session_id so it doesn't spam every turn.
+_TOOL_LOAD_REMINDER = (
+    "[Session Start] Memory MCP tools are deferred by the harness. "
+    "Call ToolSearch with "
+    "`select:memory_store,memory_search,memory_list,memory_forget,"
+    "memory_context,memory_fact_add,memory_fact_query,"
+    "memory_project_configure` before trying to use them."
+)
+
+
+def _session_once_reminder(session_id: str) -> str:
+    """Return the deferred-tools reminder once per session, "" thereafter.
+
+    Marker file stores the most recently reminded session_id. When the
+    incoming session differs (or marker is unreadable / session_id is
+    missing) we emit the reminder and refresh the marker. Fail-open so a
+    broken state dir never silently drops the load-bearing reminder.
+    """
+    if not session_id:
+        return _TOOL_LOAD_REMINDER
+
+    try:
+        with open(_LAST_REMINDED_FILE, "r", encoding="utf-8") as fh:
+            if fh.read().strip() == session_id:
+                return ""
+    except OSError:
+        pass
+
+    try:
+        os.makedirs(_STATE_DIR, exist_ok=True)
+        with open(_LAST_REMINDED_FILE, "w", encoding="utf-8") as fh:
+            fh.write(session_id)
+    except OSError:
+        pass
+
+    return _TOOL_LOAD_REMINDER
+
+
 # Cap query length so we don't push multi-page user dumps through the
 # embedding model unnecessarily. The first 500 chars almost always
 # capture the topic.
@@ -470,6 +514,9 @@ def main():
     _log_execution(len(prompt), len(results), len(relevant), top_similarity)
 
     blocks = []
+    reminder = _session_once_reminder(hook_input.get("session_id", ""))
+    if reminder:
+        blocks.append(reminder)
     facts_block = _format_facts(facts)
     if facts_block:
         blocks.append(facts_block)

@@ -125,16 +125,19 @@ def _write_version(target_dir: str, install_path: str) -> None:
 # Python scripts to copy from this directory into the target
 _SCRIPTS = [
     "user_prompt_inject.py",
-    "session_start.py",
     "compact_guard.py",
+    "compaction_post.py",
     "turn_analysis.py",
     "pre_tool_safety.py",
 ]
 
 # Files to retire from prior installs (script removed from this bundle;
-# logic migrated to NNA proper per contract §5).
+# logic migrated to NNA proper per contract §5, or — for session_start —
+# folded into user_prompt_inject (ToolSearch reminder) and
+# compaction_post (post-compact recovery)).
 _RETIRED_SCRIPTS = [
     "promise_detector.py",
+    "session_start.py",
 ]
 
 # Files to remove from the target during install (clean up after renames).

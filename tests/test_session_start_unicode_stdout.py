@@ -27,9 +27,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 
+# session_start.py is claude-bundle-only as of 2026-05-19. See the
+# session-start test sibling for the rationale.
 BUNDLES = [
     ("claude", os.path.join(ROOT, "hook_bundles", "claude", "notnative-memory")),
-    ("nna", os.path.join(ROOT, "hook_bundles", "nna", "notnative-memory")),
 ]
 
 ARROW = "→"

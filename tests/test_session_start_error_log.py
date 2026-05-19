@@ -26,9 +26,13 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 
+# session_start.py is claude-bundle-only as of 2026-05-19. The nna bundle
+# folded its ToolSearch reminder into user_prompt_inject.py (session-once)
+# and its post-compact recovery into a dedicated compaction_post.py hook.
+# See ../docs/planning/notnativememory-improvements.md and the audit at
+# the NNA repo (docs/EventBus_Audit_2026-05-18.md).
 BUNDLES = [
     ("claude", os.path.join(ROOT, "hook_bundles", "claude", "notnative-memory")),
-    ("nna", os.path.join(ROOT, "hook_bundles", "nna", "notnative-memory")),
 ]
 
 

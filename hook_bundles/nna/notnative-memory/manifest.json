@@ -10,16 +10,16 @@
       "timeout_ms": 60000
     },
     {
-      "event": "session.start",
-      "phase": "post",
-      "command": "python session_start.py",
+      "event": "compaction",
+      "phase": "pre",
+      "command": "python compact_guard.py",
       "blocking": true,
       "timeout_ms": 60000
     },
     {
       "event": "compaction",
-      "phase": "pre",
-      "command": "python compact_guard.py",
+      "phase": "post",
+      "command": "python compaction_post.py",
       "blocking": true,
       "timeout_ms": 60000
     },

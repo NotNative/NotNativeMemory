@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 """
-NotNativeMemory - SessionStart Hook
+NotNativeMemory - Compaction.Post Hook
 
-Fires at the very beginning of a session (source="startup"), when the
-user resumes a prior conversation (source="resume"), and immediately
-after context compaction (source="compact"). Pulls the hottest and
-most-critical memories for the current project via `memory_context`
-and emits them as startup context so the model has working continuity
-without waiting for the next user message.
+Fires immediately after context compaction completes. Re-injects the
+project's hottest/most-critical memories so the model regains working
+continuity in the same turn that just lost detail to the compaction
+summary.
 
-Triple duty:
-    1. Primes a fresh session with relevant memories.
-    2. Reminds the model to ToolSearch-load the deferred memory MCP
-       tools so `memory_store` / `memory_search` / etc. are callable
-       without the user having to ask.
-    3. Covers the post-compact case — the previous one-turn amnesia
-       gap where UserPromptSubmit was the earliest hook that could
-       fire after compaction.
+Supersedes the previous session.start:post recovery path, which:
+  - fired on startup/resume/compact (only the compact case was useful);
+  - emitted plain stdout (NNA's shellHook discards anything that isn't
+    a JSON envelope, so the injection silently never landed).
 
-Output channel is plain stdout; the harness folds that into session
-context. `hookSpecificOutput` for SessionStart is not in the
-schema-approved envelope shape in current Claude Code versions.
+Uses the `hookSpecificOutput.additionalContext` envelope, which NNA's
+shellHook folds into `payload.injected_context`. query.ts:551 awaits
+the dispatch and yields the resulting string as a synthetic
+`hook_additional_context` attachment in the post-compact message
+stream.
 
 Exit codes:
     0 - success (with or without context to inject)
-    1 - non-fatal error (session proceeds without injection)
+    1 - non-fatal error (compaction proceeds without injection)
 """
 
 import datetime
@@ -71,23 +67,13 @@ try:
                     _key, _val = _line.split("=", 1)
                     os.environ.setdefault(_key.strip(), _val.strip())
 except BaseException:
-    _log_traceback("session_start env-load")
+    _log_traceback("compaction_post env-load")
     sys.exit(1)
 
 MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://127.0.0.1:9500/mcp")
-MAX_TOKENS = int(os.environ.get("MEMORY_SESSION_MAX_TOKENS", "600"))
+MAX_TOKENS = int(os.environ.get("MEMORY_COMPACT_POST_MAX_TOKENS", "600"))
 TIMEOUT_SECONDS = 5
 
-# The MCP server requires auth since Phase 5. Two paths for hooks:
-#   1. Set MEMORY_MCP_TOKEN in hooks.env — a Bearer token minted via
-#      the /tokens web page or POST /auth/login. Works everywhere.
-#   2. Configure MEMORY_AUTH_LOCALHOST_BYPASS=1 +
-#      MEMORY_AUTH_LOCALHOST_USER=<name> in the SERVER's .env — lets
-#      unauthenticated loopback calls auth-as that named user. Simpler
-#      for single-user local dev but only works when the server binds
-#      loopback-only and the hook runs on the same host.
-# When MEMORY_MCP_TOKEN is blank, we send no Authorization header, which
-# the server will accept under option 2 and reject under token auth.
 _MCP_TOKEN = os.environ.get("MEMORY_MCP_TOKEN", "").strip()
 _HEADERS = {
     "Content-Type": "application/json",
@@ -96,19 +82,6 @@ _HEADERS = {
 if _MCP_TOKEN:
     _HEADERS["Authorization"] = f"Bearer {_MCP_TOKEN}"
 
-# Standing reminder about the deferred-tools issue. Claude Code's
-# system message marks MCP tools as "deferred" and does not load their
-# schemas up front, which means `mcp__memory__*` tools are not callable
-# until ToolSearch pulls them. We surface this at session start so the
-# model does the load itself before the user has to notice.
-_TOOL_LOAD_REMINDER = (
-    "[Session Start] Memory MCP tools are deferred by the harness. "
-    "Call ToolSearch with "
-    "`select:memory_store,memory_search,memory_list,memory_forget,"
-    "memory_context,memory_fact_add,memory_fact_query,"
-    "memory_project_configure` before trying to use them."
-)
-
 
 def _fetch_context(project_dir: str) -> list:
     """Call memory_context via HTTP and return the result list.
@@ -116,7 +89,8 @@ def _fetch_context(project_dir: str) -> list:
     `memory_context` auto-includes globals and any domains declared for
     the project, so a single call covers local + global + domain. No
     user query is required — the server ranks by importance first and
-    thermal activity second.
+    thermal activity second, which is exactly what we want when the
+    conversation just lost detail.
     """
     payload = json.dumps({
         "jsonrpc": "2.0",
@@ -142,7 +116,7 @@ def _fetch_context(project_dir: str) -> list:
         with urllib.request.urlopen(req, timeout=TIMEOUT_SECONDS) as resp:
             body = json.loads(resp.read().decode("utf-8"))
     except (urllib.error.URLError, OSError, json.JSONDecodeError) as exc:
-        print(f"Session start: server unreachable ({exc})", file=sys.stderr)
+        print(f"Compaction post: server unreachable ({exc})", file=sys.stderr)
         return []
 
     result = body.get("result", {})
@@ -152,20 +126,19 @@ def _fetch_context(project_dir: str) -> list:
                 inner = json.loads(block["text"])
                 return inner.get("context", [])
             except (json.JSONDecodeError, KeyError) as exc:
-                print(f"Session start: bad response format ({exc})", file=sys.stderr)
+                print(f"Compaction post: bad response format ({exc})", file=sys.stderr)
 
     return []
 
 
-def _format_context(memories: list, source: str) -> str:
-    """Shape the memory list into a compact stdout block."""
+def _format_context(memories: list) -> str:
+    """Shape the memory list into a compact recovery block."""
     if not memories:
         return ""
 
-    header = (
-        f"[Session Start | source={source}] Working-set memories for this project:"
-    )
-    lines = [header]
+    lines = [
+        "[Post-Compact Recovery] Working-set memories restored after compaction:"
+    ]
     for mem in memories:
         content = mem.get("content", "")
         lines.append(f"- {content}")
@@ -178,21 +151,23 @@ def main():
     except json.JSONDecodeError:
         sys.exit(1)
 
-    source = hook_input.get("source", "startup")
+    # CompactionPayload carries `cwd` from the NNA dispatch site; fall
+    # back to the process cwd (the hook's own dir — wrong, but better
+    # than the cross-project bleed of passing "").
     project_dir = hook_input.get("cwd", "") or os.getcwd()
 
-    # Always emit the tool-load reminder; it's cheap and load-bearing
-    # for sessions where the user expects memory tools to work without
-    # prompting.
-    parts = [_TOOL_LOAD_REMINDER]
-
     memories = _fetch_context(project_dir)
-    ctx = _format_context(memories, source)
-    if ctx:
-        parts.append(ctx)
+    ctx = _format_context(memories)
+    if not ctx:
+        sys.exit(0)
 
-    sys.stdout.write("\n\n".join(parts))
-    sys.stdout.write("\n")
+    output = {
+        "hookSpecificOutput": {
+            "hookEventName": "PostCompact",
+            "additionalContext": ctx,
+        }
+    }
+    print(json.dumps(output))
     sys.exit(0)
 
 
@@ -202,5 +177,5 @@ if __name__ == "__main__":
     except SystemExit:
         raise
     except BaseException:
-        _log_traceback("session_start main")
+        _log_traceback("compaction_post main")
         sys.exit(1)
