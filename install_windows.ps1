@@ -104,6 +104,8 @@ $HOSTNAME = $env:COMPUTERNAME.ToLower()
 $MCP_PORT = 9500
 $MANIFEST_FILE = ".install-manifest.json"
 
+. "$SCRIPT_DIR\install_lib\manifest_merge.ps1"
+
 Write-Host ""
 Write-Host "+==========================================+"
 Write-Host "|  NotNativeMemory - MCP Memory Server     |"
@@ -226,15 +228,20 @@ if ($installMode -eq "client") {
     # CLI is installed on this machine (Claude Code, NotNativeCoder).
     $configuredAgents = Configure-Agents $INSTALL_PATH $MCP_URL
 
-    # Write manifest
+    # Write manifest. Merge with any existing manifest so running
+    # client-only on a host that already has a heavier install does
+    # not strand docker/database in the uninstall record.
+    $merged = Merge-InstallManifest -Existing $existingManifest -NewMode "client" -NewComponents @("hooks")
+    $dbHost = if ($existingManifest) { $existingManifest.db_host } else { $null }
+    $dbPort = if ($existingManifest) { $existingManifest.db_port } else { $null }
     @{
         installed    = (Get-Date -Format "yyyy-MM-dd")
-        install_mode = "client"
+        install_mode = $merged.mode
         install_path = $INSTALL_PATH
-        components   = @("hooks")
+        components   = $merged.components
         mcp_url      = $MCP_URL
-        db_host      = $null
-        db_port      = $null
+        db_host      = $dbHost
+        db_port      = $dbPort
     } | ConvertTo-Json | Set-Content -Path $MANIFEST_FILE -Encoding UTF8
 
     Write-Host ""
@@ -877,12 +884,17 @@ if ($installMode -eq "full") {
     $serverBackendOut = "python"
 }
 
+# Merge with any existing manifest. server-on-full or full-on-server
+# should keep the broader install_mode and union of components so the
+# uninstaller still sees everything.
+$merged = Merge-InstallManifest -Existing $existingManifest -NewMode $installMode -NewComponents $components
+
 @{
     installed      = (Get-Date -Format "yyyy-MM-dd")
-    install_mode   = $installMode
+    install_mode   = $merged.mode
     server_backend = $serverBackendOut
     install_path   = $INSTALL_PATH
-    components     = $components
+    components     = $merged.components
     mcp_url        = $MCP_URL
     mcp_port       = $MCP_PORT
     db_host        = $DB_HOST
