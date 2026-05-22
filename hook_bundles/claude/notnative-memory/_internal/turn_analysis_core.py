@@ -628,10 +628,13 @@ def _call_analysis_llm_with_prompt(
             # Two-pronged: chat_template_kwargs is what vLLM and llama.cpp
             # Qwen3 templates check; reasoning_effort is what LM Studio's
             # reasoning-model adapter (Nemotron, gpt-oss, etc.) honors.
-            # Unknown fields are ignored by each backend, so sending both
-            # is safe and lets one flag cover both ecosystems.
+            # LM Studio strict-validates reasoning_effort against the
+            # OpenAI-compat enum (none/minimal/low/medium/high/xhigh) and
+            # rejects unknown values with HTTP 400, so use "none" (not
+            # "off"). chat_template_kwargs is silently ignored by backends
+            # that don't recognize it.
             body["chat_template_kwargs"] = {"enable_thinking": False}
-            body["reasoning_effort"] = "off"
+            body["reasoning_effort"] = "none"
 
     payload = json.dumps(body).encode("utf-8")
     try:
