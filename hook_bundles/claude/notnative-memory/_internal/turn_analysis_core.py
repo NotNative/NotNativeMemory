@@ -38,7 +38,10 @@ DEFAULT_ANTHROPIC_VERSION = "2023-06-01"
 DEFAULT_MIN_CONVERSATION_CHARS = 40
 
 # LLM call timeout (seconds).
-DEFAULT_LLM_TIMEOUT = 10
+DEFAULT_LLM_TIMEOUT = 300  # 5 min — the turn_analysis hook detaches and
+# runs the LLM call in a background worker with no harness clock, so this
+# is purely a safety against a stuck socket. Local 27B+ models on slow
+# hardware regularly take 30–60s for the JSON extraction.
 
 # Runaway hedge against a malfunctioning LLM. Not a real ceiling on volume:
 # quality is the bar, and a rich turn can legitimately produce dozens of facts.

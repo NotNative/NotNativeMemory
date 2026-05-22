@@ -83,7 +83,7 @@ Missing keys are coerced to safe defaults (`[]`, `false`, `""`) by the parser, s
 | `MEMORY_EXTRACT_MIN_LENGTH` | 30 | Minimum conversation chars (×10 multiplier) to trigger analysis |
 | `MEMORY_EXTRACT_TEMP` | 0.1 | LLM temperature (low = deterministic) |
 | `MEMORY_EXTRACT_MAX_RESULTS` | 5 | Max extracted facts stored per turn |
-| `MEMORY_EXTRACT_TIMEOUT` | 10 | LLM call timeout (seconds) |
+| `MEMORY_EXTRACT_TIMEOUT` | 300 | LLM call timeout (seconds). The hook detaches into a background worker before the call, so this only guards against a stuck socket — it does not block the agent harness. |
 | `MEMORY_EXTRACT_LLM_URL` | derived | Override chat completion endpoint; defaults to `MCP_URL` with `/mcp` → `/v1/chat/completions` |
 | `MEMORY_EXTRACT_LOG` | `~/.nna/turn_analysis.log` | Telemetry log path |
 

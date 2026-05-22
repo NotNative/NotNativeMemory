@@ -38,6 +38,7 @@ import sys
 # deployed layouts.
 _HOOK_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, _HOOK_DIR)
+from _internal.detach import detach_or_resume  # noqa: E402
 from _internal.env_loader import load_hooks_env  # noqa: E402
 from _internal.turn_analysis_core import (  # noqa: E402
     analyze_turn,
@@ -182,6 +183,14 @@ def _log_execution(
 
 
 def main():
+    # Detach into a background worker before doing any real work. The
+    # harness gets back exit 0 in well under a second; the worker
+    # process runs the LLM extraction with no timeout pressure. In
+    # worker mode this returns immediately with sys.stdin replaying
+    # the original payload. NNM_TURN_ANALYSIS_INLINE=1 bypasses for
+    # tests.
+    detach_or_resume(__file__)
+
     try:
         hook_input = json.loads(sys.stdin.read())
     except json.JSONDecodeError:

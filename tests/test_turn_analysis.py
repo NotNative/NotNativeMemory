@@ -426,13 +426,15 @@ def test_openai_body_includes_chat_template_kwargs_when_disable_reasoning():
         "chat_template_kwargs={'enable_thinking': false} so vLLM/Qwen3 "
         "templates skip the hidden <think> phase."
     )
-    assert captured["body"].get("reasoning_effort") == "off", (
-        "MEMORY_EXTRACT_DISABLE_REASONING=1 must also produce "
-        "reasoning_effort='off' so LM Studio reasoning-model adapters "
-        "(Nemotron, gpt-oss, etc.) skip reasoning. Backends ignore unknown "
-        "fields, so sending both covers the two ecosystems with one flag."
+    assert captured["body"].get("reasoning_effort") == "none", (
+        "MEMORY_EXTRACT_DISABLE_REASONING=1 must produce "
+        "reasoning_effort='none' so LM Studio reasoning-model adapters "
+        "(Nemotron, gpt-oss, etc.) skip reasoning. LM Studio strict-validates "
+        "this field against the OpenAI-compat enum "
+        "(none/minimal/low/medium/high/xhigh) and returns HTTP 400 on unknown "
+        "values — earlier attempts with 'off' broke every extraction silently."
     )
-    print("[OK] openai_compat body sends both chat_template_kwargs and reasoning_effort when disable_reasoning is True")
+    print("[OK] openai_compat body sends chat_template_kwargs and reasoning_effort='none' when disable_reasoning is True")
 
 
 def test_openai_body_omits_chat_template_kwargs_by_default():

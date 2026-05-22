@@ -66,7 +66,7 @@ def _write_hooks_env(target_dir: str, mcp_url: str) -> None:
         "MEMORY_EXTRACT_MIN_LENGTH=30\n"
         "MEMORY_EXTRACT_TEMP=0.1\n"
         "MEMORY_EXTRACT_MAX_RESULTS=5\n"
-        "MEMORY_EXTRACT_TIMEOUT=10\n"
+        "MEMORY_EXTRACT_TIMEOUT=300\n"
         "# Output budget for the analyzer LLM. 16000 lets reasoning models\n"
         "# (Qwen3-think, DeepSeek-R1, etc.) burn tokens on hidden CoT and\n"
         "# still emit the final JSON. Lower this for cost-sensitive cloud setups.\n"

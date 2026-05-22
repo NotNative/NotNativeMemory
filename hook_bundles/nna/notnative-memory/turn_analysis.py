@@ -37,6 +37,7 @@ if os.path.exists(_ENV_FILE):
 # Bundle-local helpers under _internal/. Same shape in both repo and
 # deployed layouts.
 sys.path.insert(0, _HOOK_DIR)
+from _internal.detach import detach_or_resume  # noqa: E402
 from _internal.turn_analysis_core import (  # noqa: E402
     analyze_turn,
     resolve_config_from_env,
@@ -78,6 +79,14 @@ def _log_execution(
 
 
 def main():
+    # Detach into a background worker before doing any real work. The
+    # harness gets back exit 0 in well under a second; the worker
+    # process runs the LLM extraction with no timeout pressure. In
+    # worker mode this returns immediately with sys.stdin replaying
+    # the original payload. NNM_TURN_ANALYSIS_INLINE=1 bypasses for
+    # tests.
+    detach_or_resume(__file__)
+
     _cleanup_legacy_log()
 
     try:
