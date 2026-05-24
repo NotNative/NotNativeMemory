@@ -582,9 +582,12 @@ def _call_analysis_llm_with_prompt(
     model = config.model
     if not model and config.api == "openai_compat":
         model = discover_model(config)
-    if not model:
+    # model may be None for openai_compat — LM Studio routes to whatever is
+    # loaded when no model field is sent. Omitting it is cleaner than sending
+    # a phantom alias like "gpt-4o". anthropic_messages always requires a model.
+    if not model and config.api == "anthropic_messages":
         _log_analysis_failure(
-            "no_model_resolved: set MEMORY_EXTRACT_MODEL or ensure /models is reachable"
+            "no_model_resolved: set MEMORY_EXTRACT_MODEL for anthropic_messages"
         )
         return empty_analysis()
 
@@ -604,7 +607,6 @@ def _call_analysis_llm_with_prompt(
         }
     else:
         body = {
-            "model": model,
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_msg},
@@ -612,6 +614,11 @@ def _call_analysis_llm_with_prompt(
             "temperature": config.temperature,
             "max_tokens": config.max_tokens,
         }
+        # Only include model when one is resolved. LM Studio and most
+        # openai_compat backends route to the loaded model when omitted,
+        # avoiding phantom aliases (e.g. "gpt-4o") in server logs.
+        if model:
+            body["model"] = model
         if config.disable_reasoning:
             # Two-pronged: chat_template_kwargs is what vLLM and llama.cpp
             # Qwen3 templates check; reasoning_effort is what LM Studio's

@@ -799,14 +799,58 @@ def test_call_analysis_llm_skips_short_conversation():
 
 
 def test_call_analysis_llm_empty_when_no_model_resolved():
-    # openai_compat with no explicit model and no working models_url
+    # openai_compat with no explicit model and no working models_url.
+    # discover_model() returns None; the LLM call proceeds without a model
+    # field (LM Studio routes to loaded model). Both urlopen calls fail here,
+    # so empty_analysis() is returned from the LLM error path.
     cfg = _make_config("openai_compat", model=None, models_url="http://x/v1/models")
     import urllib.error
     with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
         urlopen_mock.side_effect = urllib.error.URLError("nope")
         out = core.call_analysis_llm("u" * 200, "m" * 200, cfg)
     assert out == core.empty_analysis()
-    print("[OK] call_analysis_llm bails when model can't be resolved")
+    print("[OK] call_analysis_llm returns empty when LLM unreachable (no model resolved)")
+
+
+def test_call_analysis_llm_omits_model_field_when_none():
+    """When model is None (not resolved), the request body must NOT include
+    a 'model' key. LM Studio routes to the loaded model when the field is
+    absent — avoids phantom aliases like 'gpt-4o' in server logs."""
+    cfg = _make_config("openai_compat", model=None, models_url=None)
+    captured_body = {}
+
+    def fake_urlopen(req, timeout=None):
+        import json as _json
+        captured_body.update(_json.loads(req.data.decode("utf-8")))
+        raise urllib.error.URLError("stop after capture")
+
+    import urllib.error
+    with mock.patch.object(core.urllib.request, "urlopen", side_effect=fake_urlopen):
+        core.call_analysis_llm("u" * 200, "m" * 200, cfg)
+
+    assert "model" not in captured_body, (
+        f"model field must be absent when not resolved, got: {captured_body.get('model')}"
+    )
+    assert "messages" in captured_body
+    print("[OK] call_analysis_llm omits model field when model is None")
+
+
+def test_call_analysis_llm_includes_model_field_when_set():
+    """When model is explicitly set, the request body must include it."""
+    cfg = _make_config("openai_compat", model="qwen3-30b")
+    captured_body = {}
+
+    def fake_urlopen(req, timeout=None):
+        import json as _json
+        captured_body.update(_json.loads(req.data.decode("utf-8")))
+        raise urllib.error.URLError("stop after capture")
+
+    import urllib.error
+    with mock.patch.object(core.urllib.request, "urlopen", side_effect=fake_urlopen):
+        core.call_analysis_llm("u" * 200, "m" * 200, cfg)
+
+    assert captured_body.get("model") == "qwen3-30b"
+    print("[OK] call_analysis_llm includes model field when model is set")
 
 
 def test_call_analysis_llm_empty_on_invalid_json():
