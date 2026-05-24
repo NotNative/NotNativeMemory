@@ -27,8 +27,10 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 
-# session_start.py is claude-bundle-only as of 2026-05-19. See the
-# session-start test sibling for the rationale.
+# Unicode stdout test applies only to the claude bundle's session_start,
+# which emits memory context to stdout for harness injection. The nna
+# bundle's session_start writes only to a log file and never touches
+# stdout, so the unicode/cp1252 regression is not relevant there.
 BUNDLES = [
     ("claude", os.path.join(ROOT, "hook_bundles", "claude", "notnative-memory")),
 ]

@@ -107,6 +107,13 @@ def main():
         _log_execution(0, False, 0)
         sys.exit(1)
 
+    # NNA passes model_name in the turn:post payload. Use it to skip the
+    # /v1/models probe in discover_model(). Explicit MEMORY_EXTRACT_MODEL
+    # in hooks.env still wins — setdefault only fills when the var is unset.
+    model_name = hook_input.get("model_name", "").strip()
+    if model_name:
+        os.environ.setdefault("MEMORY_EXTRACT_MODEL", model_name)
+
     conversation_len = len(user_prompt) + len(model_response)
     config = resolve_config_from_env()
     outcome = analyze_turn(user_prompt, model_response, cwd, config)

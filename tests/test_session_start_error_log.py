@@ -26,11 +26,11 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.abspath(os.path.join(HERE, ".."))
 
-# session_start.py is claude-bundle-only as of 2026-05-19. The nna bundle
-# folded its ToolSearch reminder into user_prompt_inject.py (session-once)
-# and its post-compact recovery into a dedicated compaction_post.py hook.
-# See ../docs/planning/notnativememory-improvements.md and the audit at
-# the NNA repo (docs/EventBus_Audit_2026-05-18.md).
+# Only the claude bundle's session_start uses last_error.log. The nna
+# bundle's session_start is a lightweight pre-warmer (non-blocking,
+# fire-and-forget) with no error-log mechanism — its failure mode is
+# a skipped prewarm, not a crash requiring traceback recovery.
+# See tests/test_session_start_nna.py for the nna-specific tests.
 BUNDLES = [
     ("claude", os.path.join(ROOT, "hook_bundles", "claude", "notnative-memory")),
 ]
