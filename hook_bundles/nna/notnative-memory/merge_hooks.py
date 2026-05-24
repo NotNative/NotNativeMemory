@@ -129,15 +129,13 @@ _SCRIPTS = [
     "compaction_post.py",
     "turn_analysis.py",
     "pre_tool_safety.py",
+    "session_start.py",  # nna pre-warmer (re-added 2026-05-24; non-blocking session.start:post)
 ]
 
 # Files to retire from prior installs (script removed from this bundle;
-# logic migrated to NNA proper per contract §5, or — for session_start —
-# folded into user_prompt_inject (ToolSearch reminder) and
-# compaction_post (post-compact recovery)).
+# logic migrated to NNA proper per contract §5).
 _RETIRED_SCRIPTS = [
     "promise_detector.py",
-    "session_start.py",
 ]
 
 # Files to remove from the target during install (clean up after renames).
