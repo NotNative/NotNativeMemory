@@ -58,6 +58,7 @@ _HOOK_SCRIPTS = {
     "turn_analysis.py",
     "user_prompt_inject.py",
     "pre_tool_safety.py",
+    "verbatim_capture.py",  # Phase B of self-improving-ecosystem-v2 (2026-05-25)
 }
 
 # Retired scripts: any settings.json entry referencing one gets cleaned
@@ -67,19 +68,25 @@ _RETIRED_SCRIPTS = {
     "memory_inject.py",       # retired 2026-04-19 (PreToolUse)
 }
 
-# Hook event registrations: which event triggers which deployed script.
-_DESIRED_HOOKS = {
-    "UserPromptSubmit": {
+# Hook event registrations: list of (event, script, timeout, matcher).
+# A list rather than a dict because some events get multiple scripts
+# (Stop fires both turn_analysis and verbatim_capture). Each entry
+# becomes one group under settings.json["hooks"][event].
+_DESIRED_HOOKS = [
+    {
+        "event": "UserPromptSubmit",
         "matcher": "",
         "script": "user_prompt_inject.py",
         "timeout": 60,
     },
-    "SessionStart": {
+    {
+        "event": "SessionStart",
         "matcher": "",
         "script": "session_start.py",
         "timeout": 60,
     },
-    "PreCompact": {
+    {
+        "event": "PreCompact",
         "matcher": "",
         "script": "compact_guard.py",
         "timeout": 60,
@@ -88,17 +95,37 @@ _DESIRED_HOOKS = {
     # models can spend 30-60s on hidden CoT before emitting the final JSON;
     # 90s leaves headroom so the harness doesn't kill the subprocess mid-call
     # and silently lose the row that would have been written.
-    "Stop": {
+    {
+        "event": "Stop",
         "matcher": "",
         "script": "turn_analysis.py",
         "timeout": 90,
     },
-    "PreToolUse": {
+    # Second Stop subscriber: verbatim_capture writes the user prompt +
+    # assistant response into verbatim_chunks via the NNM MCP. Cheap;
+    # short timeout. Runs alongside turn_analysis, not instead of.
+    {
+        "event": "Stop",
+        "matcher": "",
+        "script": "verbatim_capture.py",
+        "timeout": 8,
+    },
+    {
+        "event": "PreToolUse",
         "matcher": "",
         "script": "pre_tool_safety.py",
         "timeout": 5,
     },
-}
+    # PostToolUse → verbatim_capture stores one chunk per tool invocation
+    # (tool_name + truncated input + truncated output + is_error). Feeds
+    # failure-fix pair detection downstream.
+    {
+        "event": "PostToolUse",
+        "matcher": "",
+        "script": "verbatim_capture.py",
+        "timeout": 8,
+    },
+]
 
 # All scripts known to the installer (current + retired). Used to
 # RECOGNIZE our entries in settings.json.
@@ -290,12 +317,20 @@ def _sweep_retired_hooks(settings: dict) -> int:
 
 
 def _upsert_hook_registrations(settings: dict, deploy_dir: str) -> int:
-    """Add or update hook entries in settings.json. Returns # of changes."""
+    """Add or update hook entries in settings.json. Returns # of changes.
+
+    Iterates ``_DESIRED_HOOKS`` (a list, not a dict — same event may
+    appear more than once when multiple scripts share an event slot).
+    An existing settings.json group is detected by matching its embedded
+    script name; otherwise a new group is appended without disturbing
+    sibling groups under the same event.
+    """
     if "hooks" not in settings:
         settings["hooks"] = {}
 
     changes = 0
-    for event_name, config in _DESIRED_HOOKS.items():
+    for config in _DESIRED_HOOKS:
+        event_name = config["event"]
         if event_name not in settings["hooks"]:
             settings["hooks"][event_name] = []
 

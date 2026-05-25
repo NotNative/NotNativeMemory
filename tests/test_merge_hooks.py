@@ -145,7 +145,8 @@ def test_install_writes_settings_with_deploy_paths():
         with open(settings_path, "r", encoding="utf-8") as fh:
             settings = json.load(fh)
 
-        for event_name, config in merge_hooks._DESIRED_HOOKS.items():
+        for config in merge_hooks._DESIRED_HOOKS:
+            event_name = config["event"]
             cmds = [
                 h["command"]
                 for group in settings["hooks"][event_name]
@@ -170,13 +171,20 @@ def test_install_idempotent_on_settings_json():
             with open(settings_path, "r", encoding="utf-8") as fh:
                 settings = json.load(fh)
 
-        for event_name in merge_hooks._DESIRED_HOOKS:
-            # Each event should have exactly one group from us.
+        # Count expected groups per event from the configured list (an
+        # event may legitimately have more than one — Stop now fires
+        # both turn_analysis and verbatim_capture, for example).
+        from collections import Counter
+        expected = Counter(c["event"] for c in merge_hooks._DESIRED_HOOKS)
+        for event_name, expected_count in expected.items():
             our_groups = [
                 g for g in settings["hooks"][event_name]
                 if merge_hooks._group_script_name(g)
             ]
-            assert len(our_groups) == 1, f"{event_name} should have 1 group, got {len(our_groups)}"
+            assert len(our_groups) == expected_count, (
+                f"{event_name} should have {expected_count} group(s), "
+                f"got {len(our_groups)}"
+            )
     print("[OK] install is idempotent — re-runs don't duplicate hook entries")
 
 
@@ -201,15 +209,22 @@ def test_install_writes_stop_hook_with_reasoning_safe_timeout():
         with open(settings_path, "r", encoding="utf-8") as fh:
             settings = json.load(fh)
 
-        stop_timeouts = [
+        # Scope the check to turn_analysis's Stop registration — other
+        # Stop subscribers (verbatim_capture) make a cheap MCP POST and
+        # should have a short timeout. The reasoning-safe floor only
+        # applies to the LLM-calling analyzer.
+        turn_analysis_timeouts = [
             h["timeout"]
             for group in settings["hooks"]["Stop"]
             for h in group.get("hooks", [])
+            if "turn_analysis.py" in h.get("command", "")
         ]
-        assert stop_timeouts, "Stop hook should be registered"
-        assert all(t >= 60 for t in stop_timeouts), (
-            f"Stop timeout must be >= 60s for reasoning-model analyzer calls. "
-            f"Got {stop_timeouts}."
+        assert turn_analysis_timeouts, (
+            "Stop hook should be registered for turn_analysis.py"
+        )
+        assert all(t >= 60 for t in turn_analysis_timeouts), (
+            f"Stop timeout for turn_analysis.py must be >= 60s for "
+            f"reasoning-model analyzer calls. Got {turn_analysis_timeouts}."
         )
     print("[OK] install registers Stop hook with reasoning-safe timeout (>= 60s)")
 
