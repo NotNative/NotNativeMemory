@@ -1409,6 +1409,49 @@ async def memory_health(
 
 
 @mcp.tool()
+@instrumented("verbatim_search")
+async def verbatim_search(
+    query: str,
+    limit: int = 10,
+) -> dict:
+    """
+    Substring search across the NNA verbatim transcript JSONL files
+    stored under ~/.nna/transcripts/<session-id>.jsonl.
+
+    The dreaming loop calls this for primary-source grounding when
+    resolving conflicting memories: a verbatim hit that mentions one
+    candidate but not the other is taken as endorsement.
+
+    WHEN to use:
+    - Resolving a memory conflict that auto-resolution flagged.
+    - Auditing where a stored decision actually came from.
+    - Reconstructing the wording of a rule the user stated earlier.
+
+    WHEN NOT to use:
+    - You want curated insight — that's memory_search.
+    - You want ingested document chunks — that's rag_search.
+
+    Args:
+        query: Substring to look for (case-insensitive). Required.
+        limit: Max matched entries to return (1-100, default 10).
+    """
+    if not query or not query.strip():
+        return {"results": [], "count": 0}
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+
+    try:
+        from lib.verbatim import search_sessions
+        rows = search_sessions(query, limit=limit)
+    except Exception as exc:
+        return _tool_error("verbatim_search", exc, {"results": [], "count": 0})
+
+    return {"results": rows, "count": len(rows)}
+
+
+@mcp.tool()
 @instrumented("memory_conflicts")
 async def memory_conflicts(
     include_resolved: bool = False,
