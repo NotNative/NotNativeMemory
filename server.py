@@ -1409,6 +1409,50 @@ async def memory_health(
 
 
 @mcp.tool()
+@instrumented("hygiene_run")
+async def hygiene_run(
+    budget: int = 50,
+) -> dict:
+    """
+    Run one bounded hygiene pass over the caller's memories.
+
+    Operations (each capped at `budget` rows):
+      1. Classify unclassified memories via shape heuristic.
+      2. Promote hot rule-class memories to critical importance.
+      3. Demote stale, low-access, model-inferred memories.
+      4. Auto-resolve conflicts with a clear winner (specificity);
+         skip ambiguous ones rather than guess.
+
+    Idempotent: re-running immediately after a clean pass produces a
+    near-empty report because the bounded candidates are exhausted.
+
+    Args:
+        budget: Max rows to process per category (1-500, default 50).
+
+    Returns:
+        HygieneReport dict — classified, promoted, demoted, conflict
+        counts, and duration_ms.
+    """
+    if budget < 1:
+        budget = 1
+    if budget > 500:
+        budget = 500
+
+    from lib.auth_context import current_user_id
+    owner = current_user_id()
+    if owner is None:
+        return {"error": "authentication required"}
+
+    try:
+        from lib.hygiene import run_hygiene
+        report = await run_hygiene(owner, budget=budget)
+    except Exception as exc:
+        return _tool_error("hygiene_run", exc, {})
+
+    return report.as_dict()
+
+
+@mcp.tool()
 @instrumented("verbatim_search")
 async def verbatim_search(
     query: str,
