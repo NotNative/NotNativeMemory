@@ -2,7 +2,7 @@
 
 **Status:** living document
 **Audience:** external reviewers, integrators, contributors
-**Last updated:** 2026-05-07
+**Last updated:** 2026-05-25
 
 ---
 
@@ -26,9 +26,9 @@ The headline design goal is **agents that build and leverage long-term knowledge
 
 ```
 NotNativeMemory/
-  server.py              FastMCP server (stdio + HTTP), 15 MCP tools
-  lib/                   Core engine (db, embeddings, retrieval, auth, RAG, classify, web routes)
-  config/                schema.sql + 21 advisory-lock-serialized migrations
+  server.py              FastMCP server (stdio + HTTP), 30+ MCP tools
+  lib/                   Core engine (db, embeddings, retrieval, auth, RAG, classify, verbatim, web routes)
+  config/                schema.sql + 22 advisory-lock-serialized migrations
   models/                Local embedding model (gte-large-en-v1.5, 1024-dim, fp16)
   hook_bundles/
     claude/notnative-memory/  Claude Code hook integration
@@ -60,9 +60,22 @@ NotNativeMemory/
 | `projects` | Working directories mapped to UUIDs. Scope is one of {local, domain, global}; `domains[]` lists cross-project membership. |
 | `facts` | Temporal triple store (subject, predicate, object) with `valid_from` / `valid_to`; supports `as_of` time-travel queries. |
 | `documents`, `doc_chunks` | RAG storage. Chunks default 2000 chars / 250-char overlap; auto-embedded in the same vector space as memories. |
+| `verbatim_chunks` | Raw per-turn transcript chunks captured by the NNA-side hook (turn:post / tool.call:post / user.prompt.submit). Same `vector(1024)` + `tsv` + HNSW + RRF shape as `memories`, but separate table — append-only, no dedup, no cap, no thermal. Carries label columns: `session_id`, `chunk_index`, `topic`, `agent`, `source_event`, `is_error`, `loaded_skills`, `mission_id`, `mission_type`, `outcome`. |
 | `memory_conflicts` | Detected disagreements (similarity 0.75–0.91). Resolutions: keep_both, supersede_a/b, merged, dismissed. |
 | `users`, `auth_tokens` | Bearer-token auth. Open registration. `token_generation` counter supports revoke-all. |
 | `decay_stats`, `ingestion_jobs` | Telemetry and async RAG job tracking. |
+
+### 3.2.1 Two-Layer Stack: Closets and Drawers
+
+NNM models the same drawers/closets split that MemPalace introduced. `memories` is the **closets** layer — curated, dedup'd, thermal, capped — the distilled rules/decisions/preferences a future session needs to see. `verbatim_chunks` is the **drawers** layer — raw per-turn transcript chunks streamed in by the NNA-side hook.
+
+The two layers are deliberately separate tables:
+
+- Verbatim writes never trigger memories-side dedup, displacement cooling, or cap enforcement. One chatty session would otherwise blow the project cap and evict load-bearing rules.
+- `memory_search` rankings stay clean — only distilled rows surface, not transcript noise.
+- Retention is managed independently per layer (verbatim is TTL/archive-friendly; memories use the thermal model).
+
+Three MCP tools own the verbatim path: `verbatim_capture` (append, idempotent on `(session_id, chunk_index)`), `verbatim_search` (RRF hybrid by default, with `session_id`/`topic`/`mission_id`/`is_error`/`source_events`/`outcomes` filters), and `verbatim_stamp_outcome` (mark a session's chunks `success` / `failure` / `aborted` / `unknown` after the fact, used by the dreaming loop's curator and skill-induction passes).
 
 ### 3.3 Embeddings
 

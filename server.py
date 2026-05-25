@@ -30,6 +30,9 @@ Tools:
     rag_search         - Semantic search over ingested document chunks
     rag_ingestion_status - Poll ingestion_job state for a document
     recall             - Unified retrieval across memories + RAG docs
+    verbatim_capture   - Append a verbatim transcript chunk (NNA hook)
+    verbatim_search    - Hybrid vector+text search over verbatim chunks
+    verbatim_stamp_outcome - Mark a session's chunks success/failure/...
 """
 
 import logging
@@ -1453,46 +1456,243 @@ async def hygiene_run(
 
 
 @mcp.tool()
+@instrumented("verbatim_capture")
+async def verbatim_capture(
+    content: str,
+    session_id: str,
+    chunk_index: int,
+    source_event: str,
+    topic: Optional[str] = None,
+    agent: Optional[str] = None,
+    is_error: bool = False,
+    loaded_skills: Optional[list[str]] = None,
+    mission_id: Optional[str] = None,
+    mission_type: Optional[str] = None,
+    project: Optional[str] = None,
+) -> dict:
+    """
+    Append a verbatim transcript chunk to the project's drawer layer.
+
+    Called by the NNA-side hook from turn:post, tool.call:post, and
+    user.prompt.submit. Idempotent on (session_id, chunk_index) per
+    owner: a retry with the same coordinates returns the existing
+    chunk's id without writing.
+
+    Storage is separate from `memories` — verbatim writes do not
+    trigger memory dedup, displacement cooling, or cap enforcement,
+    and verbatim hits never surface in memory_search.
+
+    Args:
+        content: Raw transcript text for this chunk. Required.
+        session_id: NNA session id that produced the chunk. Required.
+        chunk_index: Monotonic per-session ordinal (0-based). Required.
+        source_event: Event that emitted this chunk
+            (e.g. "turn.post", "tool.call.post", "user.prompt.submit").
+        topic: Coarse subject tag stamped by the curator. Optional.
+        agent: Emitting agent name (main, subagent name). Optional.
+        is_error: True when the emitting event represented an error
+            or failure path. Default False.
+        loaded_skills: Skill names active at capture time.
+        mission_id: NNO mission this turn belongs to, if any.
+        mission_type: Coarse mission category.
+        project: Project scope. Auto-detected if omitted.
+    """
+    if not content or not content.strip():
+        return {"error": "content cannot be empty", "stored": False}
+    if not session_id:
+        return {"error": "session_id is required", "stored": False}
+    if chunk_index is None or chunk_index < 0:
+        return {"error": "chunk_index must be >= 0", "stored": False}
+    if not source_event:
+        return {"error": "source_event is required", "stored": False}
+
+    from lib.embeddings import embed
+    from lib.db import get_or_create_project
+    from lib.verbatim_store import store_chunk
+    from lib.limits import (
+        MAX_MEMORY_CONTENT_BYTES,
+        PayloadTooLarge,
+        enforce_field_len,
+    )
+
+    try:
+        enforce_field_len(content, MAX_MEMORY_CONTENT_BYTES, "content")
+    except PayloadTooLarge as exc:
+        return {"error": str(exc), "stored": False}
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"stored": False}, writable=True,
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        embedding = embed(content)
+        chunk_id, inserted = await store_chunk(
+            content=content,
+            embedding=embedding,
+            session_id=session_id,
+            chunk_index=chunk_index,
+            project_id=project_id,
+            owner_user_id=owner,
+            source_event=source_event,
+            topic=topic,
+            agent=agent,
+            is_error=is_error,
+            loaded_skills=loaded_skills,
+            mission_id=mission_id,
+            mission_type=mission_type,
+        )
+    except Exception as exc:
+        return _tool_error("verbatim_capture", exc, {"stored": False})
+
+    return {"id": str(chunk_id), "stored": True, "inserted": inserted}
+
+
+@mcp.tool()
 @instrumented("verbatim_search")
 async def verbatim_search(
     query: str,
     limit: int = 10,
+    project: Optional[str] = None,
+    session_id: Optional[str] = None,
+    topic: Optional[str] = None,
+    mission_id: Optional[str] = None,
+    is_error: Optional[bool] = None,
+    source_events: Optional[list[str]] = None,
+    outcomes: Optional[list[str]] = None,
+    hybrid: bool = True,
 ) -> dict:
     """
-    Substring search across the NNA verbatim transcript JSONL files
-    stored under ~/.nna/transcripts/<session-id>.jsonl.
+    Retrieve verbatim transcript chunks by semantic + keyword similarity.
 
-    The dreaming loop calls this for primary-source grounding when
-    resolving conflicting memories: a verbatim hit that mentions one
-    candidate but not the other is taken as endorsement.
+    Backed by a separate `verbatim_chunks` table (mempalace-style
+    "drawers" layer) — this never returns rows from the curated
+    `memories` table and vice versa.
+
+    The dreaming loop and skill curator call this for primary-source
+    grounding when resolving conflicts, distilling rules from raw
+    transcripts, or auditing where a stored decision came from.
 
     WHEN to use:
     - Resolving a memory conflict that auto-resolution flagged.
     - Auditing where a stored decision actually came from.
     - Reconstructing the wording of a rule the user stated earlier.
+    - Distilling skill content from successful tool sequences (filter
+      by mission_id + outcomes=["success"]).
 
     WHEN NOT to use:
     - You want curated insight — that's memory_search.
     - You want ingested document chunks — that's rag_search.
 
     Args:
-        query: Substring to look for (case-insensitive). Required.
-        limit: Max matched entries to return (1-100, default 10).
+        query: Natural-language query. Required.
+        limit: Max results (1-100, default 10).
+        project: Project scope. Auto-detected if omitted.
+        session_id: Restrict to a single NNA session.
+        topic: Restrict to a single curator-stamped topic.
+        mission_id: Restrict to a single NNO mission.
+        is_error: Filter to error/non-error chunks.
+        source_events: Restrict to specific source events
+            (e.g. ["turn.post"]).
+        outcomes: Restrict to specific outcomes
+            (e.g. ["success"], ["failure", "aborted"]).
+        hybrid: Fuse vector + full-text via Reciprocal Rank Fusion
+            (default True). Set False for pure vector ranking.
     """
     if not query or not query.strip():
-        return {"results": [], "count": 0}
+        return {"error": "Query cannot be empty", "results": [], "count": 0}
     if limit < 1:
         limit = 1
     if limit > 100:
         limit = 100
 
-    try:
-        from lib.verbatim import search_sessions
-        rows = search_sessions(query, limit=limit)
-    except Exception as exc:
-        return _tool_error("verbatim_search", exc, {"results": [], "count": 0})
+    from lib.embeddings import embed
+    from lib.db import get_or_create_project
+    from lib.verbatim_store import search_chunks
 
-    return {"results": rows, "count": len(rows)}
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"results": [], "count": 0},
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        query_embedding = embed(query)
+        results = await search_chunks(
+            query_embedding=query_embedding,
+            project_id=project_id,
+            owner_user_id=owner,
+            query_text=query,
+            hybrid=hybrid,
+            session_id=session_id,
+            topic=topic,
+            mission_id=mission_id,
+            is_error=is_error,
+            source_events=source_events,
+            outcomes=outcomes,
+            limit=limit,
+        )
+    except Exception as exc:
+        return _tool_error(
+            "verbatim_search", exc, {"results": [], "count": 0},
+        )
+
+    return {"results": results, "count": len(results)}
+
+
+@mcp.tool()
+@instrumented("verbatim_stamp_outcome")
+async def verbatim_stamp_outcome(
+    session_id: str,
+    outcome: str,
+    overwrite: bool = False,
+    project: Optional[str] = None,
+) -> dict:
+    """
+    Stamp every chunk in an NNA session with an outcome label so the
+    curator and skill-induction passes can filter on success vs.
+    failure later.
+
+    By default only writes rows whose outcome is still NULL — repeated
+    stamps with different values are a curator decision (pass
+    `overwrite=True`).
+
+    Args:
+        session_id: Session whose chunks to stamp. Required.
+        outcome: One of "success", "failure", "aborted", "unknown".
+        overwrite: When True, replace existing outcome values.
+            Default False (NULL-only update).
+        project: Project scope. Auto-detected if omitted.
+    """
+    if not session_id:
+        return {"error": "session_id is required", "stamped": 0}
+
+    from lib.verbatim_store import stamp_outcome as _stamp
+
+    owner, _project_dir, err = _tool_auth_and_project(
+        project, {"stamped": 0},
+    )
+    if err:
+        return err
+
+    try:
+        updated = await _stamp(
+            session_id=session_id,
+            outcome=outcome,
+            owner_user_id=owner,
+            overwrite=overwrite,
+        )
+    except ValueError as exc:
+        return {"error": str(exc), "stamped": 0}
+    except Exception as exc:
+        return _tool_error(
+            "verbatim_stamp_outcome", exc, {"stamped": 0},
+        )
+
+    return {"stamped": updated}
 
 
 @mcp.tool()
