@@ -1961,8 +1961,22 @@ async def get_context_memories(
     # domains. Another user's _global row never surfaces here.
     visible_ids = await get_visible_project_ids(project_id, owner_user_id)
 
+    # Two-tier selection: critical/rule memories ALWAYS land first
+    # (capped at ~40% of the budget so thermal context still gets a
+    # window). Remaining budget is then filled by hot non-critical
+    # memories ranked the old way (importance DESC, temperature DESC).
+    #
+    # Why: when ~7 of 800+ memories are critical and the rest live in
+    # `high`, the legacy single-ORDER-BY can fall into pathological
+    # cases — a single fat critical row eats the whole budget, or a
+    # large 1st memory truncates everything else. Splitting the budget
+    # guarantees both layers survive.
+    char_budget = max_tokens * 4
+    critical_budget = max(int(char_budget * 0.4), 200)
+
+    importance_rank = _importance_rank_sql("m.importance")
     async with rls.app_conn(pool, owner_user_id) as conn:
-        rows = await conn.fetch(
+        critical_rows = await conn.fetch(
             f"""SELECT m.id, m.content, m.tags, m.importance, m.class,
                       m.source_kind, m.source_session_id, m.superseded_by,
                       m.temperature,
@@ -1975,29 +1989,72 @@ async def get_context_memories(
                WHERE m.project_id = ANY($1)
                  AND m.owner_user_id = $2
                  AND m.superseded_by IS NULL
+                 AND (m.importance = 'critical' OR m.class = 'rule')
                ORDER BY
-                   {_importance_rank_sql('m.importance')} DESC,
+                   {importance_rank} DESC,
                    m.temperature DESC,
                    m.created_at DESC,
-                   m.id ASC
-               LIMIT 50""",
+                   m.id ASC""",
             visible_ids, owner_user_id,
         )
 
-        # Trim to token budget (~4 chars per token)
-        char_budget = max_tokens * 4
-        result = []
+        result: List[Dict[str, Any]] = []
         chars_used = 0
-        for row in rows:
+        seen_ids = set()
+
+        # Pack as many critical/rule rows as the sub-budget allows.
+        # First row is always admitted so a single oversized critical
+        # rule does not silently get dropped.
+        for row in critical_rows:
             content_len = len(row["content"])
-            if chars_used + content_len > char_budget and result:
+            if chars_used + content_len > critical_budget and result:
                 break
             result.append(_format_memory_row(row))
             chars_used += content_len
+            seen_ids.add(row["id"])
 
-        # Reheat accessed memories
+        # Fill the remaining budget with non-critical thermal/recency
+        # picks. Skip rows already taken above (a critical row would be
+        # surfaced again here otherwise — class='rule' OR importance='critical'
+        # is not mutually exclusive with the broader pool).
+        remaining = char_budget - chars_used
+        if remaining > 0:
+            other_rows = await conn.fetch(
+                f"""SELECT m.id, m.content, m.tags, m.importance, m.class,
+                          m.source_kind, m.source_session_id, m.superseded_by,
+                          m.temperature,
+                          m.created_at, m.last_accessed, m.access_count,
+                          m.project_id,
+                          p.scope AS project_scope,
+                          p.name AS project_name
+                   FROM memories m
+                   JOIN projects p ON p.id = m.project_id
+                   WHERE m.project_id = ANY($1)
+                     AND m.owner_user_id = $2
+                     AND m.superseded_by IS NULL
+                     AND m.importance <> 'critical'
+                     AND (m.class IS NULL OR m.class <> 'rule')
+                   ORDER BY
+                       {importance_rank} DESC,
+                       m.temperature DESC,
+                       m.created_at DESC,
+                       m.id ASC
+                   LIMIT 50""",
+                visible_ids, owner_user_id,
+            )
+            for row in other_rows:
+                if row["id"] in seen_ids:
+                    continue
+                content_len = len(row["content"])
+                if chars_used + content_len > char_budget and result:
+                    break
+                result.append(_format_memory_row(row))
+                chars_used += content_len
+                seen_ids.add(row["id"])
+
+        # Reheat every row that survived selection.
         if result:
-            ids = [row["id"] for row in rows[:len(result)]]
+            ids = [UUID(r["id"]) for r in result]
             await conn.execute(
                 """UPDATE memories SET
                        last_accessed = now(),
