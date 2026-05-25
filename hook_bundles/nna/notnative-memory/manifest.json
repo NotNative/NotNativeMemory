@@ -1,6 +1,6 @@
 {
   "name": "notnative-memory",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "subscriptions": [
     {
       "event": "session.start",
@@ -50,6 +50,27 @@
       "command": "python pre_tool_safety.py",
       "blocking": true,
       "timeout_ms": 5000
+    },
+    {
+      "event": "turn",
+      "phase": "pre",
+      "command": "python verbatim_capture.py",
+      "blocking": false,
+      "timeout_ms": 8000
+    },
+    {
+      "event": "turn",
+      "phase": "post",
+      "command": "python verbatim_capture.py",
+      "blocking": false,
+      "timeout_ms": 8000
+    },
+    {
+      "event": "tool.call",
+      "phase": "post",
+      "command": "python verbatim_capture.py",
+      "blocking": false,
+      "timeout_ms": 8000
     }
   ]
 }
