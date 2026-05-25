@@ -195,6 +195,43 @@ def test_detach_or_resume_falls_back_to_inline_if_spawn_fails():
     print("[OK] spawn failure falls back to inline with replayed stdin")
 
 
+# -- Surrogate round-trip --------------------------------------------------
+
+def test_detach_round_trips_lone_surrogates():
+    """Windows stdin can smuggle non-UTF-8 bytes as lone surrogates
+    (\\udc80..\\udcff). Both the parent write side and the worker read
+    side must use errors='surrogateescape' so the payload round-trips
+    without raising UnicodeEncodeError."""
+    payload = 'prefix \udc90\udcff suffix'
+    saved_stdin = sys.stdin
+    saved_argv = sys.argv[:]
+    captured = {}
+
+    def _fake_popen(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return mock.MagicMock()
+
+    try:
+        sys.stdin = io.StringIO(payload)
+        sys.argv = ["script.py"]
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with mock.patch.object(detach.subprocess, "Popen", side_effect=_fake_popen):
+                try:
+                    detach.detach_or_resume("/some/script.py")
+                except SystemExit:
+                    pass
+
+        tmp_path = captured["cmd"][3]
+        # Replay as worker: must read back the same surrogate-bearing string.
+        sys.argv = ["script.py", "--worker", tmp_path]
+        detach._resume_as_worker()
+        assert sys.stdin.read() == payload
+    finally:
+        sys.stdin = saved_stdin
+        sys.argv = saved_argv
+    print("[OK] lone surrogates round-trip through write/read cycle")
+
+
 # -- Runner ---------------------------------------------------------------
 
 if __name__ == "__main__":
@@ -208,6 +245,7 @@ if __name__ == "__main__":
         test_detach_or_resume_inline_mode_skips_detach_and_keeps_stdin,
         test_detach_or_resume_foreground_captures_stdin_spawns_and_exits,
         test_detach_or_resume_falls_back_to_inline_if_spawn_fails,
+        test_detach_round_trips_lone_surrogates,
     ]
     for t in tests:
         t()

@@ -59,7 +59,7 @@ def _resume_as_worker() -> None:
     `--worker <path>` args so downstream argv inspection is clean."""
     tmp_path = sys.argv[2]
     try:
-        with open(tmp_path, "r", encoding="utf-8") as fh:
+        with open(tmp_path, "r", encoding="utf-8", errors="surrogateescape") as fh:
             payload = fh.read()
     except OSError:
         sys.exit(1)
@@ -75,7 +75,7 @@ def _spawn_detached(script_path: str, payload: str) -> bool:
     """Spawn ourselves as a detached worker. Returns True on success."""
     fd, tmp_path = tempfile.mkstemp(prefix="nnm_turn_", suffix=".json")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", errors="surrogateescape") as fh:
             fh.write(payload)
     except OSError:
         try:
