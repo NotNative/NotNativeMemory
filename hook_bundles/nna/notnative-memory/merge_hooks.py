@@ -130,6 +130,7 @@ _SCRIPTS = [
     "turn_analysis.py",
     "pre_tool_safety.py",
     "session_start.py",  # nna pre-warmer (re-added 2026-05-24; non-blocking session.start:post)
+    "verbatim_capture.py",  # Phase B of self-improving-ecosystem-v2 (2026-05-25)
 ]
 
 # Files to retire from prior installs (script removed from this bundle;
