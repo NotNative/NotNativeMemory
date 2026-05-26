@@ -188,11 +188,12 @@ def main() -> int:
         _log(payload.get("event", "<no-event>"), f"exc:{type(exc).__name__}", 0)
         return 1
 
-    _log(
-        f"{payload.get('event', '?')}:{payload.get('phase', '?')}",
-        "ok",
-        stored,
-    )
+    # Reconstruct the (event, phase) tuple the same way _dispatch did so
+    # the log shows the resolved phase (e.g. "turn:post") instead of
+    # "turn:?" when NNA's payload omitted the phase field.
+    event = (payload.get("event") or "").strip()
+    phase = (payload.get("phase") or "").strip() or _resolve_phase(event, payload)
+    _log(f"{event or '?'}:{phase or '?'}", "ok", stored)
     return 0
 
 
