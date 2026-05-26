@@ -85,9 +85,40 @@ def _resolve_loaded_skills(payload: dict) -> list:
     return []
 
 
+def _resolve_phase(event: str, payload: dict) -> str:
+    """Infer the engine phase from payload shape.
+
+    NNA's drop-in hook contract dispatches the raw engine payload to each
+    subscriber and does NOT inject a `phase` field — phase is metadata
+    on the subscription (declared in manifest.json), not on the payload.
+    We re-derive it from which fields are populated:
+
+      turn:pre   — payload.prompt set, payload.model_response absent.
+      turn:post  — payload.model_response set (engine writes it before
+                   dispatching :post).
+      tool.call:pre  — payload.tool_input set, payload.tool_output absent.
+      tool.call:post — payload.tool_output set (engine writes it before
+                       dispatching :post). `is_error` is REQUIRED on
+                       ToolCallPayload so its presence can't disambiguate.
+
+    For events with only one subscribed phase (e.g. tool.call where the
+    bundle only registers :post), shape inference would be redundant but
+    is kept for forward-compat.
+    """
+    if event == "turn":
+        if payload.get("model_response"):
+            return "post"
+        return "pre"
+    if event == "tool.call":
+        if "tool_output" in payload and payload.get("tool_output") is not None:
+            return "post"
+        return "pre"
+    return ""
+
+
 def _dispatch(payload: dict) -> int:
     event = (payload.get("event") or "").strip()
-    phase = (payload.get("phase") or "").strip()
+    phase = (payload.get("phase") or "").strip() or _resolve_phase(event, payload)
     session_id = _resolve_session_id(payload)
     loaded_skills = _resolve_loaded_skills(payload)
     mission_id = payload.get("mission_id") or None

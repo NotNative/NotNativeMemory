@@ -325,8 +325,12 @@ async def search_chunks(
         ]
         # Param slot $4 is the hybrid query_text; vector-only mode never
         # references it, but the filter builder reserved slots from $5 on
-        # so the extra params still land at the right offsets.
-        params.append(None)
+        # so the extra params still land at the right offsets. asyncpg
+        # cannot infer the type of a bare None at an unreferenced slot
+        # (IndeterminateDatatypeError) — pass an empty string so the
+        # parameter has a concrete text type even though the query body
+        # never reads it.
+        params.append('')
         params.extend(extra_params)
         params.append(limit)
         limit_idx = idx
