@@ -1,180 +1,100 @@
-# Turn Analysis — Combined Learning + Promise Detection
+# Turn Analysis - Learning Extraction
 
-**Version:** 2.0
-**Last Updated:** 2026-04-26
+**Version:** 3.0
+**Last Updated:** 2026-05-29
 **Status:** Production
-**Renamed from:** `turn-extractor.md` (file: `turn_extractor.py` → `turn_analysis.py`) on 2026-04-26 to reflect broader scope (extraction + promise detection in one LLM call).
-
----
 
 ## Overview
 
-The **Turn Analysis** hook (`turn_analysis.py`) fires on `user.prompt.submit:post` after the model responds. A single LLM call analyzes the turn for two things at once:
+The `turn_analysis.py` hook runs after an agent turn and asks a local or configured LLM to extract durable learning. It is non-blocking: analyzer failures must never stop the agent.
 
-1. **Learnable patterns** — corrections, preferences, tool gotchas, decisions. Stored to NotNativeMemory via RAG ingestion.
-2. **Unfulfilled promises** — "I'll look up X" with no follow-through, tools called but no substantive answer delivered. Stored as a high-importance `pending_nudge` memory.
+The analyzer now has two write channels:
 
-Both extractions share the same LLM call, so promise detection costs zero extra inference.
+- `state_assertions` go to `memory_fact_add` for mutable current state.
+- `results` go to `memory_store` for durable rules, preferences, decisions, and background memories.
 
-The next turn's `user_prompt_inject.py` picks up the nudge via the existing high-importance similarity threshold (default 0.35) — no new event wiring required.
+Conversation summaries are stored through RAG as session-summary documents. Promise/nudge detection moved to NNA and is no longer owned by NNM turn analysis.
 
----
+## Output Schema
 
-## Architecture
-
-```
-User Prompt
-    |
-    v
-[NNA processes turn]
-    |
-    v
-Model Response
-    |
-    v
-turn_analysis.py (post phase)
-  - Reads: prompt + model_response
-  - Calls LM Studio once with combined prompt
-  - Stores extracted facts (rag_ingest_text)
-  - If shouldNudge: stores nudgeText as high-importance memory
-    tagged "pending_nudge"
-    |
-    v
-Next turn: user_prompt_inject.py (pre phase)
-  - Semantic search picks up relevant memories AND pending nudges
-  - Injects via additionalContext
-```
-
-**Payload:** stdin receives `{prompt, model_response, cwd}` from NNA's hook system.
-
----
-
-## LLM Output Schema
-
-The LLM is instructed to return ONE JSON object with both sections:
+The LLM is instructed to return a single JSON object:
 
 ```json
 {
-  "results": [
+  "state_assertions": [
     {
-      "type": "behavioral|operational|gotcha|decision",
-      "category": "correction|preference|frustration|tool-failure|policy|...",
-      "key": "short_identifier",
-      "value": "distilled rule or fact",
-      "confidence": "high|medium|low"
+      "subject": "service-or-component",
+      "predicate": "current-aspect",
+      "object": "current-value",
+      "confidence": 0.9
     }
   ],
-  "unfulfilledPromises": [
-    { "promise": "...", "reason": "tools called but no results delivered" }
+  "results": [
+    {
+      "fact": "One standalone memory sentence.",
+      "tags": ["short", "keywords"],
+      "confidence": "high",
+      "source": "user-stated",
+      "memory_class": "rule"
+    }
   ],
-  "shouldNudge": false,
-  "nudgeText": ""
+  "summary": "Optional 1-3 sentence dialogue summary."
 }
 ```
 
-Missing keys are coerced to safe defaults (`[]`, `false`, `""`) by the parser, so partial LLM responses don't crash the hook.
+`memory_class` is `rule`, `preference`, or `memory`. If the model omits it or emits an invalid value, deterministic fallback infers a conservative class from tags and wording.
 
----
+## Reliability Guards
 
-## Configuration (`hooks.env`)
+The analyzer does not trust model formatting blindly:
+
+- Markdown fences are stripped.
+- If the response contains prose around the JSON, the first balanced `{...}` object is recovered.
+- Missing or wrong top-level fields are coerced to the safe empty shape.
+- Irreparable output is logged and written to a quarantine JSONL file for review.
+- Malformed memory/fact items are skipped item-by-item instead of failing the whole turn.
+
+Default quarantine path is derived from `MEMORY_EXTRACT_LOG` as `<log-root>.quarantine.jsonl`. Override with `MEMORY_EXTRACT_QUARANTINE`.
+
+## Storage
+
+`results` are stored with:
+
+- `content`: the fact text verbatim.
+- `tags`: cleaned tag list.
+- `importance`: `high`, `normal`, or `low` from confidence.
+- `source`: `user-stated`, `tool-result`, or `model-inferred`; unknown values fall back to `model-inferred`.
+- `memory_class`: valid LLM value or deterministic fallback.
+
+`state_assertions` are stored as fact triples:
+
+- `subject`
+- `predicate`
+- `object`
+- `confidence`
+
+This keeps mutable state out of semantic memories so stale facts can be superseded cleanly.
+
+## Configuration
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `MEMORY_EXTRACT_MIN_LENGTH` | 30 | Minimum conversation chars (×10 multiplier) to trigger analysis |
-| `MEMORY_EXTRACT_TEMP` | 0.1 | LLM temperature (low = deterministic) |
-| `MEMORY_EXTRACT_MAX_RESULTS` | 5 | Max extracted facts stored per turn |
-| `MEMORY_EXTRACT_TIMEOUT` | 300 | LLM call timeout (seconds). The hook detaches into a background worker before the call, so this only guards against a stuck socket — it does not block the agent harness. |
-| `MEMORY_EXTRACT_LLM_URL` | derived | Override chat completion endpoint; defaults to `MCP_URL` with `/mcp` → `/v1/chat/completions` |
-| `MEMORY_EXTRACT_LOG` | `~/.nna/turn_analysis.log` | Telemetry log path |
+|---|---|---|
+| `MEMORY_EXTRACT_MIN_LENGTH` | `40` | Minimum combined conversation chars before analysis runs. |
+| `MEMORY_EXTRACT_TEMP` | `0.1` | Analyzer LLM temperature. |
+| `MEMORY_EXTRACT_MAX_RESULTS` | `50` | Runaway hedge for extracted items. |
+| `MEMORY_EXTRACT_TIMEOUT` | `300` | LLM/socket timeout in seconds. |
+| `MEMORY_EXTRACT_LLM_URL` | derived | Explicit chat completion endpoint. |
+| `MEMORY_EXTRACT_MODEL` | unset | Optional pinned model; otherwise OpenAI-compatible mode can discover. |
+| `MEMORY_EXTRACT_PROJECT` | `_global` | Write scope for analyzer memories/facts. |
+| `MEMORY_EXTRACT_LOG` | harness default | Failure and outcome log path. |
+| `MEMORY_EXTRACT_QUARANTINE` | derived | JSONL path for irreparable analyzer responses. |
 
----
+## Tests
 
-## Hook Manifest
+Run:
 
-```json
-{
-  "event": "user.prompt.submit",
-  "phase": "post",
-  "command": "python turn_analysis.py",
-  "blocking": false,
-  "timeout_ms": 15000
-}
+```powershell
+python tests/test_turn_analysis.py
 ```
 
-`blocking: false` — analysis failures NEVER affect user interaction.
-
----
-
-## Storage Format
-
-### Extracted facts
-
-Stored via `rag_ingest_text`:
-
-- **Title:** `{type}:{key}:{conversation_id[:8]}` (deduplication anchor)
-- **Tags:** `[type, "cat:{category}"]`
-- **Importance:** `high` if confidence=high else `normal`
-
-### Pending nudges
-
-Stored via `rag_ingest_text` with:
-
-- **Title:** `pending_nudge:{conversation_id[:8]}`
-- **Tags:** `["pending_nudge", "cat:promise"]`
-- **Importance:** `high`
-- **Content:** `[PENDING NUDGE] An earlier turn made a commitment that was not delivered.\nSuggested follow-up: ...`
-
-The high importance lets `user_prompt_inject.py` surface the nudge at its lower `MEMORY_PROMPT_HIGH_THRESHOLD` (default 0.35) — so even a topic shift on the next turn still raises the nudge if it's at all relevant.
-
----
-
-## Migration Notes (from `turn_extractor.py`)
-
-When `merge_hooks.py` installs the renamed script it:
-
-1. Copies `turn_analysis.py` to `~/.nna/hooks/notnative-memory/`
-2. Removes the obsolete `turn_extractor.py` from the install dir (clean rename)
-3. Updates `manifest.json` to invoke `python turn_analysis.py`
-4. Writes `hooks.env` with the same `MEMORY_EXTRACT_*` variable names (config-compatible)
-
-On first run after the rename, `turn_analysis.py` deletes the legacy `~/.nna/turn_extractor.log` so operators don't accumulate stale logs.
-
----
-
-## Test Coverage
-
-`tests/test_turn_analysis.py` — 17 tests covering:
-
-- Markdown fence stripping (3 variants)
-- Combined prompt construction (both sections present, length caps enforced)
-- LLM response shape parsing (full shape, missing keys, short-conversation skip, LLM-unreachable)
-- Nudge storage (empty-text skip, correct tags + importance)
-- Fact storage (malformed-item skip, max-extractions cap, confidence → importance mapping)
-- Legacy log cleanup (delete on first run, no-op when absent)
-- Log path uses renamed file
-
-Run: `python tests/test_turn_analysis.py`
-
----
-
-## Failure Modes
-
-| Failure | Behavior |
-|---------|----------|
-| LLM unreachable | Returns empty analysis shape; logs `[WARN]` to stderr |
-| Invalid JSON from LLM | Same as unreachable — empty shape |
-| RAG ingestion fails | Logs `[ERROR]` to stderr per item; continues remaining items |
-| Missing `prompt` or `model_response` in stdin | Logs `[ERROR]`, exits 1 (non-blocking; NNA continues) |
-| Trivial conversation (<300 chars) | Skipped silently |
-
-The hook never blocks NNA. All failures are recoverable — next turn retries automatically.
-
----
-
-## Related
-
-- `user_prompt_inject.py` — pre-phase semantic search + injection (consumer of `pending_nudge` memories)
-- `compact_guard.py` — compaction-time persistent context injection
-- `merge_hooks.py` — installer that copies hooks into NNA's drop-in directory
-- NNA design doc: `<NotNativeAgent repo>/docs/planning/turn-analysis-self-learning-system.md`
-- NNA implementation status: `<NotNativeAgent repo>/docs/planning/turn-analysis-implementation-status.md`
+The suite covers prompt contracts, JSON recovery, quarantine logging, fact-vs-memory routing, memory class fallback, MCP wire shape, and both Claude/NNA adapter behavior.

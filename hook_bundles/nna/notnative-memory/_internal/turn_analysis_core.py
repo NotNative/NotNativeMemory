@@ -288,7 +288,7 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         "\n"
         'SECTION 1B: Learnable observations ("results")\n'
         "\n"
-        '  Each item is { "fact": "...", "tags": ["..."], "confidence": "high|medium|low", "source": "user-stated|tool-result|model-inferred" }\n'
+        '  Each item is { "fact": "...", "tags": ["..."], "confidence": "high|medium|low", "source": "user-stated|tool-result|model-inferred", "memory_class": "rule|preference|memory" }\n'
         "\n"
         "  Choosing source:\n"
         '    - "user-stated": the user explicitly said the rule, preference, or decision in the\n'
@@ -315,6 +315,8 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         "    7. Tags are short lowercase keywords useful for later filtering\n"
         '       (e.g. "shell", "powershell", "correction", "preference", "infra", "tool-failure").\n'
         "    8. Skip an entry entirely if it cannot stand alone usefully. Better empty than noisy.\n"
+        "    9. memory_class is required: use rule for hard instructions/invariants, preference\n"
+        "       for soft style or workflow preferences, and memory for ordinary background context.\n"
         "\n"
         "  Volume: extract every standalone learnable fact present in the turn. If a turn legitimately\n"
         "  yields 30 facts, return 30. There is no quota and no upper target.\n"
@@ -409,7 +411,7 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         "\n"
         'SECTION 1: Learnable facts ("results")\n'
         "\n"
-        '  Each item is { "fact": "...", "tags": ["..."], "confidence": "high|medium|low", "source": "tool-result|model-inferred" }\n'
+        '  Each item is { "fact": "...", "tags": ["..."], "confidence": "high|medium|low", "source": "tool-result|model-inferred", "memory_class": "rule|preference|memory" }\n'
         "\n"
         "  Source attribution for worker runs:\n"
         '    - "tool-result": the lesson comes from a concrete observed tool output. Most worker\n'
@@ -446,6 +448,8 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         "    - Tags are short lowercase keywords; include the affected\n"
         '       vendor or system if applicable (e.g. "vendor:acme", "scrape",\n'
         '       "api:stripe", "selector").\n'
+        "    - memory_class is required: rule for durable operational invariants,\n"
+        "      preference for soft workflow/style preferences, memory for background context.\n"
         "\n"
         "  Volume: extract every durable lesson present. If a worker run produced\n"
         "  20 distinct vendor quirks, return all 20.\n"
@@ -481,7 +485,7 @@ def build_worker_analysis_prompt(task_envelope: str, worker_output: str) -> str:
         "\n"
         "{\n"
         '  "results": [\n'
-        '    { "fact": "...", "tags": ["..."], "confidence": "high", "source": "tool-result" }\n'
+        '    { "fact": "...", "tags": ["..."], "confidence": "high", "source": "tool-result", "memory_class": "memory" }\n'
         "  ],\n"
         '  "summary": ""\n'
         "}\n"
@@ -506,6 +510,60 @@ def strip_markdown_fences(content: str) -> str:
     if content.endswith("```"):
         content = content[:-3]
     return content.strip()
+
+
+def extract_embedded_json_object(content: str) -> Optional[str]:
+    """Return the first balanced JSON object embedded in a model response.
+
+    Local reasoning models sometimes wrap the object in prose or hidden
+    thinking text even when asked for JSON only. This scanner is deliberately
+    small and deterministic: it only extracts a balanced {...} span while
+    respecting JSON string escapes. It does not try to invent missing braces.
+    """
+    text = strip_markdown_fences(content)
+    start = text.find("{")
+    if start < 0:
+        return None
+
+    depth = 0
+    in_string = False
+    escape = False
+    for idx in range(start, len(text)):
+        ch = text[idx]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+
+        if ch == '"':
+            in_string = True
+        elif ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : idx + 1]
+
+    return None
+
+
+def parse_analysis_json(content: str) -> Optional[dict]:
+    """Parse analyzer JSON with one deterministic embedded-object recovery."""
+    fenced = strip_markdown_fences(content)
+    for candidate in (fenced, extract_embedded_json_object(fenced)):
+        if not candidate:
+            continue
+        try:
+            parsed = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(parsed, dict):
+            return parsed
+    return None
 
 
 def empty_analysis() -> dict:
@@ -564,6 +622,37 @@ def _log_analysis_failure(reason: str) -> None:
                 f"{datetime.datetime.now().isoformat(timespec='seconds')}\t"
                 f"failure\treason={reason}\n"
             )
+    except OSError:
+        pass
+
+
+def _analysis_quarantine_path() -> str:
+    explicit = os.environ.get("MEMORY_EXTRACT_QUARANTINE", "").strip()
+    if explicit:
+        return explicit
+
+    log_path = os.environ.get(
+        "MEMORY_EXTRACT_LOG",
+        os.path.expanduser("~/.nnm_turn_analysis_failures.log"),
+    )
+    root, _ext = os.path.splitext(log_path)
+    return f"{root}.quarantine.jsonl"
+
+
+def _quarantine_analysis_candidate(reason: str, content: str) -> None:
+    """Persist irreparable analyzer output for later review instead of losing it."""
+    path = _analysis_quarantine_path()
+    record = {
+        "ts": datetime.datetime.now().isoformat(timespec="seconds"),
+        "reason": reason,
+        "content": content,
+    }
+    try:
+        parent = os.path.dirname(path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        with open(path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
     except OSError:
         pass
 
@@ -658,11 +747,11 @@ def _call_analysis_llm_with_prompt(
             response.get("choices", [{}])[0].get("message", {}).get("content", "")
         )
 
-    try:
-        parsed = json.loads(strip_markdown_fences(content))
-    except (json.JSONDecodeError, ValueError):
+    parsed = parse_analysis_json(content)
+    if parsed is None:
         preview = (content or "").strip()[:160].replace("\n", " ")
         _log_analysis_failure(f"unparseable_json: content_preview={preview!r}")
+        _quarantine_analysis_candidate("unparseable_json", content or "")
         return empty_analysis()
 
     return coerce_analysis(parsed)
@@ -805,6 +894,7 @@ def memory_store_call(
     importance: str,
     source: str,
     config: AnalysisConfig,
+    memory_class: Optional[str] = None,
 ) -> bool:
     """POST a single memory_store call to the MCP. Returns True on success.
 
@@ -813,19 +903,23 @@ def memory_store_call(
     thermal state, dedup/conflict semantics, and class taxonomy that
     raw RAG chunks do not.
     """
+    arguments = {
+        "project": config.project,
+        "content": content,
+        "tags": tags,
+        "importance": importance,
+        "source": source,
+    }
+    if memory_class in _VALID_MEMORY_CLASSES:
+        arguments["memory_class"] = memory_class
+
     payload = json.dumps({
         "jsonrpc": "2.0",
         "id": 3,
         "method": "tools/call",
         "params": {
             "name": "memory_store",
-            "arguments": {
-                "project": config.project,
-                "content": content,
-                "tags": tags,
-                "importance": importance,
-                "source": source,
-            },
+            "arguments": arguments,
         },
     }).encode("utf-8")
 
@@ -987,6 +1081,7 @@ def _confidence_to_importance(confidence: str) -> str:
 
 
 _VALID_SOURCES = frozenset({"user-stated", "tool-result", "model-inferred"})
+_VALID_MEMORY_CLASSES = frozenset({"rule", "preference", "memory"})
 
 
 def _coerce_source(value) -> str:
@@ -1004,6 +1099,42 @@ def _coerce_source(value) -> str:
     return "model-inferred"
 
 
+def _infer_memory_class(fact: str, tags: list, source: str) -> str:
+    """Conservative deterministic fallback for unreliable LLM categorization."""
+    del source
+    tagset = {str(t).strip().lower() for t in tags if str(t).strip()}
+    text = fact.strip().lower()
+
+    if "preference" in tagset or text.startswith(("prefer ", "when possible ")):
+        return "preference"
+
+    hard_rule_starts = (
+        "always ",
+        "never ",
+        "must ",
+        "do not ",
+        "don't ",
+        "avoid ",
+        "use ",
+        "keep ",
+        "ensure ",
+        "require ",
+        "requires ",
+    )
+    if "rule" in tagset or "constraint" in tagset or text.startswith(hard_rule_starts):
+        return "rule"
+
+    return "memory"
+
+
+def _coerce_memory_class(value, fact: str, tags: list, source: str) -> str:
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in _VALID_MEMORY_CLASSES:
+            return v
+    return _infer_memory_class(fact, tags, source)
+
+
 def store_extractions(items: list, conversation_id: str, config: AnalysisConfig) -> int:
     """Store extracted facts to NotNativeMemory as discrete memories.
 
@@ -1013,6 +1144,8 @@ def store_extractions(items: list, conversation_id: str, config: AnalysisConfig)
       - 'confidence' (high|medium|low): mapped to importance.
       - 'source' (user-stated|tool-result|model-inferred): attribution.
         Unrecognized values default to 'model-inferred'.
+      - 'memory_class' (rule|preference|memory): passed through when valid,
+        otherwise inferred conservatively from tags and content.
 
     Each fact is stored verbatim as the memory content. No template wrapping,
     no metadata headers in the body. Source attribution lets downstream
@@ -1046,8 +1179,14 @@ def store_extractions(items: list, conversation_id: str, config: AnalysisConfig)
 
         importance = _confidence_to_importance(item.get("confidence", "medium"))
         source = _coerce_source(item.get("source"))
+        memory_class = _coerce_memory_class(
+            item.get("memory_class", item.get("class")),
+            fact,
+            tags,
+            source,
+        )
 
-        if memory_store_call(fact, tags, importance, source, config):
+        if memory_store_call(fact, tags, importance, source, config, memory_class):
             stored += 1
 
     return stored

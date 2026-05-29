@@ -231,7 +231,7 @@ NNM ships hooks for two host platforms: Claude Code (`hook_bundles/claude/notnat
 | `SessionStart` | Pull top-K critical/hot memories for the project and inject them as preamble. |
 | `UserPromptSubmit` | Search with the user's prompt; inject matches before the model sees the prompt. |
 | `PreCompact` | Inject rules + critical memories so operational discipline survives context compression. |
-| `Stop` (turn-analysis) | End-of-turn LLM extraction (NNA only today): produces RAG ingestions and, optionally, a high-importance "promise" nudge memory for the next turn. |
+| `Stop` (turn-analysis) | End-of-turn LLM extraction: stores mutable state through `memory_fact_add`, durable observations through `memory_store`, and compact turn summaries through RAG. Malformed analyzer output is logged and quarantined for review. |
 | `PreToolUse` (safety gate) | Opt-in (`MEMORY_SAFETY_GATE_ENABLED=1`). Refuses a small baseline of destructive ops — `git push --force`, `rm -rf /`, `git reset --hard origin/...`, `DROP DATABASE` — by exiting 2 before dispatch. Disabled by default. |
 
 Each bundle ships its own `_internal/turn_analysis_core.py`; the agent-facing hook scripts in the bundle are thin adapters. Configuration lives in `hooks.env`, resolved by `_internal/env_loader.py::load_hooks_env` which reads `~/.claude/hooks/notnative-memory/hooks.env` (or the NNA equivalent) and merges into `os.environ` via `setdefault` — so the inherited process environment always wins over file values, useful for tests and one-off overrides.
@@ -246,6 +246,7 @@ Installer-generated defaults seed the analyzer with a working local LLM endpoint
 | `MEMORY_EXTRACT_MODEL` | unset | Auto-discovered via `/v1/models` when blank; pin a specific id when multiple are loaded. |
 | `MEMORY_EXTRACT_PROJECT` | `_global` | NNM scope analyzer writes to. Must be a writable scope (`_global`, `_domain_<name>`, or absolute path). The server-side `general` default is rejected. |
 | `MEMORY_EXTRACT_DISABLE_REASONING` | `1` | When set, OpenAI-compat body adds `chat_template_kwargs={"enable_thinking": false}` so reasoning models (Qwen3-think, DeepSeek-R1) skip the hidden `<think>` phase that wastes the subprocess timeout on a classifier prompt. No-op on the Anthropic Messages backend. |
+| `MEMORY_EXTRACT_QUARANTINE` | derived from `MEMORY_EXTRACT_LOG` | JSONL review file for irreparable analyzer responses that could not be parsed or repaired deterministically. |
 
 LM Studio (OpenAI-compatible) and the Anthropic Messages API are both supported. Bundles do not share helpers across agents — each agent's bundle is developed independently with its own dev.
 

@@ -65,8 +65,7 @@ def test_build_analysis_prompt_includes_both_sides():
     assert user in prompt
     assert model in prompt
     assert "Learnable observations" in prompt
-    assert "Promise tracking" in prompt
-    assert "shouldNudge" in prompt
+    assert "memory_class" in prompt
     print("[OK] build_analysis_prompt covers both sections")
 
 
@@ -82,6 +81,7 @@ def test_build_analysis_prompt_specifies_new_schema_and_quality_bar():
     assert '"fact"' in prompt
     assert '"tags"' in prompt
     assert '"confidence"' in prompt
+    assert '"memory_class"' in prompt
     assert "stand alone" in prompt or "self-contained" in prompt.lower()
     assert "no quota" in prompt.lower() or "no upper target" in prompt.lower()
     # The bad-example block is a key part of the steering.
@@ -104,7 +104,7 @@ def test_build_worker_analysis_prompt_steers_toward_vendor_quirks():
     # Schema must match the session prompt so storage is symmetric.
     assert '"fact"' in prompt
     assert '"summary"' in prompt
-    assert '"shouldNudge"' in prompt
+    assert '"memory_class"' in prompt
     # Must explicitly forbid run-specific transient data.
     assert "transient" in lower or "$4.99" in prompt or "Run-specific" in prompt
     print("[OK] build_worker_analysis_prompt steers toward vendor/operational extraction")
@@ -220,7 +220,11 @@ def test_coerce_analysis_full_shape():
         "summary": "A short summary of the turn.",
     }
     out = core.coerce_analysis(parsed)
-    assert out == parsed
+    assert out == {
+        "state_assertions": parsed["state_assertions"],
+        "results": parsed["results"],
+        "summary": parsed["summary"],
+    }
     print("[OK] coerce_analysis preserves full valid shape")
 
 
@@ -229,9 +233,6 @@ def test_coerce_analysis_missing_keys_default_safe():
     assert out == {
         "state_assertions": [],
         "results": [],
-        "unfulfilledPromises": [],
-        "shouldNudge": False,
-        "nudgeText": "",
         "summary": "",
     }
     print("[OK] coerce_analysis fills missing keys with safe defaults")
@@ -246,9 +247,6 @@ def test_coerce_analysis_wrong_types_default_safe():
         "summary": None,
     })
     assert out["results"] == []
-    assert out["unfulfilledPromises"] == []
-    assert out["shouldNudge"] is True  # bool() of non-empty string
-    assert out["nudgeText"] == ""
     assert out["summary"] == ""
     print("[OK] coerce_analysis defends against wrong field types")
 
@@ -700,6 +698,49 @@ def test_unparseable_response_writes_log_line(tmp_path):
     print("[OK] unparseable response writes a content preview to the log")
 
 
+def test_unparseable_response_writes_quarantine_record():
+    """Malformed analyzer output should be reviewable, not silently discarded."""
+    with tempfile.TemporaryDirectory() as tmp:
+        log_file = Path(tmp) / "turn_analysis.log"
+        quarantine_file = Path(tmp) / "turn_analysis.quarantine.jsonl"
+        cfg = _make_config("openai_compat", model="x")
+        bad_content = "this is not json {{ malformed"
+        bad_body = json.dumps({
+            "choices": [{"message": {"content": bad_content}}]
+        }).encode("utf-8")
+
+        with mock.patch.dict(
+            os.environ,
+            {
+                "MEMORY_EXTRACT_LOG": str(log_file),
+                "MEMORY_EXTRACT_QUARANTINE": str(quarantine_file),
+            },
+            clear=False,
+        ):
+            with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
+                urlopen_mock.return_value.__enter__.return_value.read.return_value = bad_body
+                result = core.call_analysis_llm("u" * 200, "m" * 200, cfg)
+
+        assert result == core.empty_analysis()
+        records = quarantine_file.read_text(encoding="utf-8").strip().splitlines()
+    assert len(records) == 1
+    record = json.loads(records[0])
+    assert record["reason"] == "unparseable_json"
+    assert record["content"] == bad_content
+    print("[OK] unparseable analyzer output is quarantined for review")
+
+
+def test_parse_analysis_json_recovers_embedded_object():
+    raw = """
+    I will output JSON now:
+    {"results": [{"fact": "Keep responses terse.", "tags": ["preference"]}], "summary": ""}
+    done.
+    """
+    parsed = core.parse_analysis_json(raw)
+    assert parsed["results"][0]["fact"] == "Keep responses terse."
+    print("[OK] parse_analysis_json recovers an embedded balanced JSON object")
+
+
 # -- Model auto-discovery -------------------------------------------------
 
 def test_discover_model_picks_first_id():
@@ -782,12 +823,13 @@ def test_call_analysis_llm_anthropic_shape():
         "unfulfilledPromises": [],
         "shouldNudge": True,
         "nudgeText": "follow up on X",
+        "summary": "A follow-up was requested.",
     }
     with mock.patch.object(core.urllib.request, "urlopen") as urlopen_mock:
         urlopen_mock.return_value.__enter__.return_value.read.return_value = _mock_anthropic_response(payload)
         out = core.call_analysis_llm("u" * 200, "m" * 200, cfg)
-    assert out["shouldNudge"] is True
-    assert out["nudgeText"] == "follow up on X"
+    assert out["results"] == []
+    assert out["summary"] == "A follow-up was requested."
     print("[OK] call_analysis_llm parses Anthropic Messages response")
 
 
@@ -868,12 +910,8 @@ def test_call_analysis_llm_empty_on_invalid_json():
 # -- Storage helpers ------------------------------------------------------
 
 def test_store_pending_nudge_skips_empty_text():
-    cfg = _make_config("openai_compat")
-    with mock.patch.object(core, "rag_ingest") as ingest_mock:
-        result = core.store_pending_nudge("   ", "conv12345", cfg)
-    assert result is False
-    ingest_mock.assert_not_called()
-    print("[OK] store_pending_nudge skips empty/whitespace text")
+    assert not hasattr(core, "store_pending_nudge")
+    print("[OK] store_pending_nudge has been removed from turn analysis")
 
 
 def test_store_conversation_summary_skips_empty_text():
@@ -935,15 +973,8 @@ def test_store_conversation_summary_strips_surrounding_whitespace():
 
 
 def test_store_pending_nudge_high_importance_and_tagged():
-    cfg = _make_config("openai_compat")
-    with mock.patch.object(core, "rag_ingest", return_value=True) as ingest_mock:
-        result = core.store_pending_nudge("Earlier I said I'd check X.", "conv12345", cfg)
-    assert result is True
-    _, kwargs = ingest_mock.call_args
-    assert kwargs["importance"] == "high"
-    assert "pending_nudge" in kwargs["tags"]
-    assert kwargs["title"].startswith("pending_nudge:")
-    print("[OK] store_pending_nudge writes with importance=high + pending_nudge tag")
+    assert not hasattr(core, "store_pending_nudge")
+    print("[OK] pending nudges are owned by NNA, not NNM turn analysis")
 
 
 def test_store_extractions_skips_malformed_items():
@@ -1010,7 +1041,7 @@ def test_store_extractions_confidence_maps_to_importance():
     ]
     captured = []
 
-    def _capture(content, tags, importance, source, config):
+    def _capture(content, tags, importance, source, config, memory_class=None):
         captured.append(importance)
         return True
 
@@ -1034,7 +1065,7 @@ def test_store_extractions_writes_fact_verbatim_no_template():
     )
     captured = {}
 
-    def _capture(content, tags, importance, source, config):
+    def _capture(content, tags, importance, source, config, memory_class=None):
         captured["content"] = content
         captured["tags"] = tags
         captured["importance"] = importance
@@ -1068,7 +1099,7 @@ def test_store_extractions_marks_source_as_model_inferred():
     cfg = _make_config("openai_compat")
     captured = []
 
-    def _capture(content, tags, importance, source, config):
+    def _capture(content, tags, importance, source, config, memory_class=None):
         captured.append(source)
         return True
 
@@ -1086,6 +1117,38 @@ def test_store_extractions_marks_source_as_model_inferred():
     print("[OK] store_extractions marks every extracted fact source='model-inferred'")
 
 
+def test_store_extractions_passes_or_infers_memory_class():
+    cfg = _make_config("openai_compat")
+    items = [
+        {
+            "fact": "Keep responses terse unless asked for details.",
+            "tags": ["preference"],
+            "memory_class": "preference",
+        },
+        {
+            "fact": "Never use destructive git commands without explicit approval.",
+            "tags": ["safety"],
+            "memory_class": "not-valid",
+        },
+        {
+            "fact": "NNA is a local-first agent.",
+            "tags": ["architecture"],
+        },
+    ]
+    captured = []
+
+    def _capture(content, tags, importance, source, config, memory_class=None):
+        captured.append(memory_class)
+        return True
+
+    with mock.patch.object(core, "memory_store_call", side_effect=_capture):
+        stored = core.store_extractions(items, "conv12345", cfg)
+
+    assert stored == 3
+    assert captured == ["preference", "rule", "memory"]
+    print("[OK] store_extractions passes valid memory_class and infers conservative defaults")
+
+
 def test_store_extractions_handles_missing_or_garbage_tags():
     cfg = _make_config("openai_compat")
     items = [
@@ -1095,7 +1158,7 @@ def test_store_extractions_handles_missing_or_garbage_tags():
     ]
     captured = []
 
-    def _capture(content, tags, importance, source, config):
+    def _capture(content, tags, importance, source, config, memory_class=None):
         captured.append(tags)
         return True
 
@@ -1140,6 +1203,7 @@ def test_memory_store_call_posts_correct_jsonrpc_shape():
             "high",
             "model-inferred",
             cfg,
+            "rule",
         )
 
     assert ok is True
@@ -1151,6 +1215,7 @@ def test_memory_store_call_posts_correct_jsonrpc_shape():
     assert args["tags"] == ["a", "b"]
     assert args["importance"] == "high"
     assert args["source"] == "model-inferred"
+    assert args["memory_class"] == "rule"
     assert args["project"] == "_global", "project must be passed; server rejects default 'general'"
     print("[OK] memory_store_call posts the expected JSON-RPC payload to the MCP")
 
@@ -1202,15 +1267,13 @@ def test_analyze_turn_short_circuit_below_min_length():
     print("[OK] analyze_turn short-circuits below min length")
 
 
-def test_analyze_turn_persists_extractions_summary_and_nudge():
-    """End-to-end: extractions -> memories; summary -> RAG; nudge -> RAG.
+def test_analyze_turn_persists_extractions_and_summary():
+    """End-to-end: extractions -> memories; summary -> RAG.
 
     The three-way split is intentional and load-bearing:
       - Memories carry thermal/dedup/conflict semantics for discrete facts.
       - Summaries land in RAG as narrative artifacts (longer than a fact,
         searchable but not consolidated).
-      - Nudges live on RAG as session-bridging meta-state until the
-        promise-detection migration to NNA happens.
     """
     cfg = _make_config("openai_compat", model="x")
     payload = {
@@ -1232,12 +1295,12 @@ def test_analyze_turn_persists_extractions_summary_and_nudge():
         urlopen_mock.return_value.__enter__.return_value.read.return_value = _mock_openai_response(payload)
         out = core.analyze_turn("u" * 200, "m" * 200, "/some/cwd", cfg)
     assert out["stored"] == 1
-    assert out["nudge_stored"] is True
+    assert out["nudge_stored"] is False
     assert out["summary_stored"] is True
-    # Extraction goes to memories; summary + nudge both go to RAG (2 RAG calls).
+    # Extraction goes to memories; summary goes to RAG.
     assert mem_mock.call_count == 1
-    assert rag_mock.call_count == 2
-    print("[OK] analyze_turn routes extractions to memories; summary and nudge to RAG")
+    assert rag_mock.call_count == 1
+    print("[OK] analyze_turn routes extractions to memories and summary to RAG")
 
 
 def test_attach_mission_tags_appends_when_mission_id_set():
@@ -1326,7 +1389,7 @@ def test_call_worker_analysis_llm_uses_worker_prompt():
 
 def test_analyze_worker_run_persists_with_mission_tags():
     """End-to-end worker analysis: extractions land as memories with mission tags;
-    summary lands in RAG; nudge lands in RAG.
+    summary lands in RAG.
     """
     cfg = _make_config("openai_compat", model="x")
     payload = {
@@ -1344,7 +1407,7 @@ def test_analyze_worker_run_persists_with_mission_tags():
     }
     captured_tags = []
 
-    def _mem_capture(content, tags, importance, source, config):
+    def _mem_capture(content, tags, importance, source, config, memory_class=None):
         captured_tags.append(tags)
         return True
 
@@ -1360,11 +1423,11 @@ def test_analyze_worker_run_persists_with_mission_tags():
 
     assert out["stored"] == 1
     assert out["summary_stored"] is True
-    assert out["nudge_stored"] is True
+    assert out["nudge_stored"] is False
     # Memory call received mission/assignment tags merged with the LLM tags.
     assert captured_tags == [["scrape", "vendor:acme", "mission:mission-abc", "assignment:asg-1"]]
-    # Two RAG calls: summary + nudge. Memory call: 1 extraction.
-    assert rag_mock.call_count == 2
+    # One RAG call: summary. Memory call: 1 extraction.
+    assert rag_mock.call_count == 1
     print("[OK] analyze_worker_run tags extractions with mission/assignment and routes to memory + RAG")
 
 
@@ -1850,7 +1913,7 @@ def test_store_extractions_passes_per_item_source_through():
     ]
     captured = []
 
-    def _capture(content, tags, importance, source, config):
+    def _capture(content, tags, importance, source, config, memory_class=None):
         captured.append(source)
         return True
 
@@ -1872,7 +1935,7 @@ def test_store_extractions_unknown_source_defaults_to_model_inferred():
     ]
     captured = []
 
-    def _capture(content, tags, importance, source, config):
+    def _capture(content, tags, importance, source, config, memory_class=None):
         captured.append(source)
         return True
 
@@ -1927,6 +1990,8 @@ if __name__ == "__main__":
         test_call_analysis_llm_skips_short_conversation,
         test_call_analysis_llm_empty_when_no_model_resolved,
         test_call_analysis_llm_empty_on_invalid_json,
+        test_unparseable_response_writes_quarantine_record,
+        test_parse_analysis_json_recovers_embedded_object,
         # core: storage
         test_store_pending_nudge_skips_empty_text,
         test_store_pending_nudge_high_importance_and_tagged,
@@ -1939,6 +2004,7 @@ if __name__ == "__main__":
         test_store_extractions_confidence_maps_to_importance,
         test_store_extractions_writes_fact_verbatim_no_template,
         test_store_extractions_marks_source_as_model_inferred,
+        test_store_extractions_passes_or_infers_memory_class,
         test_store_extractions_handles_missing_or_garbage_tags,
         test_memory_store_call_posts_correct_jsonrpc_shape,
         test_memory_store_call_returns_false_on_network_error,
@@ -1946,7 +2012,7 @@ if __name__ == "__main__":
         test_max_extractions_default_is_volume_friendly,
         # core: analyze_turn
         test_analyze_turn_short_circuit_below_min_length,
-        test_analyze_turn_persists_extractions_summary_and_nudge,
+        test_analyze_turn_persists_extractions_and_summary,
         test_analyze_turn_skips_summary_when_empty,
         # core: fact-vs-memory extraction split (Fix #1)
         test_build_analysis_prompt_includes_state_assertions_section,
