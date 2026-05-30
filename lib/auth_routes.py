@@ -335,6 +335,50 @@ def register_routes(mcp) -> None:
             "localhost_bypass": bypass,
         })
 
+    @mcp.custom_route("/auth/admin/provision-user", methods=["POST"])
+    async def admin_provision_user(request: Request):
+        """
+        Admin-only service endpoint for identity brokers such as NNO.
+
+        Payload:
+            {"username": "nno:<deployment>:<user-id>", "label": "..."}
+
+        The route idempotently ensures the NNM user exists and mints a
+        fresh Bearer token for that principal. The raw token is returned
+        once so the broker can store it in its own encrypted vault.
+        """
+        admin_error = _require_admin_json(request)
+        if admin_error is not None:
+            return admin_error
+
+        payload = await _parse_json(request)
+        if payload is None:
+            return JSONResponse({"error": "body must be JSON"}, status_code=400)
+
+        username = (payload.get("username") or "").strip()
+        label = (payload.get("label") or "nno-provisioned").strip() or "nno-provisioned"
+        if not username:
+            return JSONResponse({"error": "username is required"}, status_code=400)
+
+        try:
+            user = await auth_db.ensure_user(username)
+            token = await auth_db.create_token(UUID(user["id"]), label=label)
+        except ValueError as exc:
+            return JSONResponse({"error": str(exc)}, status_code=400)
+
+        actor_uid = _current_user_id(request)
+        await audit.log_event(
+            "admin.provision_user",
+            actor_user_id=actor_uid,
+            target_id=UUID(user["id"]),
+            detail={**audit.request_detail(request), "username": username, "label": label},
+        )
+        return JSONResponse({
+            "user": user,
+            "principalId": user["id"],
+            "token": token,
+        }, status_code=201)
+
     @mcp.custom_route("/health", methods=["GET"])
     async def health(_request: Request):
         return JSONResponse({"status": "ok"})

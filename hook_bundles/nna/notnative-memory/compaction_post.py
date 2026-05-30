@@ -74,7 +74,10 @@ MCP_URL = os.environ.get("MEMORY_MCP_URL", "http://127.0.0.1:9500/mcp")
 MAX_TOKENS = int(os.environ.get("MEMORY_COMPACT_POST_MAX_TOKENS", "600"))
 TIMEOUT_SECONDS = 5
 
-_MCP_TOKEN = os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+_MCP_TOKEN = (
+    os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+    or os.environ.get("NNM_AUTH_TOKEN", "").strip()
+)
 _HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",

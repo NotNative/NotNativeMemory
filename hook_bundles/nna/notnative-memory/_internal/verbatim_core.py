@@ -179,7 +179,10 @@ def _mcp_headers() -> Dict[str, str]:
         "Content-Type": "application/json",
         "Accept": "application/json",
     }
-    token = os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+    token = (
+        os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+        or os.environ.get("NNM_AUTH_TOKEN", "").strip()
+    )
     if token:
         headers["Authorization"] = f"Bearer {token}"
     return headers

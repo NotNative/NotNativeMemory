@@ -39,7 +39,10 @@ TIMEOUT_SECONDS = 5
 # Auth: set MEMORY_MCP_TOKEN in hooks.env to send Authorization: Bearer.
 # Blank token relies on the server-side localhost bypass. See the hooks
 # README for the two supported configurations.
-_MCP_TOKEN = os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+_MCP_TOKEN = (
+    os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+    or os.environ.get("NNM_AUTH_TOKEN", "").strip()
+)
 _HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",

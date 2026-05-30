@@ -161,7 +161,10 @@ MAX_QUERY_CHARS = 500
 # server-side localhost bypass (MEMORY_AUTH_LOCALHOST_BYPASS=1 +
 # MEMORY_AUTH_LOCALHOST_USER=<name> in the server's .env). Blank
 # token means no Authorization header — relies on the bypass.
-_MCP_TOKEN = os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+_MCP_TOKEN = (
+    os.environ.get("MEMORY_MCP_TOKEN", "").strip()
+    or os.environ.get("NNM_AUTH_TOKEN", "").strip()
+)
 _HEADERS = {
     "Content-Type": "application/json",
     "Accept": "application/json",

@@ -175,7 +175,7 @@ def resolve_config_from_env(env: Optional[dict] = None) -> AnalysisConfig:
         model = None
 
     mcp_url = e.get("MEMORY_MCP_URL", "http://127.0.0.1:9500/mcp")
-    mcp_token = e.get("MEMORY_MCP_TOKEN", "").strip()
+    mcp_token = e.get("MEMORY_MCP_TOKEN", "").strip() or e.get("NNM_AUTH_TOKEN", "").strip()
     mcp_headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",

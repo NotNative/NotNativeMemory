@@ -381,6 +381,33 @@ async def create_user(username: str, password: str) -> Dict[str, Any]:
     return _row_to_user(row)
 
 
+async def ensure_user(username: str) -> Dict[str, Any]:
+    """
+    Idempotently create or return a user for service-to-service
+    provisioning flows.
+
+    NNO uses this to create hidden NNM principals for its own users.
+    The generated password is intentionally random and not returned;
+    the caller receives a Bearer token minted separately via
+    create_token().
+    """
+    import asyncpg as _asyncpg
+    import secrets as _secrets
+
+    existing = await get_user_by_username(username)
+    if existing is not None:
+        return _row_to_user(existing)
+
+    password = _secrets.token_urlsafe(48)
+    try:
+        return await create_user(username, password)
+    except _asyncpg.UniqueViolationError:
+        existing = await get_user_by_username(username)
+        if existing is None:
+            raise
+        return _row_to_user(existing)
+
+
 async def get_user_by_username(username: str) -> Optional[Dict[str, Any]]:
     """
     Lookup a user by username. Returns dict INCLUDING password_hash
