@@ -87,11 +87,26 @@ function Configure-Agents($installPath, $mcpUrl) {
         }
     }
 
+    $codexInstalled = (Get-Command codex -ErrorAction SilentlyContinue) -or (Test-Path (Join-Path $env:USERPROFILE ".codex"))
+    if ($codexInstalled) {
+        Write-Step "Configuring Codex hooks..."
+        Invoke-Native python hook_bundles/codex/notnative-memory/merge_hooks.py "$installPath" "$mcpUrl"
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warn "Codex hook configuration failed. You can run this manually later:"
+            Write-Info "python hook_bundles/codex/notnative-memory/merge_hooks.py `"$installPath`" `"$mcpUrl`""
+        } else {
+            $configured += "codex"
+            Write-Info "hooks merged into ~/.codex/hooks.json"
+            Write-Info "Codex may ask you to trust these hooks with /hooks before they run."
+        }
+    }
+
     if ($configured.Count -eq 0) {
-        Write-Info "No supported agent CLIs detected (claude, nna)."
+        Write-Info "No supported agent CLIs detected (claude, nna, codex)."
         Write-Info "To configure manually after installing one:"
         Write-Info "  python hook_bundles/claude/notnative-memory/merge_hooks.py `"$installPath`" `"$mcpUrl`"  # Claude Code"
         Write-Info "  python hook_bundles/nna/notnative-memory/merge_hooks.py `"$installPath`" `"$mcpUrl`"     # NotNativeAgent"
+        Write-Info "  python hook_bundles/codex/notnative-memory/merge_hooks.py `"$installPath`" `"$mcpUrl`"   # Codex"
     }
 
     return ,$configured
@@ -1091,6 +1106,7 @@ if ($configuredAgents -and $configuredAgents.Count -gt 0) {
     foreach ($a in $configuredAgents) {
         if ($a -eq "claude") { $agentLabels += "Claude Code (~/.claude/settings.json)" }
         elseif ($a -eq "nna") { $agentLabels += "NotNativeAgent (~/.nna/config.json)" }
+        elseif ($a -eq "codex") { $agentLabels += "Codex (~/.codex/hooks.json)" }
     }
     Write-Step "Hooks: configured for $($agentLabels -join ', ')"
 } else {

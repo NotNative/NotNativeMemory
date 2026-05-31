@@ -7,7 +7,7 @@
 - **Multi-user by design** — open self-registration, Bearer-token auth, per-user isolation enforced at the database (Postgres RLS). Every user sees only their own memories, including their own global and domain scopes.
 - **Facts with history** — record assertions as triples with automatic supersession and `as_of` time-travel, alongside the free-form memory store.
 - **Hybrid retrieval** — opt-in BM25 + vector fusion via Reciprocal Rank Fusion. Surfaces exact-keyword matches the embedder alone misses (names, acronyms, identifiers).
-- **Ambient via hooks** — shipped hook bundles for **Claude Code** and **NotNativeAgent** inject relevant memory before prompts, tool calls, and compaction. The model doesn't have to remember to search.
+- **Ambient via hooks** — shipped hook bundles for **Claude Code**, **NotNativeAgent**, and **Codex** inject relevant memory and capture useful lifecycle telemetry. The model doesn't have to remember to search.
 - **Web GUI** — curate memories, facts, and API tokens in a browser; same auth as the MCP.
 
 Works with any [MCP](https://modelcontextprotocol.io)-compatible client (Claude Code, LM Studio, Cline, Continue.dev, Cursor custom modes, self-hosted agents). Tested extensively with Claude Code and LM Studio.
@@ -52,7 +52,7 @@ Depending on the mode, the installer also:
 - Downloads the embedding model (gte-large-en-v1.5, ~870MB on disk in fp16, ~1GB resident, CPU-only).
 - Applies the schema to your remote DB if server mode.
 - Runs a self-test against the live server.
-- Detects `claude` and/or `nna` on your PATH and auto-wires the hook bundle and MCP registration for whichever is present.
+- Detects `claude`, `nna`, and/or Codex on your machine and auto-wires the matching hook bundle for whichever is present.
 - Emits `SETUP_COMPLETE.md` with the commands and paths for your specific install.
 
 ## Managing the Server
@@ -152,7 +152,7 @@ management, and client setup: [`docs/api-auth.md`](docs/api-auth.md).
 
 ## Configure Your AI Tools
 
-**In most cases you don't need to.** The installer detects `claude` and `nna` on your PATH and wires both the hook bundle (under `~/.claude/` and/or `~/.nna/`) and the MCP server registration automatically. Skip ahead to [Add Memory Instructions to Your Agent](#add-memory-instructions-to-your-agent) if you used the installer.
+**In most cases you don't need to.** The installer detects `claude`, `nna`, and Codex on your machine and wires the matching hook bundle automatically. Skip ahead to [Add Memory Instructions to Your Agent](#add-memory-instructions-to-your-agent) if you used the installer.
 
 If you installed an agent CLI after running the installer, rerun it — it's idempotent, and the detection step will pick up the new CLI without reconfiguring existing ones.
 
@@ -195,7 +195,7 @@ Paste [`docs/memory-persona.md`](docs/memory-persona.md) into the system prompt 
 
 ## Optional: Ambient Memory via Hooks
 
-The repo ships hook bundles for two agent platforms that make memory ambient — the model doesn't have to remember to search, relevant context just shows up. Three hooks per platform, each firing at a different moment in the turn:
+The repo ships hook bundles for supported agent platforms that make memory ambient — the model doesn't have to remember to search, relevant context just shows up. Each bundle is tailored to that agent's hook contract:
 
 - **UserPromptSubmit** — fires when the user sends a message, searches memory using the prompt text, and injects matches *before* the model reasons about the request. Catches decisions at the moment they're framed.
 - **PreToolUse** — fires before file edits or shell commands, searches with tool-specific context (file extension, command keywords), and injects action-specific gotchas.
@@ -210,9 +210,19 @@ Located at `hook_bundles/claude/notnative-memory/`. Claude Code's install script
 Tool matcher: `Edit|Write|Bash`.
 
 
+### Codex
+
+Located at `hook_bundles/codex/notnative-memory/`. The installer deploys Codex-specific hooks under `~/.codex/hooks/notnative-memory/` and merges registrations into `~/.codex/hooks.json`. Codex may ask you to trust the hooks with `/hooks` before they run.
+
+The first Codex bundle is intentionally conservative: `UserPromptSubmit` injects memory and captures user prompts, `SessionStart` provides a small working set, and `PostToolUse` / `Stop` passively capture telemetry. It does not try to govern Codex tool approval.
+
+### NotNativeAgent
+
+Located at `hook_bundles/nna/notnative-memory/`. The installer deploys the bundle under `~/.nna/hooks/notnative-memory/` where NNA discovers it through its native manifest.
+
 ### Other platforms
 
-The hook logic (query building, MCP search over HTTP, response formatting) is platform-agnostic. Porting to a platform with an equivalent hook system is mostly adjusting the stdin payload field names and the config file shape.
+The hook intent is shared, but hook shape is platform-specific. Porting to a platform with an equivalent hook system means writing a new adapter for that platform's stdin payload, output envelope, and install config.
 
 ## Multi-Machine Setup
 
@@ -436,6 +446,13 @@ hook_bundles/
         turn_analysis.py        - Stop hook (end-of-turn extraction)
         merge_hooks.py          - Idempotent installer for ~/.claude/settings.json
         hooks-config.json       - Hook registration snippet template
+    codex/notnative-memory/
+        README.md               - Codex-specific hook setup notes
+        session_start.py        - SessionStart hook (small working set)
+        user_prompt_submit.py   - UserPromptSubmit hook (context + prompt capture)
+        post_tool_use.py        - PostToolUse hook (tool telemetry capture)
+        stop.py                 - Stop hook (assistant response capture)
+        merge_hooks.py          - Idempotent installer for ~/.codex/hooks.json
     nna/notnative-memory/
         session_start.py        - session.start subscriber
         user_prompt_inject.py   - user.prompt.submit:pre subscriber

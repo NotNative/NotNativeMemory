@@ -42,10 +42,23 @@ configure_agents() {
         fi
     fi
 
+    if command -v codex &> /dev/null || [ -d "$HOME/.codex" ]; then
+        step "Configuring Codex hooks..."
+        if python3 hook_bundles/codex/notnative-memory/merge_hooks.py "$install_path" "$mcp_url"; then
+            CONFIGURED_AGENTS+=("codex")
+            info "Codex hooks merged into ~/.codex/hooks.json"
+            info "Codex may ask you to trust these hooks with /hooks before they run."
+        else
+            warn "Codex hook configuration failed. You can run this manually later:"
+            info "python3 hook_bundles/codex/notnative-memory/merge_hooks.py \"$install_path\" \"$mcp_url\""
+        fi
+    fi
+
     if [ ${#CONFIGURED_AGENTS[@]} -eq 0 ]; then
-        info "No supported agent CLIs detected (claude)."
+        info "No supported agent CLIs detected (claude, codex)."
         info "To configure manually after installing one:"
         info "  python3 hook_bundles/claude/notnative-memory/merge_hooks.py \"$install_path\" \"$mcp_url\"  # Claude Code"
+        info "  python3 hook_bundles/codex/notnative-memory/merge_hooks.py \"$install_path\" \"$mcp_url\"   # Codex"
     fi
 }
 
@@ -1013,6 +1026,7 @@ if [ ${#CONFIGURED_AGENTS[@]} -gt 0 ]; then
     for a in "${CONFIGURED_AGENTS[@]}"; do
         case "$a" in
             claude) label="Claude Code (~/.claude/settings.json)" ;;
+            codex)  label="Codex (~/.codex/hooks.json)" ;;
             *)      label="$a" ;;
         esac
         agent_summary="${agent_summary:+$agent_summary, }$label"
