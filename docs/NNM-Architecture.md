@@ -75,7 +75,7 @@ The two layers are deliberately separate tables:
 - `memory_search` rankings stay clean — only distilled rows surface, not transcript noise.
 - Retention is managed independently per layer (verbatim is TTL/archive-friendly; memories use the thermal model).
 
-Three MCP tools own the verbatim path: `verbatim_capture` (append, idempotent on `(session_id, chunk_index)`), `verbatim_search` (RRF hybrid by default, with `session_id`/`topic`/`mission_id`/`is_error`/`source_events`/`outcomes` filters), and `verbatim_stamp_outcome` (mark a session's chunks `success` / `failure` / `aborted` / `unknown` after the fact, used by the dreaming loop's curator and skill-induction passes).
+Five MCP tools own the verbatim path: `verbatim_capture` (append, idempotent on `(session_id, chunk_index)`), `verbatim_search` (RRF hybrid by default, with `session_id`/`topic`/`mission_id`/`is_error`/`source_events`/`outcomes` filters), `verbatim_recent` (chronological recent-turn retrieval for low-signal prompt walk-back), `verbatim_stamp_outcome` (mark a session's chunks `success` / `failure` / `aborted` / `unknown` after the fact), and `verbatim_skill_candidates` (deterministic grouping of success-stamped `loaded_skills` evidence for skill-curation review).
 
 ### 3.3 Embeddings
 

@@ -34,6 +34,7 @@ Tools:
     verbatim_search    - Hybrid vector+text search over verbatim chunks
     verbatim_recent    - Latest session chunks for low-signal prompt context
     verbatim_stamp_outcome - Mark a session's chunks success/failure/...
+    verbatim_skill_candidates - Summarize successful skill evidence
 """
 
 import logging
@@ -1764,6 +1765,59 @@ async def verbatim_stamp_outcome(
         )
 
     return {"stamped": updated}
+
+
+@mcp.tool()
+@instrumented("verbatim_skill_candidates")
+async def verbatim_skill_candidates(
+    limit: int = 20,
+    min_successes: int = 2,
+    project: Optional[str] = None,
+) -> dict:
+    """
+    Summarize successful skill evidence from verbatim transcript chunks.
+
+    The tool groups captured `loaded_skills` metadata by skill name and
+    returns counts plus topics/mission types. It is meant for an NNA/NNO
+    skill curator to decide what guidance or workflow file deserves human
+    review. It does not write or modify skills.
+
+    Args:
+        limit: Max candidate rows (1-100, default 20).
+        min_successes: Minimum success-stamped chunks required for a skill.
+        project: Project scope. Auto-detected if omitted.
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+    if min_successes < 1:
+        min_successes = 1
+
+    from lib.db import get_or_create_project
+    from lib.verbatim_store import skill_candidates as _skill_candidates
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"candidates": [], "count": 0},
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        candidates = await _skill_candidates(
+            project_id=project_id,
+            owner_user_id=owner,
+            limit=limit,
+            min_successes=min_successes,
+        )
+    except Exception as exc:
+        return _tool_error(
+            "verbatim_skill_candidates", exc,
+            {"candidates": [], "count": 0},
+        )
+
+    return {"candidates": candidates, "count": len(candidates)}
 
 
 @mcp.tool()

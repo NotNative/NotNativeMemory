@@ -522,6 +522,72 @@ async def stamp_outcome(
         return 0
 
 
+# -- Skill candidate summaries ----------------------------------------------
+
+async def skill_candidates(
+    *,
+    project_id: UUID,
+    owner_user_id: UUID,
+    limit: int = 20,
+    min_successes: int = 2,
+) -> List[Dict[str, Any]]:
+    """
+    Summarize loaded skill names from verbatim chunks so a curator can
+    decide which workflows have enough successful evidence to review.
+
+    This is intentionally deterministic. It does not write skills and does
+    not call an LLM; it only groups captured transcript metadata by skill.
+    """
+    if limit < 1:
+        limit = 1
+    if limit > 100:
+        limit = 100
+    if min_successes < 1:
+        min_successes = 1
+
+    from lib import rls
+    from lib.db import get_pool
+
+    pool = await get_pool()
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(
+            """
+            SELECT skill,
+                   COUNT(*) FILTER (WHERE v.outcome = 'success') AS success_count,
+                   COUNT(*) FILTER (WHERE v.outcome = 'failure') AS failure_count,
+                   COUNT(*) AS total_count,
+                   MAX(v.ts) AS last_seen,
+                   ARRAY_REMOVE(ARRAY_AGG(DISTINCT v.topic), NULL) AS topics,
+                   ARRAY_REMOVE(ARRAY_AGG(DISTINCT v.mission_type), NULL) AS mission_types
+              FROM verbatim_chunks v
+              CROSS JOIN LATERAL UNNEST(v.loaded_skills) AS skill
+             WHERE v.project_id = $1
+               AND v.owner_user_id = $2
+               AND array_length(v.loaded_skills, 1) IS NOT NULL
+             GROUP BY skill
+            HAVING COUNT(*) FILTER (WHERE v.outcome = 'success') >= $3
+             ORDER BY success_count DESC,
+                      failure_count ASC,
+                      last_seen DESC,
+                      skill ASC
+             LIMIT $4
+            """,
+            project_id, owner_user_id, min_successes, limit,
+        )
+    return [
+        {
+            "skill": r["skill"],
+            "success_count": int(r["success_count"]),
+            "failure_count": int(r["failure_count"]),
+            "total_count": int(r["total_count"]),
+            "last_seen": r["last_seen"].isoformat(),
+            "topics": list(r["topics"] or []),
+            "mission_types": list(r["mission_types"] or []),
+        }
+        for r in rows
+    ]
+
+
 # -- Topic listing (v2 §3 optional helper) ----------------------------------
 
 async def list_topics(

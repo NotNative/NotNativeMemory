@@ -266,7 +266,7 @@ You should see the stored memory come back with a similarity score.
 
 ## Available Tools
 
-Fourteen MCP tools grouped by purpose.
+MCP tools grouped by purpose.
 
 ### Memory
 
@@ -300,6 +300,16 @@ RAG content is deduplicated per-user by sha256 of the content. Re-ingesting iden
 | Tool | Purpose |
 |------|---------|
 | `recall` | Unified retrieval across memories and RAG documents, fused via Reciprocal Rank Fusion. Every returned row carries a `kind` field (`"memory"` or `"doc"`) so downstream code can route. Default `hybrid=True` since fusion is where the BM25 side pays off most |
+
+### Verbatim
+
+| Tool | Purpose |
+|------|---------|
+| `verbatim_capture` | Append raw transcript/tool chunks from agent hooks into the append-only verbatim layer |
+| `verbatim_search` | Search verbatim chunks by semantic or hybrid vector/text retrieval for audit and curator grounding |
+| `verbatim_recent` | Retrieve recent chunks from one session so low-signal prompts like "please proceed" can recover the active topic |
+| `verbatim_stamp_outcome` | Stamp a session as `success`, `failure`, `aborted`, or `unknown` for later curation |
+| `verbatim_skill_candidates` | Summarize success-stamped `loaded_skills` evidence so skill curators can decide what workflow guidance to refine |
 
 ## Memory Scoping
 

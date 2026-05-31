@@ -259,6 +259,21 @@ async def run() -> int:
     check("first stamp updates the unstamped chunks in session_a",
           stamped == 2)
 
+    skill_candidates = await verbatim_store.skill_candidates(
+        project_id=project_id,
+        owner_user_id=alice_uid,
+        min_successes=1,
+        limit=10,
+    )
+    aloha_candidate = next(
+        (r for r in skill_candidates if r["skill"] == "Aloha_GetMenuItem"),
+        None,
+    )
+    check("skill_candidates surfaces success-stamped loaded skills",
+          aloha_candidate is not None
+          and aloha_candidate["success_count"] == 1
+          and "aloha-menu" in aloha_candidate["topics"])
+
     second_stamp = await verbatim_store.stamp_outcome(
         session_id=session_a,
         outcome="failure",
