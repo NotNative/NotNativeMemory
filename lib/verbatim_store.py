@@ -175,6 +175,56 @@ def _build_verbatim_filters(
     return filters, params, idx
 
 
+def _build_recent_filters(
+    owner_user_id: UUID,
+    project_ids: List[UUID],
+    *,
+    session_id: str,
+    topic: Optional[str],
+    mission_id: Optional[str],
+    is_error: Optional[bool],
+    source_events: Optional[List[str]],
+    outcomes: Optional[List[str]],
+) -> Tuple[List[str], List[Any], int]:
+    """
+    Build WHERE fragments for non-semantic recent reads.
+
+    Unlike `_build_verbatim_filters`, this helper does not reserve vector or
+    text-search parameter slots. Recent reads are chronological only, so the
+    bind positions can stay compact and obvious.
+    """
+    filters: List[str] = [
+        "v.project_id = ANY($1)",
+        "v.owner_user_id = $2",
+        "v.session_id = $3",
+    ]
+    params: List[Any] = [project_ids, owner_user_id, session_id]
+    idx = 4
+
+    if topic is not None:
+        filters.append(f"v.topic = ${idx}")
+        params.append(topic)
+        idx += 1
+    if mission_id is not None:
+        filters.append(f"v.mission_id = ${idx}")
+        params.append(mission_id)
+        idx += 1
+    if is_error is not None:
+        filters.append(f"v.is_error = ${idx}")
+        params.append(is_error)
+        idx += 1
+    if source_events:
+        filters.append(f"v.source_event = ANY(${idx})")
+        params.append(list(source_events))
+        idx += 1
+    if outcomes:
+        filters.append(f"v.outcome = ANY(${idx})")
+        params.append(list(outcomes))
+        idx += 1
+
+    return filters, params, idx
+
+
 def _format_chunk_row(row: Any) -> Dict[str, Any]:
     out: Dict[str, Any] = {
         "id": str(row["id"]),
@@ -350,6 +400,73 @@ async def search_chunks(
                       v.id ASC
              LIMIT ${limit_idx}
         """
+
+    async with rls.app_conn(pool, owner_user_id) as conn:
+        rows = await conn.fetch(sql, *params)
+    return [_format_chunk_row(r) for r in rows]
+
+
+async def recent_chunks(
+    *,
+    project_id: UUID,
+    owner_user_id: UUID,
+    session_id: str,
+    topic: Optional[str] = None,
+    mission_id: Optional[str] = None,
+    is_error: Optional[bool] = None,
+    source_events: Optional[List[str]] = None,
+    outcomes: Optional[List[str]] = None,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """
+    Return the most recent verbatim chunks for a session, without semantic
+    search. This is the chronological companion to `search_chunks`: callers use
+    it when the latest prompt is low-signal ("proceed", "yes", "continue") and
+    need the last few turns to build a useful memory-search query.
+
+    Results are selected newest-first for efficiency, then returned oldest-first
+    so prompt builders can read them in conversational order.
+    """
+    if not session_id:
+        raise ValueError("session_id is required")
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+
+    from lib import rls
+    from lib.db import get_pool
+
+    pool = await get_pool()
+
+    filters, params, idx = _build_recent_filters(
+        owner_user_id, [project_id],
+        session_id=session_id,
+        topic=topic,
+        mission_id=mission_id,
+        is_error=is_error,
+        source_events=source_events,
+        outcomes=outcomes,
+    )
+    params.append(limit)
+    limit_idx = idx
+    filter_sql = " AND ".join(filters)
+
+    sql = f"""
+        WITH latest AS (
+            SELECT v.id, v.content, v.session_id, v.chunk_index,
+                   v.source_event, v.topic, v.agent, v.is_error,
+                   v.loaded_skills, v.mission_id, v.mission_type,
+                   v.outcome, v.ts
+              FROM verbatim_chunks v
+             WHERE {filter_sql}
+             ORDER BY v.ts DESC, v.chunk_index DESC, v.id DESC
+             LIMIT ${limit_idx}
+        )
+        SELECT *
+          FROM latest
+         ORDER BY ts ASC, chunk_index ASC, id ASC
+    """
 
     async with rls.app_conn(pool, owner_user_id) as conn:
         rows = await conn.fetch(sql, *params)

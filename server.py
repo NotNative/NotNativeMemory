@@ -32,6 +32,7 @@ Tools:
     recall             - Unified retrieval across memories + RAG docs
     verbatim_capture   - Append a verbatim transcript chunk (NNA hook)
     verbatim_search    - Hybrid vector+text search over verbatim chunks
+    verbatim_recent    - Latest session chunks for low-signal prompt context
     verbatim_stamp_outcome - Mark a session's chunks success/failure/...
 """
 
@@ -1638,6 +1639,76 @@ async def verbatim_search(
     except Exception as exc:
         return _tool_error(
             "verbatim_search", exc, {"results": [], "count": 0},
+        )
+
+    return {"results": results, "count": len(results)}
+
+
+@mcp.tool()
+@instrumented("verbatim_recent")
+async def verbatim_recent(
+    session_id: str,
+    limit: int = 20,
+    project: Optional[str] = None,
+    topic: Optional[str] = None,
+    mission_id: Optional[str] = None,
+    is_error: Optional[bool] = None,
+    source_events: Optional[list[str]] = None,
+    outcomes: Optional[list[str]] = None,
+) -> dict:
+    """
+    Retrieve the latest verbatim transcript chunks for one session in
+    chronological order.
+
+    This is not semantic search. Use it when the latest prompt is too
+    low-signal for search by itself ("yes", "continue", "please proceed") and
+    the caller needs the recent turn context to build a useful memory query.
+
+    Args:
+        session_id: Session whose recent chunks should be returned. Required.
+        limit: Max chunks (1-200, default 20).
+        project: Project scope. Auto-detected if omitted.
+        topic: Optional topic filter.
+        mission_id: Optional NNO mission filter.
+        is_error: Filter to error/non-error chunks.
+        source_events: Restrict to specific source events
+            (e.g. ["user.prompt.submit", "turn.post", "tool.call.post"]).
+        outcomes: Restrict to specific outcome stamps.
+    """
+    if not session_id:
+        return {"error": "session_id is required", "results": [], "count": 0}
+    if limit < 1:
+        limit = 1
+    if limit > 200:
+        limit = 200
+
+    from lib.db import get_or_create_project
+    from lib.verbatim_store import recent_chunks
+
+    owner, project_dir, err = _tool_auth_and_project(
+        project, {"results": [], "count": 0},
+    )
+    if err:
+        return err
+
+    try:
+        project_id = await get_or_create_project(project_dir, owner)
+        results = await recent_chunks(
+            project_id=project_id,
+            owner_user_id=owner,
+            session_id=session_id,
+            topic=topic,
+            mission_id=mission_id,
+            is_error=is_error,
+            source_events=source_events,
+            outcomes=outcomes,
+            limit=limit,
+        )
+    except ValueError as exc:
+        return {"error": str(exc), "results": [], "count": 0}
+    except Exception as exc:
+        return _tool_error(
+            "verbatim_recent", exc, {"results": [], "count": 0},
         )
 
     return {"results": results, "count": len(results)}

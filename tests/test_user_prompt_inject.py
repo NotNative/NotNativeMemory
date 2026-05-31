@@ -9,8 +9,8 @@ Covers:
 - Main flow: walk-back uses prior turn; falls back to skip when no transcript
 - Class-aware framing of injected memories (Fix #3)
 
-Both bundle copies (claude + nna) implement identical walk-back logic;
-this suite exercises the claude bundle copy as the canonical source.
+This suite exercises the NNA bundle copy because NNA is the primary target
+for deterministic recent-turn context injection.
 """
 
 import io
@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest import mock
 
 _REPO_ROOT = Path(__file__).parent.parent
-sys.path.insert(0, str(_REPO_ROOT / "hook_bundles" / "claude" / "notnative-memory"))
+sys.path.insert(0, str(_REPO_ROOT / "hook_bundles" / "nna" / "notnative-memory"))
 
 import user_prompt_inject as inject  # noqa: E402
 
@@ -42,7 +42,7 @@ def test_should_walk_back_affirmative_set_long_enough():
     """Longer affirmatives like 'please proceed' must still trigger walk-back
     even though they exceed the length floor. The whole point of the set is
     to catch the cases where length alone misses the signal."""
-    for prompt in ["proceed", "go ahead", "keep going", "sounds good"]:
+    for prompt in ["proceed", "go ahead", "keep going", "sounds good", "sweet"]:
         assert inject._should_walk_back(prompt), (
             f"{prompt!r} should match the affirmative set"
         )
@@ -71,6 +71,13 @@ def test_should_walk_back_long_non_affirmative_no_trigger():
         "Yes, but also tell me about the bash escape rule."
     )
     print("[OK] _should_walk_back does not match prompts that merely contain 'yes'")
+
+
+def test_should_walk_back_pronoun_followup():
+    """Pronoun-only follow-ups have to resolve against recent turn context."""
+    for prompt in ["this", "that one", "the latter"]:
+        assert inject._should_walk_back(prompt), f"{prompt!r} should walk back"
+    print("[OK] _should_walk_back catches pronoun-only follow-ups")
 
 
 # -- Content stringification ---------------------------------------------
@@ -195,13 +202,17 @@ def test_extract_prior_assistant_tolerates_malformed_lines():
 
 # -- main() flow ----------------------------------------------------------
 
-def _run_main(hook_input, search_results=None):
+def _run_main(hook_input, search_results=None, recent_chunks=None, fact_results=None):
     """Run inject.main() with mocked stdin/stdout and mocked _search_memories.
 
     Returns (exit_code, captured_stdout, captured_query).
     """
     if search_results is None:
         search_results = []
+    if recent_chunks is None:
+        recent_chunks = []
+    if fact_results is None:
+        fact_results = []
 
     captured = {"query": None}
 
@@ -220,7 +231,9 @@ def _run_main(hook_input, search_results=None):
     with mock.patch.object(inject.sys, "stdin", stdin), \
             mock.patch.object(inject.sys, "stdout", stdout), \
             mock.patch.object(inject.sys, "exit", side_effect=fake_exit), \
+            mock.patch.object(inject, "_fetch_recent_verbatim", return_value=recent_chunks), \
             mock.patch.object(inject, "_search_memories", side_effect=fake_search), \
+            mock.patch.object(inject, "_query_facts", return_value=fact_results), \
             mock.patch.object(inject, "_log_execution"):
         try:
             inject.main()
@@ -254,6 +267,38 @@ def test_main_walks_back_when_prompt_is_affirmative():
         "walk-back query should preserve the user's affirmative tail"
     )
     print("[OK] main walks back to prior assistant turn when prompt is affirmative")
+
+
+def test_main_prefers_recent_verbatim_when_available():
+    """Low-signal prompts should use NNM verbatim_recent before local transcript
+    fallback so memory_search gets the last few turns, not only one assistant
+    response."""
+    hook_input = {
+        "prompt": "please proceed",
+        "cwd": "/some/cwd",
+        "session_id": "sess-123",
+        "transcript_path": "/unused.jsonl",
+    }
+    recent = [
+        {
+            "content": "User asked about Context Garbage Collection.",
+            "source_event": "user.prompt.submit",
+            "topic": "memory",
+        },
+        {
+            "content": "Assistant proposed verbatim_recent and low-signal detection.",
+            "source_event": "turn.post",
+            "topic": "memory",
+        },
+    ]
+
+    _, _, query = _run_main(hook_input, search_results=[], recent_chunks=recent)
+
+    assert query is not None
+    assert "Context Garbage Collection" in query
+    assert "verbatim_recent" in query
+    assert "please proceed" in query
+    print("[OK] main prefers verbatim_recent context for low-signal prompts")
 
 
 def test_main_walks_back_when_prompt_is_short():
@@ -596,6 +641,7 @@ if __name__ == "__main__":
         test_should_walk_back_affirmative_case_insensitive,
         test_should_walk_back_substantive_prompt_does_not_trigger,
         test_should_walk_back_long_non_affirmative_no_trigger,
+        test_should_walk_back_pronoun_followup,
         test_stringify_content_plain_string,
         test_stringify_content_text_blocks,
         test_stringify_content_empty_or_invalid,
@@ -607,6 +653,7 @@ if __name__ == "__main__":
         test_extract_prior_assistant_missing_path_returns_empty,
         test_extract_prior_assistant_tolerates_malformed_lines,
         test_main_walks_back_when_prompt_is_affirmative,
+        test_main_prefers_recent_verbatim_when_available,
         test_main_walks_back_when_prompt_is_short,
         test_main_skips_when_walk_back_has_no_transcript,
         test_main_substantive_prompt_does_not_walk_back,

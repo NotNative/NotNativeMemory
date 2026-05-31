@@ -221,6 +221,35 @@ async def run() -> int:
           all(r["source_event"] == "tool.call.post" for r in by_source)
           and len(by_source) >= 1)
 
+    recent_a = await verbatim_store.recent_chunks(
+        project_id=project_id,
+        owner_user_id=alice_uid,
+        session_id=session_a,
+        limit=2,
+    )
+    check("recent_chunks returns session chunks in conversational order",
+          [r["chunk_index"] for r in recent_a] == [0, 1])
+
+    recent_one = await verbatim_store.recent_chunks(
+        project_id=project_id,
+        owner_user_id=alice_uid,
+        session_id=session_a,
+        limit=1,
+    )
+    check("recent_chunks limit selects the latest chunk",
+          len(recent_one) == 1 and recent_one[0]["chunk_index"] == 1)
+
+    recent_source = await verbatim_store.recent_chunks(
+        project_id=project_id,
+        owner_user_id=alice_uid,
+        session_id=session_b,
+        source_events=["tool.call.post"],
+        limit=5,
+    )
+    check("recent_chunks supports source_events filters",
+          len(recent_source) == 1
+          and recent_source[0]["id"] == str(other_session_chunk_id))
+
     # 5. stamp_outcome.
     stamped = await verbatim_store.stamp_outcome(
         session_id=session_a,
