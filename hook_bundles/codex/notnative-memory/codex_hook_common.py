@@ -116,12 +116,25 @@ def read_payload() -> Dict[str, Any]:
 def write_additional_context(context: str, event_name: str) -> None:
     if not context:
         return
+    if os.environ.get("MEMORY_HOOK_OUTPUT_MODE", "").lower() == "plain":
+        print(context[:MAX_CONTEXT_CHARS])
+        return
     print(json.dumps({
         "hookSpecificOutput": {
             "hookEventName": event_name,
             "additionalContext": context[:MAX_CONTEXT_CHARS],
         },
     }))
+
+
+def diagnostic_context(event_name: str, message: str) -> None:
+    """Emit a tiny Codex-visible diagnostic when explicitly enabled."""
+    if os.environ.get("MEMORY_HOOK_DIAGNOSTIC", "").lower() not in {"1", "true", "yes"}:
+        return
+    write_additional_context(
+        f"NNM_CODEX_HOOK_TEST: {event_name} hook executed. {message}",
+        event_name,
+    )
 
 
 def mcp_url() -> str:

@@ -78,6 +78,17 @@ def _hooks_path() -> str:
 
 
 def _python_executable() -> str:
+    bundled = os.path.join(
+        _home(),
+        ".cache",
+        "codex-runtimes",
+        "codex-primary-runtime",
+        "dependencies",
+        "python",
+        "python.exe" if os.name == "nt" else "bin/python",
+    )
+    if os.path.exists(bundled):
+        return bundled
     return sys.executable or "python"
 
 
@@ -188,6 +199,7 @@ def _upsert_hooks(config: Dict, deploy_dir: str) -> int:
             "hooks": [{
                 "type": "command",
                 "command": command,
+                "commandWindows": command,
                 "timeout": desired["timeout"],
                 "statusMessage": desired["statusMessage"],
             }],

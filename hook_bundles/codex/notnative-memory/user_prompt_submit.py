@@ -8,6 +8,7 @@ context. Low-signal prompts use `verbatim_recent` to recover the current topic.
 from codex_hook_common import (  # noqa: E402
     build_recent_query,
     capture_content,
+    diagnostic_context,
     filter_relevant,
     format_memory_context,
     memory_facts,
@@ -28,6 +29,7 @@ def main() -> None:
     prompt = prompt_from(payload)
     project = project_from(payload)
     session_id = session_from(payload)
+    diagnostic_context("UserPromptSubmit", f"prompt_chars={len(prompt)} project={project}")
 
     if prompt:
         capture_content(
