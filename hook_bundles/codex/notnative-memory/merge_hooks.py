@@ -39,7 +39,6 @@ _DESIRED_HOOKS = [
     },
     {
         "event": "UserPromptSubmit",
-        "matcher": "",
         "script": "user_prompt_submit.py",
         "timeout": 60,
         "statusMessage": "Searching NNM memory",
@@ -53,7 +52,6 @@ _DESIRED_HOOKS = [
     },
     {
         "event": "Stop",
-        "matcher": "",
         "script": "stop.py",
         "timeout": 8,
         "statusMessage": "Capturing turn summary",
@@ -195,7 +193,6 @@ def _upsert_hooks(config: Dict, deploy_dir: str) -> int:
 
         command = _json_command(deploy_dir, desired["script"])
         group = {
-            "matcher": desired["matcher"],
             "hooks": [{
                 "type": "command",
                 "command": command,
@@ -204,6 +201,8 @@ def _upsert_hooks(config: Dict, deploy_dir: str) -> int:
                 "statusMessage": desired["statusMessage"],
             }],
         }
+        if "matcher" in desired:
+            group["matcher"] = desired["matcher"]
 
         found = False
         for i, existing in enumerate(groups):
