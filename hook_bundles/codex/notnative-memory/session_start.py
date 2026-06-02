@@ -6,6 +6,7 @@ additive and non-blocking: if NNM is unavailable, it exits silently.
 """
 
 from codex_hook_common import (  # noqa: E402
+    diagnostic_context,
     memory_context,
     project_from,
     read_payload,
@@ -15,7 +16,9 @@ from codex_hook_common import (  # noqa: E402
 
 def main() -> None:
     payload = read_payload()
-    context = memory_context(project_from(payload))
+    project = project_from(payload)
+    diagnostic_context("SessionStart", f"project={project}")
+    context = memory_context(project)
     if context:
         write_additional_context(context, "SessionStart")
 
