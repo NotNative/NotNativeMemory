@@ -213,6 +213,7 @@ def test_session_prompt_bad_example_includes_run_on_shape():
 def test_coerce_analysis_full_shape():
     parsed = {
         "state_assertions": [{"subject": "s", "predicate": "p", "object": "o", "confidence": 0.9}],
+        "relationship_assertions": [{"subject": "a", "predicate": "rel", "object": "b"}],
         "results": [{"type": "behavioral"}],
         "unfulfilledPromises": [{"promise": "x"}],
         "shouldNudge": True,
@@ -222,6 +223,7 @@ def test_coerce_analysis_full_shape():
     out = core.coerce_analysis(parsed)
     assert out == {
         "state_assertions": parsed["state_assertions"],
+        "relationship_assertions": parsed["relationship_assertions"],
         "results": parsed["results"],
         "summary": parsed["summary"],
     }
@@ -232,6 +234,7 @@ def test_coerce_analysis_missing_keys_default_safe():
     out = core.coerce_analysis({"results": []})
     assert out == {
         "state_assertions": [],
+        "relationship_assertions": [],
         "results": [],
         "summary": "",
     }
@@ -1638,16 +1641,37 @@ def test_build_analysis_prompt_includes_state_assertions_section():
     print("[OK] build_analysis_prompt includes the state_assertions section with subject/predicate/object")
 
 
+def test_build_analysis_prompt_includes_relationship_assertions_section():
+    prompt = core.build_analysis_prompt("u", "m")
+    assert '"relationship_assertions"' in prompt
+    assert '"subject"' in prompt
+    assert '"predicate"' in prompt
+    assert '"object"' in prompt
+    lower = prompt.lower()
+    assert "graph edges" in lower or "graph-candidate" in lower or "relationship" in lower
+    assert "do not duplicate state_assertions" in lower
+    assert "generic hub" in lower
+    print("[OK] build_analysis_prompt includes graph-candidate relationship extraction")
+
+
 def test_empty_analysis_includes_state_assertions():
     out = core.empty_analysis()
     assert out["state_assertions"] == []
+    assert out["relationship_assertions"] == []
     print("[OK] empty_analysis includes state_assertions field")
 
 
 def test_coerce_analysis_state_assertions_wrong_type_defaults_safe():
     out = core.coerce_analysis({"state_assertions": "not a list"})
     assert out["state_assertions"] == []
+    assert out["relationship_assertions"] == []
     print("[OK] coerce_analysis defends against non-list state_assertions")
+
+
+def test_coerce_analysis_relationship_assertions_wrong_type_defaults_safe():
+    out = core.coerce_analysis({"relationship_assertions": "not a list"})
+    assert out["relationship_assertions"] == []
+    print("[OK] coerce_analysis defends against non-list relationship_assertions")
 
 
 def test_memory_fact_add_call_posts_correct_jsonrpc_shape():
@@ -1758,6 +1782,56 @@ def test_store_fact_assertions_calls_fact_add_per_item():
     assert captured[0] == ("host", "port", "9500", 1.0)
     assert captured[1] == ("host", "model", "qwen3", 0.9)
     print("[OK] store_fact_assertions calls memory_fact_add_call per valid item")
+
+
+def test_store_relationship_assertions_writes_tagged_memory_edges():
+    cfg = _make_config("openai_compat")
+    captured = []
+
+    def _capture(content, tags, importance, source, config, memory_class=None):
+        captured.append((content, tags, importance, source, memory_class))
+        return True
+
+    items = [
+        {
+            "subject": "NNO",
+            "predicate": "uses",
+            "object": "NNA",
+            "confidence": "high",
+            "source": "user-stated",
+            "evidence": "NNO relies on NNA as its intelligence engine.",
+        }
+    ]
+    with mock.patch.object(core, "memory_store_call", side_effect=_capture):
+        stored = core.store_relationship_assertions(items, cfg)
+
+    assert stored == 1
+    content, tags, importance, source, memory_class = captured[0]
+    assert content == (
+        "Relationship: NNO --uses--> NNA. "
+        "Evidence: NNO relies on NNA as its intelligence engine."
+    )
+    assert tags == ["relationship", "graph-candidate", "rel:uses"]
+    assert importance == "high"
+    assert source == "user-stated"
+    assert memory_class == "memory"
+    print("[OK] store_relationship_assertions writes graph-candidate memories")
+
+
+def test_store_relationship_assertions_skips_malformed_items():
+    cfg = _make_config("openai_compat")
+    items = [
+        {"predicate": "uses", "object": "NNA"},
+        {"subject": "NNO", "object": "NNA"},
+        {"subject": "NNO", "predicate": "uses"},
+        {"subject": " ", "predicate": "uses", "object": "NNA"},
+        "not a dict",
+    ]
+    with mock.patch.object(core, "memory_store_call", return_value=True) as mem_mock:
+        stored = core.store_relationship_assertions(items, cfg)
+    assert stored == 0
+    mem_mock.assert_not_called()
+    print("[OK] store_relationship_assertions skips malformed items")
 
 
 def test_store_fact_assertions_coerces_confidence_strings():
@@ -2016,13 +2090,17 @@ if __name__ == "__main__":
         test_analyze_turn_skips_summary_when_empty,
         # core: fact-vs-memory extraction split (Fix #1)
         test_build_analysis_prompt_includes_state_assertions_section,
+        test_build_analysis_prompt_includes_relationship_assertions_section,
         test_empty_analysis_includes_state_assertions,
         test_coerce_analysis_state_assertions_wrong_type_defaults_safe,
+        test_coerce_analysis_relationship_assertions_wrong_type_defaults_safe,
         test_memory_fact_add_call_posts_correct_jsonrpc_shape,
         test_memory_fact_add_call_returns_false_on_inner_rejection,
         test_memory_fact_add_call_returns_false_on_network_error,
         test_store_fact_assertions_skips_malformed_items,
         test_store_fact_assertions_calls_fact_add_per_item,
+        test_store_relationship_assertions_writes_tagged_memory_edges,
+        test_store_relationship_assertions_skips_malformed_items,
         test_store_fact_assertions_coerces_confidence_strings,
         test_store_fact_assertions_caps_at_max_extractions,
         test_analyze_turn_routes_state_assertions_and_observations_separately,

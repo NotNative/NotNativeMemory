@@ -98,9 +98,14 @@ def test_empty_analysis_drops_promise_fields():
     assert "unfulfilledPromises" not in out
     assert "shouldNudge" not in out
     assert "nudgeText" not in out
-    # Slim canonical shape:
-    assert set(out.keys()) == {"state_assertions", "results", "summary"}
-    print("[OK] empty_analysis returns the slim post-rip shape")
+    # Canonical post-rip shape:
+    assert set(out.keys()) == {
+        "state_assertions",
+        "relationship_assertions",
+        "results",
+        "summary",
+    }
+    print("[OK] empty_analysis returns the canonical post-rip shape")
 
 
 def test_coerce_analysis_silently_drops_legacy_promise_fields():

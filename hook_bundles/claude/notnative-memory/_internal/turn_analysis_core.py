@@ -175,7 +175,7 @@ def resolve_config_from_env(env: Optional[dict] = None) -> AnalysisConfig:
         model = None
 
     mcp_url = e.get("MEMORY_MCP_URL", "http://127.0.0.1:9500/mcp")
-    mcp_token = e.get("MEMORY_MCP_TOKEN", "").strip()
+    mcp_token = e.get("MEMORY_MCP_TOKEN", "").strip() or e.get("NNM_AUTH_TOKEN", "").strip()
     mcp_headers = {
         "Content-Type": "application/json",
         "Accept": "application/json",
@@ -335,6 +335,23 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         '       double-quoted strings before PowerShell sees them." (run-on; same idea fits in one short sentence)\n'
         '    - "OK." (trivial)\n'
         "\n"
+        'SECTION 1C: Relationship assertions ("relationship_assertions")\n'
+        "\n"
+        '  Each item is { "subject": "...", "predicate": "...", "object": "...", "confidence": "high|medium|low", "source": "user-stated|tool-result|model-inferred", "evidence": "..." }\n'
+        "\n"
+        "  Use this section for durable semantic relationships that would be useful as graph edges:\n"
+        "    - component relationships (NNO uses NNA as its intelligence engine)\n"
+        "    - ownership/dependency relationships (gateway configuration lives in ~/.nna/gateway.json)\n"
+        "    - domain taxonomy relationships (restaurant operations includes inventory management)\n"
+        "    - evidence-backed source relationships (a rule is supported by a named file or tool result)\n"
+        "\n"
+        "  Relationship rules:\n"
+        "    1. Do NOT duplicate state_assertions. If it is mutable current state, use SECTION 1A only.\n"
+        "    2. Do NOT emit generic hub edges like project/has/topic, user/discussed/item, or session/about/x.\n"
+        "    3. Keep subject, predicate, and object short. Predicate should be a reusable relation name.\n"
+        "    4. Evidence is optional but valuable: a short phrase naming the source sentence, file, or tool result.\n"
+        "    5. Empty array is fine. Prefer zero relationships over noisy graph edges.\n"
+        "\n"
         # SECTION 2 (Promise tracking) was removed 2026-05-19: that
         # responsibility relocated to NNA proper as an agent-loop
         # accountability concern, not a memory-curation one. See NNA's
@@ -371,6 +388,9 @@ def build_analysis_prompt(user_prompt: str, model_response: str) -> str:
         "{\n"
         '  "state_assertions": [\n'
         '    { "subject": "...", "predicate": "...", "object": "...", "confidence": 0.9 }\n'
+        "  ],\n"
+        '  "relationship_assertions": [\n'
+        '    { "subject": "...", "predicate": "...", "object": "...", "confidence": "medium", "source": "model-inferred", "evidence": "..." }\n'
         "  ],\n"
         '  "results": [\n'
         '    { "fact": "...", "tags": ["..."], "confidence": "high", "source": "model-inferred" }\n'
@@ -576,6 +596,7 @@ def empty_analysis() -> dict:
     """
     return {
         "state_assertions": [],
+        "relationship_assertions": [],
         "results": [],
         "summary": "",
     }
@@ -593,6 +614,11 @@ def coerce_analysis(parsed: dict) -> dict:
         "state_assertions": (
             parsed.get("state_assertions", [])
             if isinstance(parsed.get("state_assertions"), list)
+            else []
+        ),
+        "relationship_assertions": (
+            parsed.get("relationship_assertions", [])
+            if isinstance(parsed.get("relationship_assertions"), list)
             else []
         ),
         "results": parsed.get("results", []) if isinstance(parsed.get("results"), list) else [],
@@ -1065,6 +1091,66 @@ def store_fact_assertions(items: list, config: AnalysisConfig) -> int:
     return stored
 
 
+def _relationship_tag(predicate: str) -> str:
+    cleaned = "".join(
+        ch.lower() if ch.isalnum() else "-"
+        for ch in predicate.strip()
+    ).strip("-")
+    while "--" in cleaned:
+        cleaned = cleaned.replace("--", "-")
+    return f"rel:{cleaned[:48]}" if cleaned else "rel:unknown"
+
+
+def _format_relationship_memory(
+    subject: str,
+    predicate: str,
+    obj: str,
+    evidence: str,
+) -> str:
+    content = f"Relationship: {subject} --{predicate}--> {obj}."
+    if evidence:
+        content += f" Evidence: {evidence}"
+    return content
+
+
+def store_relationship_assertions(items: list, config: AnalysisConfig) -> int:
+    """Store durable graph-candidate relationships as tagged memories.
+
+    Relationship assertions are intentionally separate from state_assertions:
+    they describe stable semantic edges useful for future graph retrieval, not
+    mutable current values that should supersede over time.
+    """
+    stored = 0
+    for item in items[: config.max_extractions]:
+        if not isinstance(item, dict):
+            continue
+        subject = item.get("subject")
+        predicate = item.get("predicate")
+        obj = item.get("object")
+        if not all(isinstance(v, str) and v.strip() for v in (subject, predicate, obj)):
+            continue
+        evidence = item.get("evidence", "")
+        if not isinstance(evidence, str):
+            evidence = ""
+        subject = subject.strip()
+        predicate = predicate.strip()
+        obj = obj.strip()
+        evidence = evidence.strip()
+
+        content = _format_relationship_memory(subject, predicate, obj, evidence)
+        tags = [
+            "relationship",
+            "graph-candidate",
+            _relationship_tag(predicate),
+        ]
+        importance = _confidence_to_importance(item.get("confidence", "medium"))
+        source = _coerce_source(item.get("source"))
+        if memory_store_call(content, tags, importance, source, config, "memory"):
+            stored += 1
+
+    return stored
+
+
 def _confidence_to_importance(confidence: str) -> str:
     """Map LLM-reported confidence to NNM memory importance.
 
@@ -1302,6 +1388,9 @@ def analyze_worker_run(
         analysis["results"], mission_id, assignment_id,
     )
     stored = store_extractions(tagged_results, conv_id, config)
+    relationships_stored = store_relationship_assertions(
+        analysis["relationship_assertions"], config,
+    )
 
     summary_stored = False
     if analysis.get("summary"):
@@ -1316,6 +1405,7 @@ def analyze_worker_run(
     return {
         "stored": stored,
         "facts_stored": 0,
+        "relationships_stored": relationships_stored,
         "nudge_stored": False,
         "summary_stored": summary_stored,
         "analysis": analysis,
@@ -1331,7 +1421,7 @@ def analyze_turn(
     """End-to-end: analyze the turn and persist extractions + summary.
 
     Returns a dict
-        { "stored": int, "facts_stored": int, "nudge_stored": bool,
+        { "stored": int, "facts_stored": int, "relationships_stored": int, "nudge_stored": bool,
           "summary_stored": bool, "analysis": dict }
     so adapters can log/metric the outcome without re-running.
 
@@ -1343,6 +1433,9 @@ def analyze_turn(
     conv_id = make_conversation_id(cwd)
     stored = store_extractions(analysis["results"], conv_id, config)
     facts_stored = store_fact_assertions(analysis["state_assertions"], config)
+    relationships_stored = store_relationship_assertions(
+        analysis["relationship_assertions"], config,
+    )
     summary_stored = False
     if analysis.get("summary"):
         summary_stored = store_conversation_summary(
@@ -1351,6 +1444,7 @@ def analyze_turn(
     return {
         "stored": stored,
         "facts_stored": facts_stored,
+        "relationships_stored": relationships_stored,
         "nudge_stored": False,
         "summary_stored": summary_stored,
         "analysis": analysis,
