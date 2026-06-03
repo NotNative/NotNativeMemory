@@ -56,6 +56,8 @@ def _make_fake_repo(tmp: str, manifest_override: dict | None = None) -> str:
         fh.write("")
     with open(os.path.join(internal_dir, "turn_analysis_core.py"), "w", encoding="utf-8") as fh:
         fh.write("# fake core\n")
+    with open(os.path.join(internal_dir, "verbatim_core.py"), "w", encoding="utf-8") as fh:
+        fh.write("# fake verbatim core\n")
 
     manifest = manifest_override if manifest_override is not None else {
         "name": "notnative-memory",
@@ -89,6 +91,7 @@ def test_install_copies_scripts_internal_and_manifest():
         for script in merge_hooks._SCRIPTS:
             assert os.path.isfile(os.path.join(target, script)), f"missing {script}"
         assert os.path.isfile(os.path.join(target, "_internal", "turn_analysis_core.py"))
+        assert os.path.isfile(os.path.join(target, "_internal", "verbatim_core.py"))
         assert os.path.isfile(os.path.join(target, "manifest.json"))
         assert os.path.isfile(os.path.join(target, "hooks.env"))
         assert os.path.isfile(os.path.join(target, "VERSION"))
@@ -156,6 +159,24 @@ def test_real_repo_manifest_has_reasoning_safe_turn_analysis_timeout():
             f"subprocess before the analyzer can log."
         )
     print("[OK] committed NNA manifest has reasoning-safe turn_analysis timeout (>= 60000ms)")
+
+
+def test_real_repo_manifest_has_generous_verbatim_timeout():
+    real_manifest = _BUNDLE_DIR / "manifest.json"
+    with open(real_manifest, "r", encoding="utf-8") as fh:
+        manifest = json.load(fh)
+    verbatim_subs = [
+        sub for sub in manifest["subscriptions"]
+        if "verbatim_capture.py" in sub.get("command", "")
+    ]
+    assert verbatim_subs, "manifest must subscribe verbatim_capture.py"
+    for sub in verbatim_subs:
+        assert sub["timeout_ms"] >= 20000, (
+            f"verbatim_capture timeout_ms must be >= 20000 (got {sub['timeout_ms']}). "
+            "First-use embedding/model warmup can exceed the old 8s budget and "
+            "make the MCP client disconnect while NNM still stores the chunk."
+        )
+    print("[OK] committed NNA manifest has generous verbatim_capture timeout (>= 20000ms)")
 
 
 def test_install_preserves_existing_hooks_env_on_rerun():
@@ -259,6 +280,7 @@ if __name__ == "__main__":
     test_install_copies_scripts_internal_and_manifest()
     test_install_uses_manifest_from_bundle_not_hardcoded()
     test_real_repo_manifest_has_reasoning_safe_turn_analysis_timeout()
+    test_real_repo_manifest_has_generous_verbatim_timeout()
     test_install_preserves_existing_hooks_env_on_rerun()
     test_install_overwrites_scripts_and_manifest_on_rerun()
     test_install_writes_version_marker()

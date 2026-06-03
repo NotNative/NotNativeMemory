@@ -56,21 +56,21 @@
       "phase": "pre",
       "command": "python verbatim_capture.py",
       "blocking": false,
-      "timeout_ms": 8000
+      "timeout_ms": 30000
     },
     {
       "event": "turn",
       "phase": "post",
       "command": "python verbatim_capture.py",
       "blocking": false,
-      "timeout_ms": 8000
+      "timeout_ms": 30000
     },
     {
       "event": "tool.call",
       "phase": "post",
       "command": "python verbatim_capture.py",
       "blocking": false,
-      "timeout_ms": 8000
+      "timeout_ms": 30000
     }
   ]
 }

@@ -149,6 +149,36 @@ def test_chunk_index_isolated_per_session(failed, total):
             os.environ.pop("NNA_STATE_DIR", None)
 
 
+def test_mcp_timeout_default_and_env_override(failed, total):
+    for key in ("NNA_VERBATIM_CAPTURE_TIMEOUT_SECONDS", "MEMORY_VERBATIM_CAPTURE_TIMEOUT_SECONDS"):
+        os.environ.pop(key, None)
+    _check(
+        failed, total,
+        "verbatim MCP timeout defaults to a generous 20 seconds",
+        verbatim_core._mcp_timeout_seconds() == 20,
+    )
+    os.environ["MEMORY_VERBATIM_CAPTURE_TIMEOUT_SECONDS"] = "31"
+    _check(
+        failed, total,
+        "generic verbatim timeout env overrides the default",
+        verbatim_core._mcp_timeout_seconds() == 31,
+    )
+    os.environ["NNA_VERBATIM_CAPTURE_TIMEOUT_SECONDS"] = "12"
+    _check(
+        failed, total,
+        "NNA-specific verbatim timeout env takes precedence",
+        verbatim_core._mcp_timeout_seconds() == 12,
+    )
+    os.environ["NNA_VERBATIM_CAPTURE_TIMEOUT_SECONDS"] = "not-an-int"
+    _check(
+        failed, total,
+        "invalid verbatim timeout falls back to default",
+        verbatim_core._mcp_timeout_seconds() == 20,
+    )
+    for key in ("NNA_VERBATIM_CAPTURE_TIMEOUT_SECONDS", "MEMORY_VERBATIM_CAPTURE_TIMEOUT_SECONDS"):
+        os.environ.pop(key, None)
+
+
 def main() -> int:
     failed = [0]
     total = [0]
@@ -161,6 +191,7 @@ def main() -> int:
         test_chunk_index_monotonic_per_session,
         test_chunk_index_persists_across_calls,
         test_chunk_index_isolated_per_session,
+        test_mcp_timeout_default_and_env_override,
     ]
     for fn in tests:
         fn(failed, total)

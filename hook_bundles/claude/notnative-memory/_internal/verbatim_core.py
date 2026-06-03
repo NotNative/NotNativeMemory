@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Tuple
 DEFAULT_CHUNK_CHARS = 800
 DEFAULT_OVERLAP_CHARS = 200
 DEFAULT_FLOOR_CHARS = 30
+DEFAULT_MCP_TIMEOUT_SECONDS = 20
 
 
 def chunk_content(
@@ -185,6 +186,19 @@ def _mcp_headers() -> Dict[str, str]:
     return headers
 
 
+def _mcp_timeout_seconds() -> int:
+    raw = (
+        os.environ.get("CLAUDE_VERBATIM_CAPTURE_TIMEOUT_SECONDS", "").strip()
+        or os.environ.get("MEMORY_VERBATIM_CAPTURE_TIMEOUT_SECONDS", "").strip()
+    )
+    if not raw:
+        return DEFAULT_MCP_TIMEOUT_SECONDS
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return DEFAULT_MCP_TIMEOUT_SECONDS
+
+
 def _project() -> str:
     """Resolve the NNM project key for this capture.
 
@@ -272,7 +286,7 @@ def capture_turn_pre(
     loaded_skills: Optional[List[str]] = None,
     mission_id: Optional[str] = None,
     mission_type: Optional[str] = None,
-    timeout: int = 5,
+    timeout: Optional[int] = None,
 ) -> int:
     """Capture the user prompt at turn:pre. Returns number of chunks stored."""
     chunks = chunk_content(user_prompt)
@@ -293,7 +307,7 @@ def capture_turn_pre(
             loaded_skills=loaded_skills,
             mission_id=mission_id,
             mission_type=mission_type,
-            timeout=timeout,
+            timeout=timeout if timeout is not None else _mcp_timeout_seconds(),
         )
         if ok:
             stored += 1
@@ -309,7 +323,7 @@ def capture_turn_post(
     loaded_skills: Optional[List[str]] = None,
     mission_id: Optional[str] = None,
     mission_type: Optional[str] = None,
-    timeout: int = 5,
+    timeout: Optional[int] = None,
 ) -> int:
     """Capture the assistant response at turn:post. Topic inferred from
     the user prompt (the question shapes the topic more than the answer).
@@ -332,7 +346,7 @@ def capture_turn_post(
             loaded_skills=loaded_skills,
             mission_id=mission_id,
             mission_type=mission_type,
-            timeout=timeout,
+            timeout=timeout if timeout is not None else _mcp_timeout_seconds(),
         )
         if ok:
             stored += 1
@@ -349,7 +363,7 @@ def capture_tool_call_post(
     loaded_skills: Optional[List[str]] = None,
     mission_id: Optional[str] = None,
     mission_type: Optional[str] = None,
-    timeout: int = 5,
+    timeout: Optional[int] = None,
 ) -> int:
     """Capture a tool invocation: tool_name + tool_input + tool_output
     packed into one chunk (or split if very long). Topic is the tool
@@ -383,7 +397,7 @@ def capture_tool_call_post(
             loaded_skills=loaded_skills,
             mission_id=mission_id,
             mission_type=mission_type,
-            timeout=timeout,
+            timeout=timeout if timeout is not None else _mcp_timeout_seconds(),
         )
         if ok:
             stored += 1
