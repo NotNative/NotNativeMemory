@@ -26,6 +26,13 @@ _NNA_CORE = (
     / "_internal"
     / "turn_analysis_core.py"
 )
+_NNA_ADAPTER = (
+    _REPO_ROOT
+    / "hook_bundles"
+    / "nna"
+    / "notnative-memory"
+    / "turn_analysis.py"
+)
 
 
 def _load_nna_core():
@@ -41,7 +48,19 @@ def _load_nna_core():
     return module
 
 
+def _load_nna_adapter():
+    """Load the nna bundle's turn_analysis.py under a unique module name."""
+    spec = importlib.util.spec_from_file_location(
+        "turn_analysis_nna_adapter", str(_NNA_ADAPTER),
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["turn_analysis_nna_adapter"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 core = _load_nna_core()
+nna_adapter = _load_nna_adapter()
 
 
 def _make_config(api: str, **overrides) -> "core.AnalysisConfig":
@@ -173,6 +192,68 @@ def test_analyze_turn_returns_nudge_stored_false_even_when_llm_emits_legacy_fiel
     print("[OK] analyze_turn ignores legacy promise fields end-to-end")
 
 
+# -- Adapter diagnostics ---------------------------------------------------
+
+def test_adapter_counts_candidates_separately_from_stored_records():
+    """Operator diagnostics need to distinguish analyzer output from MCP
+    storage. If auth or project scope blocks writes, candidates can be >0
+    while stored remains 0.
+    """
+    counts = nna_adapter._count_candidates({
+        "stored": 0,
+        "facts_stored": 0,
+        "relationships_stored": 0,
+        "summary_stored": False,
+        "analysis": {
+            "results": [{"fact": "one"}, {"fact": "two"}],
+            "state_assertions": [{"subject": "host", "predicate": "port", "object": "9500"}],
+            "relationship_assertions": [{"subject": "nna", "relation": "uses", "object": "nnm"}],
+            "summary": "short summary",
+        },
+    })
+    assert counts["candidates"] == 5
+    assert counts["candidate_memories"] == 2
+    assert counts["candidate_facts"] == 1
+    assert counts["candidate_relationships"] == 1
+    assert counts["candidate_summary"] == 1
+    print("[OK] nna adapter counts candidates independently from stored records")
+
+
+def test_adapter_log_line_includes_status_candidates_and_storage_breakdown(tmp_path):
+    """The log should explain whether the hook fired, what it found, and
+    what actually landed in NNM.
+    """
+    old_path = nna_adapter.LOG_PATH
+    log_file = tmp_path / "turn_analysis.log"
+    try:
+        nna_adapter.LOG_PATH = str(log_file)
+        nna_adapter._log_execution(
+            0,
+            False,
+            123,
+            status="ok",
+            facts_stored=0,
+            relationships_stored=0,
+            summary_stored=False,
+            candidates=3,
+            candidate_memories=1,
+            candidate_facts=1,
+            candidate_relationships=1,
+            candidate_summary=0,
+        )
+    finally:
+        nna_adapter.LOG_PATH = old_path
+
+    line = log_file.read_text(encoding="utf-8")
+    assert "status=ok" in line
+    assert "extracted=0" in line  # legacy alias for stored memories
+    assert "stored=0" in line
+    assert "candidates=3" in line
+    assert "candidate_facts=1" in line
+    assert "conv_len=123" in line
+    print("[OK] nna adapter diagnostic log includes status/candidates/storage fields")
+
+
 # -- Divergence guard ------------------------------------------------------
 
 def test_bundles_diverge_on_promise_detection():
@@ -222,4 +303,5 @@ if __name__ == "__main__":
     test_coerce_analysis_silently_drops_legacy_promise_fields()
     test_store_pending_nudge_function_removed()
     test_analyze_turn_returns_nudge_stored_false_even_when_llm_emits_legacy_fields()
+    test_adapter_counts_candidates_separately_from_stored_records()
     test_bundles_diverge_on_promise_detection()

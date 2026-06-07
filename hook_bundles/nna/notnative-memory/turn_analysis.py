@@ -60,20 +60,72 @@ def _cleanup_legacy_log() -> None:
         pass
 
 
+def _count_candidates(outcome: dict) -> dict:
+    analysis = outcome.get("analysis")
+    if not isinstance(analysis, dict):
+        analysis = {}
+
+    results = analysis.get("results")
+    facts = analysis.get("state_assertions")
+    relationships = analysis.get("relationship_assertions")
+    summary = analysis.get("summary")
+
+    result_count = len(results) if isinstance(results, list) else 0
+    fact_count = len(facts) if isinstance(facts, list) else 0
+    relationship_count = len(relationships) if isinstance(relationships, list) else 0
+    summary_count = 1 if isinstance(summary, str) and summary.strip() else 0
+
+    return {
+        "candidates": result_count + fact_count + relationship_count + summary_count,
+        "candidate_memories": result_count,
+        "candidate_facts": fact_count,
+        "candidate_relationships": relationship_count,
+        "candidate_summary": summary_count,
+    }
+
+
 def _log_execution(
-    extracted_count: int, nudge_stored: bool, conversation_len: int
+    stored_count: int,
+    nudge_stored: bool,
+    conversation_len: int,
+    *,
+    status: str = "ok",
+    reason: str = "",
+    facts_stored: int = 0,
+    relationships_stored: int = 0,
+    summary_stored: bool = False,
+    candidates: int = 0,
+    candidate_memories: int = 0,
+    candidate_facts: int = 0,
+    candidate_relationships: int = 0,
+    candidate_summary: int = 0,
 ) -> None:
     try:
         parent = os.path.dirname(LOG_PATH)
         if parent:
             os.makedirs(parent, exist_ok=True)
+        fields = [
+            f"{datetime.datetime.now().isoformat(timespec='seconds')}",
+            f"status={status}",
+            # Keep extracted= for legacy readers, but it means stored memories.
+            f"extracted={stored_count}",
+            f"stored={stored_count}",
+            f"facts={facts_stored}",
+            f"relationships={relationships_stored}",
+            f"summary={'1' if summary_stored else '0'}",
+            f"candidates={candidates}",
+            f"candidate_memories={candidate_memories}",
+            f"candidate_facts={candidate_facts}",
+            f"candidate_relationships={candidate_relationships}",
+            f"candidate_summary={candidate_summary}",
+            f"nudge={'1' if nudge_stored else '0'}",
+            f"conv_len={conversation_len}",
+        ]
+        if reason:
+            safe_reason = str(reason).replace("\t", " ").replace("\n", " ")[:500]
+            fields.append(f"reason={safe_reason}")
         with open(LOG_PATH, "a", encoding="utf-8") as logf:
-            logf.write(
-                f"{datetime.datetime.now().isoformat(timespec='seconds')}\t"
-                f"extracted={extracted_count}\t"
-                f"nudge={'1' if nudge_stored else '0'}\t"
-                f"conv_len={conversation_len}\n"
-            )
+            logf.write("\t".join(fields) + "\n")
     except OSError:
         pass
 
@@ -104,7 +156,7 @@ def main():
             f"model_response={bool(model_response)}"
         )
         print(f"[ERROR] {error_msg}", file=sys.stderr)
-        _log_execution(0, False, 0)
+        _log_execution(0, False, 0, status="skipped", reason=error_msg)
         sys.exit(1)
 
     # NNA passes model_name in the turn:post payload. Use it to skip the
@@ -115,13 +167,28 @@ def main():
         os.environ.setdefault("MEMORY_EXTRACT_MODEL", model_name)
 
     conversation_len = len(user_prompt) + len(model_response)
-    config = resolve_config_from_env()
-    outcome = analyze_turn(user_prompt, model_response, cwd, config)
+    try:
+        config = resolve_config_from_env()
+        outcome = analyze_turn(user_prompt, model_response, cwd, config)
+    except Exception as exc:
+        _log_execution(
+            0,
+            False,
+            conversation_len,
+            status="error",
+            reason=f"{type(exc).__name__}: {exc}",
+        )
+        raise
 
+    candidate_counts = _count_candidates(outcome)
     _log_execution(
         outcome["stored"],
         outcome["nudge_stored"],
         conversation_len,
+        facts_stored=outcome.get("facts_stored", 0),
+        relationships_stored=outcome.get("relationships_stored", 0),
+        summary_stored=bool(outcome.get("summary_stored")),
+        **candidate_counts,
     )
     sys.exit(0)
 
