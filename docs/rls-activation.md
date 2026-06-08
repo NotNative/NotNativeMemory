@@ -27,6 +27,11 @@ on acquire and `RESET` on release; admin cross-user queries use
 policies treat as a bypass. Defined in migration 008 (base policies)
 and 013 (admin sentinel); activated in migration 012 (ENABLE + FORCE).
 
+On every dual-role server startup, `lib/db.py` also refreshes and
+verifies `MEMORY_APP_DB_USER` before creating the app pool. This repairs
+the common Docker reinstall case where the Postgres data volume keeps an
+old `memory_app` password but `.env` has been regenerated.
+
 ## Verify enforcement
 
 ### 1. Role attributes
@@ -120,6 +125,13 @@ but Postgres has a different password on the role.
 Fix: same as above. `ensure_app_role.py` calls `ALTER ROLE ... WITH
 PASSWORD ...` when the role exists, so it self-heals.
 
+Server startup performs the same app-role refresh after migrations and
+before creating the app pool. If the migration role can connect, NNM can
+repair app-role password drift even when an installer path missed it. If
+startup still fails at this point, inspect the earlier log line from the
+role refresh or migration connection; the app pool is no longer the first
+place the mismatch should surface.
+
 If `ensure_app_role.py` cannot connect as `MEMORY_DB_USER`, the installer
 now stops instead of starting a broken MCP container. On Docker full
 installs this usually means the Postgres data volume was preserved but
@@ -206,6 +218,8 @@ diverges from what fresh installs get.
   container init time (Docker full mode, first DB volume only).
 - `docker/init/ensure_app_role.py` — idempotent role provisioner
   the installer runs in all modes. Safe to run by hand.
+- `lib/db.py::_ensure_app_role_on_conn` — runtime dual-role repair
+  before the app pool is created.
 - `lib/rls.py::app_conn` — per-user RLS context for the app pool.
 - `lib/rls.py::admin_conn` — admin-sentinel context for cross-user
   admin queries and pre-auth token resolution.

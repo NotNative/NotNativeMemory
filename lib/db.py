@@ -256,6 +256,94 @@ async def _run_migrations_on_conn(conn: asyncpg.Connection) -> int:
         )
 
 
+def _quote_ident(value: str) -> str:
+    """Quote a Postgres identifier for DDL statements."""
+    return '"' + value.replace('"', '""') + '"'
+
+
+def _quote_literal(value: str) -> str:
+    """Quote a Postgres string literal for DDL statements."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+async def _ensure_app_role_on_conn(
+    conn: asyncpg.Connection,
+    *,
+    host: str,
+    port: int,
+    database: str,
+    app_user: str,
+    app_password: str,
+) -> None:
+    """
+    Create or refresh the app role before the app pool is built.
+
+    Windows/Docker installs preserve the Postgres data volume across
+    reinstall while regenerating .env. That can leave the existing
+    memory_app role with an old password. The server is the last safe
+    place to repair that drift because it already has a validated
+    migration/admin connection and has not created the app pool yet.
+    """
+    if not app_user:
+        raise ValueError("MEMORY_APP_DB_USER cannot be empty in dual-role mode")
+    if not app_password:
+        raise ValueError("MEMORY_APP_DB_PASSWORD cannot be empty in dual-role mode")
+
+    role_ident = _quote_ident(app_user)
+    db_ident = _quote_ident(database)
+    password_literal = _quote_literal(app_password)
+
+    exists = await conn.fetchval(
+        "SELECT 1 FROM pg_roles WHERE rolname = $1",
+        app_user,
+    )
+    if exists:
+        await conn.execute(
+            f"ALTER ROLE {role_ident} WITH LOGIN PASSWORD {password_literal} "
+            "NOSUPERUSER NOBYPASSRLS"
+        )
+        action = "refreshed"
+    else:
+        await conn.execute(
+            f"CREATE ROLE {role_ident} LOGIN PASSWORD {password_literal} "
+            "NOSUPERUSER NOBYPASSRLS"
+        )
+        action = "created"
+
+    await conn.execute(f"GRANT CONNECT ON DATABASE {db_ident} TO {role_ident}")
+    await conn.execute(f"GRANT USAGE ON SCHEMA public TO {role_ident}")
+    await conn.execute(
+        f"GRANT SELECT, INSERT, UPDATE, DELETE "
+        f"ON ALL TABLES IN SCHEMA public TO {role_ident}"
+    )
+    await conn.execute(
+        f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public TO {role_ident}"
+    )
+    await conn.execute(
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        f"GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO {role_ident}"
+    )
+    await conn.execute(
+        f"ALTER DEFAULT PRIVILEGES IN SCHEMA public "
+        f"GRANT USAGE, SELECT ON SEQUENCES TO {role_ident}"
+    )
+
+    verify_conn = await asyncpg.connect(
+        host=host,
+        port=port,
+        database=database,
+        user=app_user,
+        password=app_password,
+        timeout=10,
+    )
+    try:
+        await verify_conn.fetchval("SELECT 1")
+    finally:
+        await verify_conn.close()
+
+    _log.info("DB app role %s and verified: %r", action, app_user)
+
+
 # -- Connection pool --------------------------------------------------------
 
 async def get_pool() -> asyncpg.Pool:
@@ -341,6 +429,15 @@ async def get_pool() -> asyncpg.Pool:
             applied = await _run_migrations_on_conn(mig_conn)
             if applied:
                 _log.info("Applied %d pending migration(s)", applied)
+            if dual_role:
+                await _ensure_app_role_on_conn(
+                    mig_conn,
+                    host=host,
+                    port=port,
+                    database=database,
+                    app_user=app_user,
+                    app_password=app_password,
+                )
         finally:
             await mig_conn.close()
 
