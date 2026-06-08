@@ -120,6 +120,14 @@ but Postgres has a different password on the role.
 Fix: same as above. `ensure_app_role.py` calls `ALTER ROLE ... WITH
 PASSWORD ...` when the role exists, so it self-heals.
 
+If `ensure_app_role.py` cannot connect as `MEMORY_DB_USER`, the installer
+now stops instead of starting a broken MCP container. On Docker full
+installs this usually means the Postgres data volume was preserved but
+`.env` was deleted or regenerated, so the installer no longer knows the
+database owner's real password. Either restore the old `.env`, reset the
+Docker Postgres volume if the data is disposable, or connect with an
+operator account and manually reset the role passwords.
+
 ### Privilege drift
 
 Symptom: server logs show `permission denied for relation <table>`.

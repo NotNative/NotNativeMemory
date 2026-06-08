@@ -16,9 +16,11 @@ the equivalent for:
 
 Connects as MEMORY_DB_USER (expected to have CREATE ROLE privilege;
 typically the DB owner / superuser). If that privilege is missing,
-emits a warning and exits 0 so the install proceeds in single-role
-(no-RLS-enforcement) mode. Operators can create the role manually
-following docs/rls-activation.md and restart the server.
+exits non-zero so the installer stops before starting an MCP container
+that is guaranteed to fail when it tries to connect as MEMORY_APP_DB_USER.
+Operators can blank MEMORY_APP_DB_USER / MEMORY_APP_DB_PASSWORD to opt
+out of RLS enforcement, or create the role manually following
+docs/rls-activation.md and re-run the installer.
 
 No-op when MEMORY_APP_DB_USER / MEMORY_APP_DB_PASSWORD are unset —
 the operator has deliberately opted out of RLS enforcement.
@@ -121,14 +123,16 @@ async def ensure_role() -> int:
             file=sys.stderr,
         )
         print(
-            "App will fall back to MEMORY_DB_USER at runtime; RLS inert.",
+            "Cannot safely start with MEMORY_APP_DB_USER configured because "
+            "the app role may be missing or stale.",
             file=sys.stderr,
         )
         print(
-            "See docs/rls-activation.md to create the role manually.",
+            "Blank MEMORY_APP_DB_USER/PASSWORD to opt out of RLS, or see "
+            "docs/rls-activation.md to create the role manually.",
             file=sys.stderr,
         )
-        return 0  # non-fatal; install proceeds
+        return 1
 
     finally:
         await conn.close()

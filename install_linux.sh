@@ -608,14 +608,17 @@ asyncio.run(run_schema())
     step "Ensuring memory_app role (RLS enforcement)..."
     docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python docker/init/ensure_app_role.py
     if [ $? -ne 0 ]; then
-        warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
+        err "Role provisioning failed. MCP would fail to authenticate as $APP_DB_USER."
+        info "If this is an existing Docker volume and .env was regenerated, restore the old .env password or reset the Docker Postgres volume."
+        info "To opt out of RLS enforcement, blank MEMORY_APP_DB_USER and MEMORY_APP_DB_PASSWORD in .env, then re-run."
+        exit 1
     fi
 
     # -----------------------------------------------------------------------
     # 7. Start containers and wait for ready
     # -----------------------------------------------------------------------
     step "Starting MCP server container..."
-    if ! docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" up -d mcp 2>&1; then
+    if ! docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" up -d --force-recreate mcp 2>&1; then
         err "Failed to start MCP server container. See the compose output above."
         info "Check logs: docker compose -f docker/docker-compose.yml logs mcp"
         exit 1
@@ -716,7 +719,11 @@ asyncio.run(run_schema())
     step "Ensuring memory_app role (RLS enforcement)..."
     # ensure_app_role.py loads .env itself via python-dotenv, so no
     # pre-sourcing needed here.
-    python3 docker/init/ensure_app_role.py || warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
+    if ! python3 docker/init/ensure_app_role.py; then
+        err "Role provisioning failed. MCP would fail to authenticate as $APP_DB_USER."
+        info "To opt out of RLS enforcement, blank MEMORY_APP_DB_USER and MEMORY_APP_DB_PASSWORD in .env, then re-run."
+        exit 1
+    fi
 
     # -----------------------------------------------------------------------
     # 7. Download embedding model (host python server)

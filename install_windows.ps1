@@ -675,14 +675,17 @@ asyncio.run(run_schema())
     Write-Step "Ensuring memory_app role (RLS enforcement)..."
     Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile run --rm mcp python docker/init/ensure_app_role.py
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
+        Write-Err "Role provisioning failed. MCP would fail to authenticate as $APP_DB_USER."
+        Write-Info "If this is an existing Docker volume and .env was regenerated, restore the old .env password or reset the Docker Postgres volume."
+        Write-Info "To opt out of RLS enforcement, blank MEMORY_APP_DB_USER and MEMORY_APP_DB_PASSWORD in .env, then re-run."
+        exit 1
     }
 
     # -----------------------------------------------------------------------
     # 7. Start containers and wait for ready
     # -----------------------------------------------------------------------
     Write-Step "Starting MCP server container..."
-    Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile up -d mcp
+    Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile up -d --force-recreate mcp
     if ($LASTEXITCODE -ne 0) {
         Write-Err "Failed to start MCP server container (docker compose up exited $LASTEXITCODE)."
         Write-Info "Check the output above and try: docker compose -f docker/docker-compose.yml logs mcp"
@@ -787,7 +790,9 @@ asyncio.run(run_schema())
     # .env values are loaded by python-dotenv inside the script.
     Invoke-Native python docker/init/ensure_app_role.py
     if ($LASTEXITCODE -ne 0) {
-        Write-Warn "Role provisioning reported errors; continuing. See docs/rls-activation.md."
+        Write-Err "Role provisioning failed. MCP would fail to authenticate as $APP_DB_USER."
+        Write-Info "To opt out of RLS enforcement, blank MEMORY_APP_DB_USER and MEMORY_APP_DB_PASSWORD in .env, then re-run."
+        exit 1
     }
 
     # -----------------------------------------------------------------------
