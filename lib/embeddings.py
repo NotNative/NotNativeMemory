@@ -8,6 +8,7 @@ cost for cosine-similarity retrieval. No GPU needed, no external API
 calls.
 """
 
+import json
 import os
 import threading
 from typing import List, Optional
@@ -29,6 +30,30 @@ _model_path: Optional[str] = None
 # loser's instance would leak until GC. threading.Lock (not asyncio)
 # because embed() is a synchronous, potentially-cross-thread API.
 _model_lock = threading.Lock()
+
+
+def _is_complete_model_dir(path: str) -> bool:
+    """Return True when the local SentenceTransformer snapshot is usable."""
+    required_files = (
+        "config.json",
+        "modules.json",
+        "config_sentence_transformers.json",
+        "tokenizer.json",
+    )
+    if not os.path.isdir(path):
+        return False
+    if any(not os.path.isfile(os.path.join(path, name)) for name in required_files):
+        return False
+    try:
+        with open(os.path.join(path, "config.json"), "r", encoding="utf-8") as fh:
+            if not json.load(fh).get("model_type"):
+                return False
+    except (OSError, json.JSONDecodeError):
+        return False
+    return any(
+        os.path.isfile(os.path.join(path, name))
+        for name in ("model.safetensors", "pytorch_model.bin")
+    )
 
 
 def _get_model_path() -> str:
@@ -67,10 +92,12 @@ def _load_model():
         from sentence_transformers import SentenceTransformer
 
         path = _get_model_path()
-        if not os.path.isdir(path):
+        if not _is_complete_model_dir(path):
             raise FileNotFoundError(
-                f"Embedding model not found at {path}. "
-                f"Run the install script to download it."
+                f"Embedding model not found or incomplete at {path}. "
+                f"Run the install script to download it. "
+                f"If this path exists, remove it or re-run the installer so "
+                f"the model can be repaired."
             )
 
         _model = SentenceTransformer(path, trust_remote_code=True)

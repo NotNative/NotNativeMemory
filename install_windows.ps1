@@ -47,6 +47,42 @@ function Invoke-Native {
     }
 }
 
+function Test-EmbeddingModelComplete {
+    param([string]$Path)
+
+    if (-not (Test-Path $Path -PathType Container)) {
+        return $false
+    }
+
+    $requiredFiles = @(
+        "config.json",
+        "modules.json",
+        "config_sentence_transformers.json",
+        "tokenizer.json"
+    )
+    foreach ($file in $requiredFiles) {
+        if (-not (Test-Path (Join-Path $Path $file) -PathType Leaf)) {
+            return $false
+        }
+    }
+    try {
+        $config = Get-Content (Join-Path $Path "config.json") -Raw | ConvertFrom-Json
+        if (-not $config.model_type) {
+            return $false
+        }
+    } catch {
+        return $false
+    }
+
+    $checkpointFiles = @("model.safetensors", "pytorch_model.bin")
+    foreach ($file in $checkpointFiles) {
+        if (Test-Path (Join-Path $Path $file) -PathType Leaf) {
+            return $true
+        }
+    }
+    return $false
+}
+
 # Detect which supported agent CLIs are on PATH and wire hooks + MCP
 # registration for whichever is present. Returns the list of agents
 # that were configured so the caller can tailor the summary output.
@@ -584,9 +620,12 @@ if ($useDocker) {
     # -----------------------------------------------------------------------
     if (-not $SkipModel) {
         Write-Step "Downloading embedding model (gte-large-en-v1.5, ~870MB)..."
-        if (Test-Path "models/gte-large-en-v1.5") {
+        if (Test-EmbeddingModelComplete "models/gte-large-en-v1.5") {
             Write-Info "Model already exists, skipping download"
         } else {
+            if (Test-Path "models/gte-large-en-v1.5") {
+                Write-Warn "Existing model directory is incomplete; re-downloading it."
+            }
             if (-not (Test-Path "models")) { New-Item "models" -ItemType Directory | Out-Null }
             Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile run --rm `
                 -v "${PWD}/models:/app/models" `
@@ -800,9 +839,12 @@ asyncio.run(run_schema())
     # -----------------------------------------------------------------------
     if (-not $SkipModel) {
         Write-Step "Downloading embedding model (gte-large-en-v1.5, ~870MB)..."
-        if (Test-Path "models/gte-large-en-v1.5") {
+        if (Test-EmbeddingModelComplete "models/gte-large-en-v1.5") {
             Write-Info "Model already exists, skipping download"
         } else {
+            if (Test-Path "models/gte-large-en-v1.5") {
+                Write-Warn "Existing model directory is incomplete; re-downloading it."
+            }
             Invoke-Native python -c "
 from sentence_transformers import SentenceTransformer
 import os

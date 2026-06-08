@@ -15,6 +15,23 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 err()   { echo -e "${RED}[x]${NC} $1"; }
 info()  { echo "    $1"; }
 
+embedding_model_complete() {
+    local path="$1"
+    [ -d "$path" ] || return 1
+
+    for file in \
+        config.json \
+        modules.json \
+        config_sentence_transformers.json \
+        tokenizer.json
+    do
+        [ -f "$path/$file" ] || return 1
+    done
+    grep -q '"model_type"' "$path/config.json" || return 1
+
+    [ -f "$path/model.safetensors" ] || [ -f "$path/pytorch_model.bin" ]
+}
+
 # Configure hooks + MCP registration for whichever supported agent CLIs
 # are installed. Sets CONFIGURED_AGENTS (bash array) so the caller can
 # tailor the summary output. Usage: configure_agents <install_path> <mcp_url>
@@ -513,9 +530,12 @@ if [ "$USE_DOCKER" = true ]; then
     # -----------------------------------------------------------------------
     if [ "${SKIP_MODEL:-}" != "1" ]; then
         step "Downloading embedding model (gte-large-en-v1.5, ~870MB)..."
-        if [ -d "models/gte-large-en-v1.5" ]; then
+        if embedding_model_complete "models/gte-large-en-v1.5"; then
             info "Model already exists, skipping download"
         else
+            if [ -d "models/gte-large-en-v1.5" ]; then
+                warn "Existing model directory is incomplete; re-downloading it."
+            fi
             mkdir -p models
             docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm \
                 -v "$(pwd)/models:/app/models" \
@@ -730,9 +750,12 @@ asyncio.run(run_schema())
     # -----------------------------------------------------------------------
     if [ "${SKIP_MODEL:-}" != "1" ]; then
         step "Downloading embedding model (gte-large-en-v1.5, ~870MB)..."
-        if [ -d "models/gte-large-en-v1.5" ]; then
+        if embedding_model_complete "models/gte-large-en-v1.5"; then
             info "Model already exists, skipping download"
         else
+            if [ -d "models/gte-large-en-v1.5" ]; then
+                warn "Existing model directory is incomplete; re-downloading it."
+            fi
             python3 -c "
 from sentence_transformers import SentenceTransformer
 import os
