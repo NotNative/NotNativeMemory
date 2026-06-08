@@ -59,6 +59,12 @@ def main() -> int:
         ],
     ))
     checks.append((
+        "ensure_app_role verifies app-role login before success",
+        "user=app_user" in ensure
+        and "password=app_password" in ensure
+        and "Verified login as" in ensure,
+    ))
+    checks.append((
         "installers no longer soft-continue role provisioning failures",
         "Role provisioning reported errors; continuing" not in windows
         and "Role provisioning reported errors; continuing" not in linux,

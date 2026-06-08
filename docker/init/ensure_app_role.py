@@ -114,6 +114,20 @@ async def ensure_role() -> int:
             f'GRANT USAGE, SELECT ON SEQUENCES TO "{app_user}"'
         )
         print(f"Granted privileges on public schema to {app_user}")
+
+        app_conn = await asyncpg.connect(
+            host=os.environ["MEMORY_DB_HOST"],
+            port=int(os.environ["MEMORY_DB_PORT"]),
+            database=os.environ["MEMORY_DB_NAME"],
+            user=app_user,
+            password=app_password,
+            timeout=10,
+        )
+        try:
+            await app_conn.fetchval("SELECT 1")
+        finally:
+            await app_conn.close()
+        print(f"Verified login as {app_user}")
         print("RLS enforcement is active against app connections.")
         return 0
 
