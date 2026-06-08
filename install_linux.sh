@@ -15,6 +15,19 @@ warn()  { echo -e "${YELLOW}[!]${NC} $1"; }
 err()   { echo -e "${RED}[x]${NC} $1"; }
 info()  { echo "    $1"; }
 
+generate_token() {
+    if command -v openssl >/dev/null 2>&1; then
+        openssl rand -base64 24 | tr '+/' '-_' | tr -d '='
+    else
+        LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 32
+        echo
+    fi
+}
+
+json_escape() {
+    printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
 embedding_model_complete() {
     local path="$1"
     [ -d "$path" ] || return 1
@@ -30,6 +43,50 @@ embedding_model_complete() {
     grep -q '"model_type"' "$path/config.json" || return 1
 
     [ -f "$path/model.safetensors" ] || [ -f "$path/pytorch_model.bin" ]
+}
+
+check_huggingface_from_docker() {
+    step "Checking Docker access to Hugging Face..."
+    if ! docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm mcp python -c "
+import sys
+import urllib.request
+
+url = 'https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/main/modules.json'
+try:
+    with urllib.request.urlopen(url, timeout=15) as response:
+        response.read(1)
+        print(f'OK {response.status} {url}')
+except Exception as exc:
+    print(f'FAIL {type(exc).__name__}: {exc}', file=sys.stderr)
+    sys.exit(1)
+"; then
+        err "Docker container cannot reach Hugging Face to download the embedding model."
+        info "Required URL: https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5"
+        info "Fix Docker DNS/proxy/firewall access to huggingface.co, or pre-seed models/gte-large-en-v1.5 before rerunning."
+        exit 1
+    fi
+}
+
+check_huggingface_from_host_python() {
+    step "Checking host Python access to Hugging Face..."
+    if ! python3 -c "
+import sys
+import urllib.request
+
+url = 'https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/main/modules.json'
+try:
+    with urllib.request.urlopen(url, timeout=15) as response:
+        response.read(1)
+        print(f'OK {response.status} {url}')
+except Exception as exc:
+    print(f'FAIL {type(exc).__name__}: {exc}', file=sys.stderr)
+    sys.exit(1)
+"; then
+        err "Host Python cannot reach Hugging Face to download the embedding model."
+        info "Required URL: https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5"
+        info "Fix DNS/proxy/firewall access to huggingface.co, or pre-seed models/gte-large-en-v1.5 before rerunning."
+        exit 1
+    fi
 }
 
 # Configure hooks + MCP registration for whichever supported agent CLIs
@@ -210,20 +267,17 @@ if [ "$INSTALL_MODE" = "client" ]; then
     configure_agents "$INSTALL_PATH" "$MCP_URL"
 
     # Write manifest
-    python3 -c "
-import json
-manifest = {
-    'installed': '$(date +%Y-%m-%d)',
-    'install_mode': 'client',
-    'install_path': '$INSTALL_PATH',
-    'components': ['hooks'],
-    'mcp_url': '$MCP_URL',
-    'db_host': None,
-    'db_port': None,
+    cat > "$MANIFEST_FILE" <<EOF
+{
+  "installed": "$(date +%Y-%m-%d)",
+  "install_mode": "client",
+  "install_path": "$(json_escape "$INSTALL_PATH")",
+  "components": ["hooks"],
+  "mcp_url": "$(json_escape "$MCP_URL")",
+  "db_host": null,
+  "db_port": null
 }
-with open('$MANIFEST_FILE', 'w') as f:
-    json.dump(manifest, f, indent=2)
-"
+EOF
 
     echo ""
     echo "+==========================================+"
@@ -365,13 +419,13 @@ if [ "$INSTALL_MODE" = "full" ]; then
         fi
     fi
     if [ -z "$DB_PASSWORD" ]; then
-        DB_PASSWORD=$(python3 -c "import secrets, string; print(''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24)))")
+        DB_PASSWORD=$(generate_token)
         info "Generated new database password"
     fi
     if [ -z "$APP_DB_PASSWORD" ]; then
         # url-safe characters only: no single-quote risk when the
         # password is interpolated into docker init SQL literals.
-        APP_DB_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+        APP_DB_PASSWORD=$(generate_token)
         info "Generated memory_app role password (RLS enforcement enabled)"
     fi
 
@@ -455,7 +509,7 @@ elif [ "$INSTALL_MODE" = "server" ]; then
         fi
     fi
     if [ -z "$APP_DB_PASSWORD" ]; then
-        APP_DB_PASSWORD=$(python3 -c "import secrets; print(secrets.token_urlsafe(24))")
+        APP_DB_PASSWORD=$(generate_token)
         info "Generated memory_app role password (RLS enforcement enabled)"
     fi
 fi
@@ -537,6 +591,7 @@ if [ "$USE_DOCKER" = true ]; then
                 warn "Existing model directory is incomplete; re-downloading it."
             fi
             mkdir -p models
+            check_huggingface_from_docker
             docker compose --progress=plain -f docker/docker-compose.yml --profile "$COMPOSE_PROFILE" run --rm \
                 -v "$(pwd)/models:/app/models" \
                 mcp python -c "
@@ -756,6 +811,7 @@ asyncio.run(run_schema())
             if [ -d "models/gte-large-en-v1.5" ]; then
                 warn "Existing model directory is incomplete; re-downloading it."
             fi
+            check_huggingface_from_host_python
             python3 -c "
 from sentence_transformers import SentenceTransformer
 import os
@@ -855,25 +911,22 @@ else
     SERVER_BACKEND_OUT="python"
 fi
 
-python3 -c "
-import json
-manifest = {
-    'installed': '$(date +%Y-%m-%d)',
-    'install_mode': '$INSTALL_MODE',
-    'server_backend': '$SERVER_BACKEND_OUT',
-    'install_path': '$INSTALL_PATH',
-    'components': $COMPONENTS,
-    'mcp_url': '$MCP_URL',
-    'mcp_port': $MCP_PORT,
-    'db_host': '$DB_HOST',
-    'db_port': '$DB_PORT',
-    'db_name': '$DB_NAME',
-    'db_user': '$DB_USER',
-    'hostname': '$HOSTNAME_VAL',
+cat > "$MANIFEST_FILE" <<EOF
+{
+  "installed": "$(date +%Y-%m-%d)",
+  "install_mode": "$(json_escape "$INSTALL_MODE")",
+  "server_backend": "$(json_escape "$SERVER_BACKEND_OUT")",
+  "install_path": "$(json_escape "$INSTALL_PATH")",
+  "components": $COMPONENTS,
+  "mcp_url": "$(json_escape "$MCP_URL")",
+  "mcp_port": $MCP_PORT,
+  "db_host": "$(json_escape "$DB_HOST")",
+  "db_port": "$(json_escape "$DB_PORT")",
+  "db_name": "$(json_escape "$DB_NAME")",
+  "db_user": "$(json_escape "$DB_USER")",
+  "hostname": "$(json_escape "$HOSTNAME_VAL")"
 }
-with open('$MANIFEST_FILE', 'w') as f:
-    json.dump(manifest, f, indent=2)
-"
+EOF
 
 # -----------------------------------------------------------------------
 # 12. Write setup guide and print summary

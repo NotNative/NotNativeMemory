@@ -23,6 +23,19 @@ function Write-Warn($msg) { Write-Host "[!] $msg" -ForegroundColor Yellow }
 function Write-Err($msg) { Write-Host "[x] $msg" -ForegroundColor Red }
 function Write-Info($msg) { Write-Host "    $msg" }
 
+function New-UrlSafeToken {
+    param([int]$ByteCount = 24)
+
+    $bytes = New-Object byte[] $ByteCount
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
+    return [Convert]::ToBase64String($bytes).TrimEnd("=").Replace("+", "-").Replace("/", "_")
+}
+
 # Run a native command and render ALL output (stdout + stderr) as plain
 # text in the default terminal color, with $LASTEXITCODE preserved.
 #
@@ -81,6 +94,54 @@ function Test-EmbeddingModelComplete {
         }
     }
     return $false
+}
+
+function Test-HuggingFaceFromDocker {
+    param([string]$ComposeProfile)
+
+    Write-Step "Checking Docker access to Hugging Face..."
+    Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $ComposeProfile run --rm mcp python -c "
+import sys
+import urllib.request
+
+url = 'https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/main/modules.json'
+try:
+    with urllib.request.urlopen(url, timeout=15) as response:
+        response.read(1)
+        print(f'OK {response.status} {url}')
+except Exception as exc:
+    print(f'FAIL {type(exc).__name__}: {exc}', file=sys.stderr)
+    sys.exit(1)
+"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Docker container cannot reach Hugging Face to download the embedding model."
+        Write-Info "Required URL: https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5"
+        Write-Info "Fix Docker DNS/proxy/firewall access to huggingface.co, or pre-seed models/gte-large-en-v1.5 before rerunning."
+        exit 1
+    }
+}
+
+function Test-HuggingFaceFromHostPython {
+    Write-Step "Checking host Python access to Hugging Face..."
+    Invoke-Native python -c "
+import sys
+import urllib.request
+
+url = 'https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5/resolve/main/modules.json'
+try:
+    with urllib.request.urlopen(url, timeout=15) as response:
+        response.read(1)
+        print(f'OK {response.status} {url}')
+except Exception as exc:
+    print(f'FAIL {type(exc).__name__}: {exc}', file=sys.stderr)
+    sys.exit(1)
+"
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Host Python cannot reach Hugging Face to download the embedding model."
+        Write-Info "Required URL: https://huggingface.co/Alibaba-NLP/gte-large-en-v1.5"
+        Write-Info "Fix DNS/proxy/firewall access to huggingface.co, or pre-seed models/gte-large-en-v1.5 before rerunning."
+        exit 1
+    }
 }
 
 # Detect which supported agent CLIs are on PATH and wire hooks + MCP
@@ -457,7 +518,7 @@ if ($installMode -eq "full") {
     }
     if (-not $APP_DB_PASSWORD) {
         # url-safe chars only: no single-quote risk in the init SQL.
-        $APP_DB_PASSWORD = python -c "import secrets; print(secrets.token_urlsafe(24))"
+        $APP_DB_PASSWORD = New-UrlSafeToken
         Write-Info "Generated memory_app role password (RLS enforcement enabled)"
     }
 
@@ -547,7 +608,7 @@ if ($installMode -eq "full") {
         }
     }
     if (-not $APP_DB_PASSWORD) {
-        $APP_DB_PASSWORD = python -c "import secrets; print(secrets.token_urlsafe(24))"
+        $APP_DB_PASSWORD = New-UrlSafeToken
         Write-Info "Generated memory_app role password (RLS enforcement enabled)"
     }
 }
@@ -627,6 +688,7 @@ if ($useDocker) {
                 Write-Warn "Existing model directory is incomplete; re-downloading it."
             }
             if (-not (Test-Path "models")) { New-Item "models" -ItemType Directory | Out-Null }
+            Test-HuggingFaceFromDocker $composeProfile
             Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile run --rm `
                 -v "${PWD}/models:/app/models" `
                 mcp python -c "
@@ -845,6 +907,7 @@ asyncio.run(run_schema())
             if (Test-Path "models/gte-large-en-v1.5") {
                 Write-Warn "Existing model directory is incomplete; re-downloading it."
             }
+            Test-HuggingFaceFromHostPython
             Invoke-Native python -c "
 from sentence_transformers import SentenceTransformer
 import os
