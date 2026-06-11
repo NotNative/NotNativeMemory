@@ -251,35 +251,34 @@ Write-Host ""
 Write-Host "  1 - Full install (database + server, all in Docker)"
 Write-Host "      Everything runs here. No Python required."
 Write-Host ""
-Write-Host "  2 - Server only (server + hooks, database is remote)"
-Write-Host "      MCP server runs here, Postgres is on another machine."
-Write-Host "      Docker container (auto-restarts) or host Python process."
-Write-Host ""
-Write-Host "  3 - Client only (hooks only, server is remote)"
-Write-Host "      Just configure Claude Code to use a remote MCP server."
+Write-Host "  2 - Client only (hooks only, server is remote)"
+Write-Host "      Configure local agent hooks to use a remote MCP server."
 Write-Host "      No Python dependencies, no model download, no database."
 Write-Host ""
 
 # Default to existing mode if re-running
 $defaultMode = ""
 if ($existingManifest) {
-    $modeMap = @{ "full" = "1"; "server" = "2"; "client" = "3" }
+    $modeMap = @{ "full" = "1"; "client" = "2" }
     $defaultMode = $modeMap[$existingManifest.install_mode]
-    Write-Info "Previous install was mode $defaultMode ($($existingManifest.install_mode))"
+    if ($defaultMode) {
+        Write-Info "Previous install was mode $defaultMode ($($existingManifest.install_mode))"
+    } elseif ($existingManifest.install_mode -eq "server") {
+        Write-Warn "Previous install used deprecated server-only mode. Choose full install or client only."
+    }
 }
-$modeChoice = Read-Host "  Choice [1/2/3]"
+$modeChoice = Read-Host "  Choice [1/2]"
 if (-not $modeChoice -and $defaultMode) { $modeChoice = $defaultMode }
 
 # Validate
-if ($modeChoice -notin @("1", "2", "3")) {
+if ($modeChoice -notin @("1", "2")) {
     Write-Err "Invalid choice. Run the installer again."
     exit 1
 }
 
 $installMode = switch ($modeChoice) {
     "1" { "full" }
-    "2" { "server" }
-    "3" { "client" }
+    "2" { "client" }
 }
 $needsDatabase = $installMode -in @("full")
 $needsServer = $installMode -in @("full", "server")
@@ -337,7 +336,7 @@ if ($installMode -eq "client") {
     }
 
     # Configure hooks + MCP registration for whichever supported agent
-    # CLI is installed on this machine (Claude Code, NotNativeCoder).
+    # CLI is installed on this machine.
     $configuredAgents = Configure-Agents $INSTALL_PATH $MCP_URL
 
     # Write manifest. Merge with any existing manifest so running
@@ -818,7 +817,7 @@ asyncio.run(run_schema())
 
 } else {
     # -----------------------------------------------------------------------
-    # 5. Install Python dependencies (server-only mode - runs on host)
+    # 5. Legacy host-Python server path (deprecated installer mode)
     # -----------------------------------------------------------------------
     Write-Step "Installing Python dependencies..."
     pip install -r requirements.txt --quiet 2>&1
@@ -828,7 +827,7 @@ asyncio.run(run_schema())
     }
 
     # -----------------------------------------------------------------------
-    # 6. Test database connection and run schema (server-only mode)
+    # 6. Legacy host-Python server path: test database and run schema
     # -----------------------------------------------------------------------
     Write-Step "Testing database connection..."
     Invoke-Native python -c "
@@ -897,7 +896,7 @@ asyncio.run(run_schema())
     }
 
     # -----------------------------------------------------------------------
-    # 7. Download embedding model (server-only mode - on host)
+    # 7. Legacy host-Python server path: download embedding model on host
     # -----------------------------------------------------------------------
     if (-not $SkipModel) {
         Write-Step "Downloading embedding model (gte-large-en-v1.5, ~870MB)..."
@@ -992,7 +991,7 @@ if ($LASTEXITCODE -ne 0) {
 $MCP_URL = "http://localhost:$MCP_PORT/mcp"
 $configuredAgents = Configure-Agents $INSTALL_PATH $MCP_URL
 if ($configuredAgents.Count -eq 0) {
-    Write-Info "Install hooks on client machines using option 3 (client only) once you have Claude Code or NotNativeCoder set up."
+    Write-Info "Install hooks on client machines using option 2 (client only) once you have a supported agent set up."
 }
 
 # -----------------------------------------------------------------------
@@ -1078,7 +1077,7 @@ Hooks have been added to ``~/.claude/settings.json``.
 
 ### Remote machines (client-only)
 
-On other machines, run the installer and choose option 3 (client only):
+On other machines, run the installer and choose option 2 (client only):
 ``````
 powershell -ExecutionPolicy Bypass -File install_windows.ps1
 ``````
@@ -1152,7 +1151,7 @@ claude mcp add --transport stdio memory --scope user -- python $INSTALL_PATH/ser
 
 ### Remote machines (client-only)
 
-On other machines, run the installer and choose option 3 (client only):
+On other machines, run the installer and choose option 2 (client only):
 ``````
 powershell -ExecutionPolicy Bypass -File install_windows.ps1
 ``````

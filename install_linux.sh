@@ -181,12 +181,8 @@ echo ""
 echo -e "  ${CYAN}1${NC} - Full install (database + server, all in Docker)"
 echo "      Everything runs here. No Python required."
 echo ""
-echo -e "  ${CYAN}2${NC} - Server only (server + hooks, database is remote)"
-echo "      MCP server runs here, Postgres is on another machine."
-echo "      Docker container (auto-restarts) or host Python process."
-echo ""
-echo -e "  ${CYAN}3${NC} - Client only (hooks only, server is remote)"
-echo "      Just configure Claude Code to use a remote MCP server."
+echo -e "  ${CYAN}2${NC} - Client only (hooks only, server is remote)"
+echo "      Configure local agent hooks to use a remote MCP server."
 echo "      No Python dependencies, no model download, no database."
 echo ""
 
@@ -194,20 +190,20 @@ echo ""
 DEFAULT_MODE=""
 case "$EXISTING_MODE" in
     full)   DEFAULT_MODE="1" ;;
-    server) DEFAULT_MODE="2" ;;
-    client) DEFAULT_MODE="3" ;;
+    client) DEFAULT_MODE="2" ;;
 esac
 if [ -n "$DEFAULT_MODE" ]; then
     info "Previous install was mode $DEFAULT_MODE ($EXISTING_MODE)"
+elif [ "$EXISTING_MODE" = "server" ]; then
+    warn "Previous install used deprecated server-only mode. Choose full install or client only."
 fi
 
-read -rp "  Choice [1/2/3]: " MODE_CHOICE
+read -rp "  Choice [1/2]: " MODE_CHOICE
 MODE_CHOICE="${MODE_CHOICE:-$DEFAULT_MODE}"
 
 case "$MODE_CHOICE" in
     1) INSTALL_MODE="full" ;;
-    2) INSTALL_MODE="server" ;;
-    3) INSTALL_MODE="client" ;;
+    2) INSTALL_MODE="client" ;;
     *)
         err "Invalid choice. Run the installer again."
         exit 1
@@ -263,7 +259,7 @@ if [ "$INSTALL_MODE" = "client" ]; then
     fi
 
     # Configure hooks + MCP registration for whichever supported agent
-    # CLI is installed on this machine (Claude Code, NotNativeCoder).
+    # CLI is installed on this machine.
     configure_agents "$INSTALL_PATH" "$MCP_URL"
 
     # Write manifest
@@ -894,7 +890,7 @@ fi
 MCP_URL="http://localhost:$MCP_PORT/mcp"
 configure_agents "$INSTALL_PATH" "$MCP_URL"
 if [ ${#CONFIGURED_AGENTS[@]} -eq 0 ]; then
-    info "Install hooks on client machines using option 3 (client only) once you have Claude Code or NotNativeCoder set up."
+    info "Install hooks on client machines using option 2 (client only) once you have a supported agent set up."
 fi
 
 # -----------------------------------------------------------------------
@@ -971,7 +967,7 @@ Hooks have been added to \`~/.claude/settings.json\`.
 
 ### Remote machines (client-only)
 
-On other machines, run the installer and choose option 3 (client only):
+On other machines, run the installer and choose option 2 (client only):
 \`\`\`
 bash install_linux.sh
 \`\`\`
@@ -1045,7 +1041,7 @@ claude mcp add --transport stdio memory --scope user -- python3 $INSTALL_PATH/se
 
 ### Remote machines (client-only)
 
-On other machines, run the installer and choose option 3 (client only):
+On other machines, run the installer and choose option 2 (client only):
 \`\`\`
 bash install_linux.sh
 \`\`\`

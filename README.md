@@ -21,8 +21,8 @@ Two operational modes, picked at install time:
 
 ## Prerequisites
 
-- **Docker** — required for full install, recommended for server-only install, not needed for client-only install
-- **Python 3.11+** — required on any machine that runs the server as a host process (server-only without Docker) or the hook scripts (any mode with hooks enabled)
+- **Docker** — required for full server installs, not needed for client-only hook installs
+- **Python 3.11+** — required for hook scripts on client machines; the full server install runs its Python dependencies inside Docker
 - An MCP-compatible AI agent (Claude Code, LM Studio, Cline, Continue.dev, etc.)
 
 ## Install
@@ -39,18 +39,16 @@ powershell -ExecutionPolicy Bypass -File install_windows.ps1
 bash install_linux.sh
 ```
 
-The installer asks which of three modes you want:
+The installer asks which of two modes you want:
 
 1. **Full** — Postgres + MCP server both run as Docker containers on this machine. No Python required on the host. Auto-starts on boot.
-2. **Server only** — MCP server runs here, Postgres is on another machine. You choose whether the server runs as a Docker container (recommended, auto-restarts) or as a host Python process. The installer falls back to Python automatically if Docker isn't available.
-3. **Client only** — no server on this machine, just hooks + MCP config pointing at a remote server.
+2. **Client only** — no server on this machine, just hooks + MCP config pointing at a remote server.
 
 Depending on the mode, the installer also:
 
-- Starts the Docker stack (full / server-docker) or installs Python deps (server-python).
+- Starts the Docker stack for full installs.
 - Writes `.env` with your DB credentials.
 - Downloads the embedding model (gte-large-en-v1.5, ~870MB on disk in fp16, ~1GB resident, CPU-only).
-- Applies the schema to your remote DB if server mode.
 - Runs a self-test against the live server.
 - Detects `claude`, `nna`, and/or Codex on your machine and auto-wires the matching hook bundle for whichever is present.
 - Emits `SETUP_COMPLETE.md` with the commands and paths for your specific install.
@@ -66,28 +64,6 @@ docker compose -f docker/docker-compose.yml logs mcp                   # view lo
 ```
 
 Auto-restarts on boot (`restart: unless-stopped`). Reachable on port 9500.
-
-### Server only, Docker backend (remote Postgres)
-
-```bash
-docker compose -f docker/docker-compose.yml --profile server up -d mcp    # start
-docker compose -f docker/docker-compose.yml --profile server down         # stop
-docker compose -f docker/docker-compose.yml logs mcp                       # view logs
-```
-
-Same auto-restart behavior. The `server` Compose profile runs just the `mcp` container; Postgres connection details come from `.env`.
-
-### Server only, Python backend (remote Postgres)
-
-```bash
-python server.py              # HTTP mode (default), backgrounded
-python server.py --foreground # stay attached (debugging)
-python server.py --stop       # stop a running HTTP server
-python server.py --status     # check status
-python server.py --mcp        # stdio mode (for MCP clients that launch the server themselves)
-```
-
-No reboot-survival unless you wire up a service manager (systemd, launchd, Task Scheduler).
 
 ### Client only
 
@@ -379,8 +355,6 @@ Each user/assistant exchange becomes a memory, auto-classified and deduplicated 
 **"Docker not found"** - Install Docker Desktop (Windows/macOS) or Docker Engine (Linux).
 
 **"Python not found"** - Install Python 3.11+ and make sure it's on your PATH.
-
-**"Cannot connect to remote database"** - Check the host, port, and credentials. Make sure the Postgres server allows connections from your machine.
 
 **"Model download failed"** - Check your internet connection. The model is downloaded from Hugging Face (~870MB fp16).
 

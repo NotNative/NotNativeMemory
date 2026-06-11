@@ -254,13 +254,12 @@ LM Studio (OpenAI-compatible) and the Anthropic Messages API are both supported.
 
 ## 11. Deployment
 
-Three install profiles (see `install_windows.ps1`, `install_linux.sh`, README):
+Two install profiles (see `install_windows.ps1`, `install_linux.sh`, README):
 
 1. **Full** — Docker stack: `postgres` (pgvector image, host port 5433) + `mcp` (FastMCP HTTP server, port 9500). Auto-start on boot.
-2. **Server only** — MCP server (Docker or native Python), points at a remote Postgres.
-3. **Client only** — no server; just hooks and an MCP client config pointing at a remote NNM.
+2. **Client only** — no server; just hooks and an MCP client config pointing at a remote NNM.
 
-`docker/docker-compose.yml` defines two profiles (`full`, `server`) so the same file covers all stack shapes.
+`docker/docker-compose.yml` keeps the `server` profile for legacy/manual remote-database deployments, but the supported installer UX now exposes only full Docker server installs and client-only hook installs.
 
 Configuration is `.env`-driven: `MEMORY_DB_*`, `MEMORY_MODEL_PATH`, `MCP_PORT`, `MEMORY_DEFAULT_PROJECT`, `MEMORY_AUTH_LOCALHOST_BYPASS`, `MEMORY_BIND_HOST`, `MEMORY_COOKIE_SECURE`.
 
