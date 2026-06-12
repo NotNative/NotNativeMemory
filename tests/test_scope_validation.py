@@ -1,5 +1,5 @@
 """
-Unit test for server._validate_writable_scope.
+Unit test for server._validate_writable_scope and source normalization.
 
 Runs without a live DB or the MCP SDK — loads just the validator block
 out of server.py via regex + exec so the test is independent of
@@ -15,7 +15,7 @@ ROOT = os.path.abspath(os.path.join(HERE, ".."))
 SERVER_PATH = os.path.join(ROOT, "server.py")
 
 
-def _load_validator():
+def _load_helpers():
     src = open(SERVER_PATH, "r", encoding="utf-8").read()
     pattern = re.compile(
         r"_GLOBAL_SCOPE = .*?(?=^@mcp\.tool)",
@@ -26,11 +26,11 @@ def _load_validator():
         raise RuntimeError("could not locate _validate_writable_scope block")
     ns = {"Optional": Optional}
     exec(match.group(0), ns)
-    return ns["_validate_writable_scope"]
+    return ns["_validate_writable_scope"], ns["_normalize_source"]
 
 
 def run():
-    validate = _load_validator()
+    validate, normalize_source = _load_helpers()
 
     cases = [
         # Accepted scopes
@@ -72,8 +72,44 @@ def run():
         else:
             print(f"  PASS  {inp!r}")
 
+    source_cases = [
+        (None, None, False),
+        ("user-stated", "user-stated", False),
+        ("USER-STATED", "user-stated", True),
+        ("user", "user-stated", True),
+        ("human", "user-stated", True),
+        ("tool", "tool-result", True),
+        ("tool_call", "tool-result", True),
+        ("assistant", "model-inferred", True),
+        ("inferred", "model-inferred", True),
+    ]
+    for inp, expected, expect_warning in source_cases:
+        got, warning, err = normalize_source(inp)
+        ok = got == expected and err is None and bool(warning) == expect_warning
+        if not ok:
+            failed += 1
+            print(
+                f"  FAIL  source {inp!r}: got={got!r}, "
+                f"warning={warning!r}, err={err!r}"
+            )
+        else:
+            print(f"  PASS  source {inp!r}")
+
+    for bad in ("user-said", "gospel", 42):
+        got, warning, err = normalize_source(bad)
+        ok = got is None and warning is None and err
+        if not ok:
+            failed += 1
+            print(
+                f"  FAIL  bad source {bad!r}: got={got!r}, "
+                f"warning={warning!r}, err={err!r}"
+            )
+        else:
+            print(f"  PASS  bad source {bad!r}")
+
     print("---")
-    print(f"{len(cases) - failed}/{len(cases)} passed")
+    total = len(cases) + len(source_cases) + 3
+    print(f"{total - failed}/{total} passed")
     return 0 if failed == 0 else 1
 
 

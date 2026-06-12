@@ -120,6 +120,19 @@ async def run() -> int:
         check("memory_store(project='_global') succeeds without raise",
               out.get("stored") is True)
 
+        # Harmless source aliases are repaired at the MCP boundary so
+        # smaller local models do not fail on "user" vs. "user-stated".
+        out = await memory_store(
+            content=f"source-alias-{run_id}",
+            project="_global",
+            source="user",
+        )
+        warnings = out.get("warnings") or []
+        check("memory_store(source='user') succeeds",
+              out.get("stored") is True)
+        check("memory_store(source='user') reports normalization warning",
+              any(w.get("code") == "source_normalized" for w in warnings))
+
     finally:
         async with rls.admin_conn(pool) as conn:
             await conn.execute(

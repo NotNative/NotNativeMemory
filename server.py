@@ -327,6 +327,64 @@ def _validate_writable_scope(project: str) -> Optional[str]:
     )
 
 
+_VALID_SOURCES = {"user-stated", "tool-result", "model-inferred"}
+_SOURCE_ALIASES = {
+    "user": "user-stated",
+    "human": "user-stated",
+    "user stated": "user-stated",
+    "user-stated": "user-stated",
+    "user_stated": "user-stated",
+    "tool": "tool-result",
+    "tool call": "tool-result",
+    "tool-call": "tool-result",
+    "tool_result": "tool-result",
+    "tool result": "tool-result",
+    "tool-result": "tool-result",
+    "model": "model-inferred",
+    "assistant": "model-inferred",
+    "inferred": "model-inferred",
+    "model inferred": "model-inferred",
+    "model_inferred": "model-inferred",
+    "model-inferred": "model-inferred",
+}
+
+
+def _normalize_source(
+    source: Optional[str],
+) -> tuple[Optional[str], Optional[dict], Optional[str]]:
+    """
+    Canonicalize model-friendly source aliases before validation.
+
+    The DB still accepts only the strict source_kind enum. This small
+    adapter gives local models room for harmless synonyms like "user"
+    or "tool" without weakening the storage invariant.
+    """
+    if source is None:
+        return None, None, None
+    if not isinstance(source, str):
+        return None, None, (
+            f"Invalid source: must be one of {sorted(_VALID_SOURCES)}"
+        )
+
+    raw = source.strip()
+    key = raw.lower().replace("_", "-")
+    canonical = _SOURCE_ALIASES.get(key)
+    if canonical is None:
+        canonical = _SOURCE_ALIASES.get(key.replace("-", " "))
+    if canonical is None:
+        return None, None, (
+            f"Invalid source: must be one of {sorted(_VALID_SOURCES)}"
+        )
+
+    warning = None
+    if raw != canonical:
+        warning = {
+            "code": "source_normalized",
+            "message": f"Normalized source {raw!r} to {canonical!r}.",
+        }
+    return canonical, warning, None
+
+
 def _tool_auth_and_project(
     project: Optional[str],
     empty_shape: dict,
@@ -463,14 +521,16 @@ async def memory_store(
             "user-stated" — user explicitly said this.
             "tool-result" — derived from a tool output (build log, API).
             "model-inferred" — model's own inference or summary.
+            Common aliases like "user", "tool", and "assistant" are
+            normalized to the nearest canonical value with a warning.
             Omit if unknown.
         verbatim: Set true when the full text matters — reasoning chains,
             user explanations, or conversation context that would lose
             value if you summarized it. Adds a "verbatim" tag.
     """
-    _VALID_SOURCES = {"user-stated", "tool-result", "model-inferred"}
-    if source is not None and source not in _VALID_SOURCES:
-        return {"error": f"Invalid source: must be one of {sorted(_VALID_SOURCES)}", "stored": False}
+    source, source_warning, source_err = _normalize_source(source)
+    if source_err:
+        return {"error": source_err, "stored": False}
 
     if not content or not content.strip():
         return {"error": "Content cannot be empty", "stored": False}
@@ -520,7 +580,10 @@ async def memory_store(
 
     from lib.memory_linter import lint
     response = {"id": str(memory_id), "stored": True}
-    warnings = lint(content, memory_class=memory_class)
+    warnings = []
+    if source_warning:
+        warnings.append(source_warning)
+    warnings.extend(lint(content, memory_class=memory_class))
     if warnings:
         response["warnings"] = warnings
     return response
