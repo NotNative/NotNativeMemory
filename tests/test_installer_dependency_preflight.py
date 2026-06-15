@@ -61,6 +61,15 @@ def main() -> int:
         and "huggingface cli" not in windows.lower()
         and "huggingface cli" not in linux.lower(),
     ))
+    checks.append((
+        "model download scripts show explicit snapshot/load/convert progress",
+        "snapshot_download" in windows
+        and "snapshot_download" in linux
+        and "Download complete; loading model for fp16 conversion" in windows
+        and "Download complete; loading model for fp16 conversion" in linux
+        and "Converting model to fp16" in windows
+        and "Converting model to fp16" in linux,
+    ))
 
     failed = 0
     for label, ok in checks:

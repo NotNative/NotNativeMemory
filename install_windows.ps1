@@ -690,17 +690,26 @@ if ($useDocker) {
             Test-HuggingFaceFromDocker $composeProfile
             Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml --profile $composeProfile run --rm `
                 -v "${PWD}/models:/app/models" `
-                mcp python -c "
+                mcp python -u -c "
 from sentence_transformers import SentenceTransformer
+from huggingface_hub import snapshot_download
 import os
-os.makedirs('models/gte-large-en-v1.5', exist_ok=True)
-print('Downloading gte-large-en-v1.5...')
-model = SentenceTransformer('Alibaba-NLP/gte-large-en-v1.5', trust_remote_code=True)
+model_dir = 'models/gte-large-en-v1.5'
+os.makedirs(model_dir, exist_ok=True)
+print('Downloading gte-large-en-v1.5 snapshot...', flush=True)
+snapshot_download(
+    repo_id='Alibaba-NLP/gte-large-en-v1.5',
+    local_dir=model_dir,
+)
+print('Download complete; loading model for fp16 conversion...', flush=True)
+model = SentenceTransformer(model_dir, trust_remote_code=True)
 # fp16 cast halves both disk and RAM footprint. Quality loss is
 # negligible for cosine-similarity retrieval.
+print('Converting model to fp16...', flush=True)
 model = model.half()
-model.save('models/gte-large-en-v1.5')
-print('Model saved to models/gte-large-en-v1.5 (fp16)')
+print('Saving fp16 model snapshot...', flush=True)
+model.save(model_dir)
+print('Model saved to models/gte-large-en-v1.5 (fp16)', flush=True)
 "
             if ($LASTEXITCODE -ne 0) {
                 Write-Err "Model download failed. Check your internet connection."
@@ -907,17 +916,26 @@ asyncio.run(run_schema())
                 Write-Warn "Existing model directory is incomplete; re-downloading it."
             }
             Test-HuggingFaceFromHostPython
-            Invoke-Native python -c "
+            Invoke-Native python -u -c "
 from sentence_transformers import SentenceTransformer
+from huggingface_hub import snapshot_download
 import os
-os.makedirs('models', exist_ok=True)
-print('Downloading gte-large-en-v1.5...')
-model = SentenceTransformer('Alibaba-NLP/gte-large-en-v1.5', trust_remote_code=True)
+model_dir = 'models/gte-large-en-v1.5'
+os.makedirs(model_dir, exist_ok=True)
+print('Downloading gte-large-en-v1.5 snapshot...', flush=True)
+snapshot_download(
+    repo_id='Alibaba-NLP/gte-large-en-v1.5',
+    local_dir=model_dir,
+)
+print('Download complete; loading model for fp16 conversion...', flush=True)
+model = SentenceTransformer(model_dir, trust_remote_code=True)
 # fp16 cast halves both disk and RAM footprint. Quality loss is
 # negligible for cosine-similarity retrieval.
+print('Converting model to fp16...', flush=True)
 model = model.half()
-model.save('models/gte-large-en-v1.5')
-print('Model saved to models/gte-large-en-v1.5 (fp16)')
+print('Saving fp16 model snapshot...', flush=True)
+model.save(model_dir)
+print('Model saved to models/gte-large-en-v1.5 (fp16)', flush=True)
 "
             if ($LASTEXITCODE -ne 0) {
                 Write-Err "Model download failed. Check your internet connection."
