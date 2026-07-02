@@ -14,10 +14,10 @@ Works with any [MCP](https://modelcontextprotocol.io)-compatible client (Claude 
 
 ## Solo or shared
 
-Two operational modes, picked at install time:
+Two operational modes:
 
-- **Solo** — loopback-only, `MEMORY_AUTH_LOCALHOST_BYPASS=1` lets on-host agents and hooks work without tokens. One user, one machine, zero auth ceremony.
-- **Shared** — server listens on a routable interface (typically behind a reverse proxy); every client presents a Bearer token. Registration, login, and token management via the web GUI or the auth API. Per-user isolation holds whether or not Postgres RLS is actively enforcing it.
+- **Legacy single-user** - default until claimed; existing local agents keep working as `owner` with no token.
+- **Claimed/root** - the operator claims the instance with a one-time code, receives a root token, and future clients present Bearer tokens. Per-user isolation holds whether or not Postgres RLS is actively enforcing it.
 
 ## Prerequisites
 
@@ -111,17 +111,29 @@ CSRF-protected with a double-submit cookie.
 
 Details for the two modes introduced in [Solo or shared](#solo-or-shared).
 
-- **Solo** — set `MEMORY_AUTH_LOCALHOST_BYPASS=1` and
-  `MEMORY_AUTH_LOCALHOST_USER=<username>`. Loopback callers are
-  implicitly authenticated as the named user. Explicit Bearer
-  headers still win, so a second user with their own token can
-  use the server from the same machine without being silently
-  overridden.
-- **Shared** — bypass off; every caller presents a Bearer token.
-  Endpoints: `POST /auth/register`, `POST /auth/login`,
-  `GET|POST|DELETE /auth/tokens`. No admin concept — every user
-  sees only their own memories, including their own `_global`
-  and `_domain_*` scopes.
+- **Legacy single-user** - the default for fresh and upgraded
+  personal installs. Until the instance is claimed, callers are
+  implicitly authenticated as the `owner` sentinel so existing local
+  integrations keep working.
+- **Claimed/root** - visit `/enable-multiuser`, enter the one-time
+  code from `state/admin_bootstrap.txt`, and save the shown-once
+  root token. Legacy owner data is adopted by `root`; future callers
+  use Bearer tokens. User provisioning is intended to go through
+  root/admin APIs such as `POST /auth/admin/provision-user`.
+
+If you skip claim during install, generate a code later from the
+install directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\claim-code.ps1
+```
+
+```bash
+bash scripts/claim-code.sh
+```
+
+Use `-Rotate` / `--rotate` if an old unclaimed code may have been
+exposed.
 
 Full API reference including curl examples for login, token
 management, and client setup: [`docs/api-auth.md`](docs/api-auth.md).

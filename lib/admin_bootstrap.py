@@ -1,17 +1,17 @@
 """
-First-run admin bootstrap.
+First-run root bootstrap.
 
-When the server starts and no user has is_admin=true, we write a
-random token to `./state/admin_bootstrap.txt`. The operator (who by
-definition has filesystem access to the server host) reads the file
-and presents the token to `/claim-admin` along with the username
-and password they want for the admin account. On successful claim,
-the file is deleted.
+When the operator chooses to claim the instance and no user has
+is_admin=true, we write a random token to `./state/admin_bootstrap.txt`.
+The operator (who by definition has filesystem access to the server
+host) reads the file and presents the token to the claim page. On
+successful claim, NNM creates the reserved root principal, returns a
+root Bearer token once, and deletes the file.
 
 Filesystem = operator premise:
 
     The whole scheme assumes that whoever has access to the state
-    directory IS authorized to claim admin. That holds for personal
+    directory IS authorized to claim root. That holds for personal
     deployments where one person runs the server on their own box.
     For shared-host / multi-tenant scenarios the operator must
     protect the state directory with Unix perms (0700 on the dir,
@@ -193,14 +193,14 @@ def log_bootstrap_banner(path: str) -> None:
     """
     msg = [
         "=" * 72,
-        "  ADMIN BOOTSTRAP REQUIRED",
+        "  ROOT CLAIM CODE READY",
         "",
-        "  No admin user is registered. A one-time bootstrap token has",
+        "  No root/admin principal is registered. A one-time claim code has",
         "  been written to:",
         f"      {path}",
         "",
-        "  Copy the token (a single line) and browse to /claim-admin",
-        "  to register the first admin account. The file will be",
+        "  Copy the token (a single line) and browse to /enable-multiuser",
+        "  to claim this instance. The file will be",
         "  deleted on successful claim.",
         "=" * 72,
     ]

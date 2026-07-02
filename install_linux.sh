@@ -89,6 +89,53 @@ except Exception as exc:
     fi
 }
 
+stop_existing_docker_deployment() {
+    local existing=()
+    for name in MCP-server MCP-postgres; do
+        if docker container inspect "$name" >/dev/null 2>&1; then
+            existing+=("$name")
+        fi
+    done
+
+    if [ ${#existing[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    step "Stopping existing Docker deployment..."
+    info "Found existing container(s): ${existing[*]}"
+    info "Stopping/removing containers only; database, model, and state files are preserved."
+    if ! docker compose --progress=plain -f docker/docker-compose.yml down --remove-orphans 2>&1; then
+        err "Failed to stop existing Docker deployment."
+        info "Check Docker, then rerun the installer."
+        exit 1
+    fi
+}
+
+offer_claim_code() {
+    local host_name="$1"
+    local port="$2"
+    local claim_url="http://${host_name}:${port}/enable-multiuser"
+
+    echo ""
+    step "Optional Instance Claim"
+    info "Claiming is optional. Skip it to keep legacy single-user behavior."
+    info "Claim only when you want root-token auth, NNO-managed users, or multi-user isolation."
+    read -r -p "  Generate a one-time claim code now? [y/N] " claim_ans
+    case "$claim_ans" in
+        y|Y)
+            ;;
+        *)
+            info "Skipping claim setup. You can visit $claim_url later."
+            return 0
+            ;;
+    esac
+
+    if ! bash scripts/claim-code.sh --host "$host_name" --port "$port"; then
+        warn "Claim-code generation failed. You can retry later:"
+        info "bash scripts/claim-code.sh"
+    fi
+}
+
 # Configure hooks + MCP registration for whichever supported agent CLIs
 # are installed. Sets CONFIGURED_AGENTS (bash array) so the caller can
 # tailor the summary output. Usage: configure_agents <install_path> <mcp_url>
@@ -562,6 +609,8 @@ EOF
 info "Saved to .env"
 
 if [ "$USE_DOCKER" = true ]; then
+    stop_existing_docker_deployment
+
     # -----------------------------------------------------------------------
     # 5. Build Docker image
     # All Python deps live inside the container - no host pip install needed.
@@ -977,6 +1026,35 @@ $SERVER_MGMT_BLURB
 
 The server auto-starts on boot (\`restart: unless-stopped\`).
 
+## Optional: Claim This Instance
+
+Claiming is optional. If you keep using NNM as a personal/legacy
+single-user server, no action is required and existing local
+integrations keep working.
+
+Claim the instance only when you want root-token auth, NNO-managed
+users, or multi-user isolation:
+
+\`\`\`
+http://${HOSTNAME_VAL}:${MCP_PORT}/enable-multiuser
+\`\`\`
+
+The claim page creates a one-time code in \`state/admin_bootstrap.txt\`.
+After you enter it, NNM shows a root token once for root NNA.
+
+If you skip this now, generate a claim code later from the install
+directory:
+
+\`\`\`
+bash scripts/claim-code.sh
+\`\`\`
+
+If an old unclaimed code may have been exposed, rotate it:
+
+\`\`\`
+bash scripts/claim-code.sh --rotate
+\`\`\`
+
 ## Claude Code Configuration
 
 ### This machine (already configured by installer)
@@ -1047,6 +1125,35 @@ Starts on http://0.0.0.0:$MCP_PORT. Other machines connect to http://${HOSTNAME_
 **stdio mode (launched automatically by Claude Code / LM Studio on THIS machine):**
 No manual start needed. The MCP client launches the server as a child process.
 
+## Optional: Claim This Instance
+
+Claiming is optional. If you keep using NNM as a personal/legacy
+single-user server, no action is required and existing local
+integrations keep working.
+
+Claim the instance only when you want root-token auth, NNO-managed
+users, or multi-user isolation:
+
+\`\`\`
+http://${HOSTNAME_VAL}:${MCP_PORT}/enable-multiuser
+\`\`\`
+
+The claim page creates a one-time code in \`state/admin_bootstrap.txt\`.
+After you enter it, NNM shows a root token once for root NNA.
+
+If you skip this now, generate a claim code later from the install
+directory:
+
+\`\`\`
+bash scripts/claim-code.sh
+\`\`\`
+
+If an old unclaimed code may have been exposed, rotate it:
+
+\`\`\`
+bash scripts/claim-code.sh --rotate
+\`\`\`
+
 ## Claude Code Configuration
 
 ### This machine (already configured by installer)
@@ -1106,6 +1213,10 @@ You should see the stored memory come back with a similarity score.
 EOF
 fi
 
+if [ "$USE_DOCKER" = true ]; then
+    offer_claim_code "$HOSTNAME_VAL" "$MCP_PORT"
+fi
+
 echo ""
 echo "+==========================================+"
 echo "|  Setup Complete!                         |"
@@ -1139,5 +1250,7 @@ if [ "$USE_DOCKER" = true ]; then
 else
     info "Start the server:  python3 server.py"
 fi
+info "Optional claim:    http://${HOSTNAME_VAL}:${MCP_PORT}/enable-multiuser"
+info "                  Skip this unless you want root-token/NNO multi-user mode."
 info "Full details:      SETUP_COMPLETE.md"
 echo ""

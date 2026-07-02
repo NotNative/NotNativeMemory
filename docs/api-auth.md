@@ -1,7 +1,9 @@
 # Auth API
 
-Bearer-token auth for the MCP server. Open self-registration; every
-user sees only their own memories. No admin concept.
+Bearer-token auth for the MCP server. Legacy installs stay in
+single-user mode until the instance is claimed. Claiming creates the
+reserved `root` principal, issues a shown-once root token, and moves
+future user provisioning behind root/admin authority.
 
 All endpoints return JSON. Errors look like `{"error": "..."}` with an
 HTTP 4xx status.
@@ -17,25 +19,40 @@ http://localhost:9500            # local server
 
 ## Operational modes
 
-The server runs in one of two modes, chosen at install time.
+The server runs in one of two modes.
 
-**Solo mode** (default for single-user personal use):
-- `MEMORY_AUTH_LOCALHOST_BYPASS=1`
-- `MEMORY_AUTH_LOCALHOST_USER=<username>`
-- Loopback requests without an `Authorization` header are
-  authenticated as the named user. This is what lets hooks and
-  on-host agents reach the server with no token.
-- An explicit Bearer header ALWAYS wins: a request from loopback
-  that carries a token is authenticated by that token, not the
-  bypass user.
+**Legacy single-user mode** (default for fresh and upgraded personal use):
+- No admin/root principal exists yet.
+- Requests without an `Authorization` header authenticate as the
+  `owner` sentinel.
+- Existing integrations keep working until the operator explicitly
+  claims the instance.
 
 **Multi-user mode** (deployments with more than one person):
-- `MEMORY_AUTH_LOCALHOST_BYPASS=0` (or unset)
-- Every caller must present a valid Bearer token. No bypass.
+- The operator visits `/enable-multiuser`, enters the one-time claim
+  code from `state/admin_bootstrap.txt`, and receives a root token.
+- Legacy `owner` data is adopted by `root`.
+- Every caller must present a valid Bearer token.
+- User provisioning should use root/admin endpoints such as
+  `POST /auth/admin/provision-user`.
 
-Switching solo to multi is a config flip plus a server restart; no
-data migration needed because solo-mode writes are already tagged
-with a real `owner_user_id`.
+The older localhost bypass environment variables still work for
+explicit loopback service accounts after claim, but they are not the
+primary bootstrap path.
+
+If claim was skipped during install, generate or re-print the code
+later from the install directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\claim-code.ps1
+```
+
+```bash
+bash scripts/claim-code.sh
+```
+
+Use `-Rotate` / `--rotate` to replace an unclaimed code if it may
+have been exposed.
 
 ## Authentication model
 
@@ -52,10 +69,36 @@ with a real `owner_user_id`.
 
 ## Endpoints
 
+### `POST /auth/claim-admin`
+
+Legacy-compatible endpoint name for claiming instance root. Returns a
+shown-once root Bearer token.
+
+```bash
+curl -X POST http://memory.example.com:9500/auth/claim-admin \
+  -H 'Content-Type: application/json' \
+  -d '{"bootstrap_token":"nnm_admin_...","label":"root-nna"}'
+```
+
+Response (201):
+```json
+{
+  "root": {"id": "...", "username": "root", "is_admin": true},
+  "transferred": {"memories": 12},
+  "token": {
+    "id": "...",
+    "label": "root-nna",
+    "token": "nnm_EXAMPLE_TOKEN_SHOWN_ONCE_AT_CREATION"
+  }
+}
+```
+
 ### `POST /auth/register`
 
-Open self-registration. Anyone can create a user; the account has
-no special privileges and only sees memories it writes itself.
+Legacy self-registration. Available before root is claimed for older
+personal workflows. After root/admin mode is active, unauthenticated
+self-registration returns 403; NNO or another broker should provision
+users through `POST /auth/admin/provision-user`.
 
 ```bash
 curl -X POST http://memory.example.com:9500/auth/register \

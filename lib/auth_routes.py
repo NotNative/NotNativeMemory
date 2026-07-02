@@ -94,17 +94,17 @@ def register_routes(mcp) -> None:
     @mcp.custom_route("/auth/claim-admin", methods=["POST"])
     async def claim_admin(request: Request):
         """
-        Claim the admin role with a bootstrap token. Payload:
-            {"bootstrap_token": "...", "username": "...", "password": "..."}
+        Claim the instance root with a bootstrap token. Payload:
+            {"bootstrap_token": "...", "label": "..."}
 
         Only works while ./state/admin_bootstrap.txt exists (i.e.,
         no admin is yet registered). On success, the file is deleted,
-        a user is created with is_admin=true, a Bearer token is
-        minted, and the raw token is returned once.
+        the reserved root principal is marked admin, legacy owner data
+        is transferred to root, and a Bearer token is returned once.
         """
         if not admin_bootstrap.bootstrap_file_exists():
             return JSONResponse(
-                {"error": "admin already claimed"}, status_code=409,
+                {"error": "instance already claimed"}, status_code=409,
             )
 
         payload = await _parse_json(request)
@@ -112,74 +112,76 @@ def register_routes(mcp) -> None:
             return JSONResponse({"error": "body must be JSON"}, status_code=400)
 
         bootstrap_token = (payload.get("bootstrap_token") or "").strip()
-        username = (payload.get("username") or "").strip()
-        password = payload.get("password") or ""
-        if not bootstrap_token or not username or not password:
+        label = (payload.get("label") or "root-claim").strip() or "root-claim"
+        if not bootstrap_token:
             return JSONResponse(
-                {"error": "bootstrap_token, username, and password are required"},
+                {"error": "bootstrap_token is required"},
                 status_code=400,
             )
 
-        if not admin_bootstrap.validate_bootstrap_token(bootstrap_token):
-            await audit.log_event(
-                "admin.claim_fail",
-                detail=audit.request_detail(request),
-            )
-            return JSONResponse(
-                {"error": "invalid bootstrap token"}, status_code=401,
-            )
-
-        policy_err = await password_policy.validate_new_password(password)
-        if policy_err:
-            return JSONResponse({"error": policy_err}, status_code=400)
-
         try:
-            user = await auth_db.create_user(username, password)
-        except asyncpg.UniqueViolationError:
-            return JSONResponse(
-                {"error": "username taken"}, status_code=409,
+            result = await auth_db.claim_root_and_transfer_data(
+                bootstrap_token, token_label=label,
             )
         except ValueError as exc:
-            return JSONResponse({"error": str(exc)}, status_code=400)
+            await audit.log_event(
+                "admin.claim_fail",
+                detail={**audit.request_detail(request), "reason": str(exc)},
+            )
+            return JSONResponse(
+                {"error": str(exc)}, status_code=401,
+            )
 
-        uid = UUID(user["id"])
-        await auth_db.set_admin(uid, True)
-        admin_bootstrap.delete_bootstrap_file()
+        from lib import auth_middleware
+        auth_middleware.invalidate_admin_cache()
+
+        root = result["root"]
+        uid = UUID(root["id"])
+        token = result["token"]
 
         await audit.log_event(
             "admin.claimed",
             actor_user_id=uid,
-            detail=audit.request_detail(request),
+            detail={
+                **audit.request_detail(request),
+                "principal": auth_db.ROOT_PRINCIPAL_USERNAME,
+                "transferred": result.get("transferred", {}),
+            },
         )
         await audit.log_event(
             "user.register",
             actor_user_id=uid,
-            detail={**audit.request_detail(request), "is_admin": True},
+            detail={**audit.request_detail(request), "is_admin": True, "principal": "root"},
         )
 
-        token = await auth_db.create_token(uid, label="admin-claim")
         await audit.log_event(
             "login.success",
             actor_user_id=uid,
             target_id=UUID(token["id"]),
-            detail={**audit.request_detail(request), "label": "admin-claim"},
+            detail={**audit.request_detail(request), "label": label},
         )
 
-        # Re-fetch so the returned user dict has is_admin=True (the
-        # original create_user returned the row before we set it).
         refreshed = await auth_db.get_user_by_id(uid)
         return JSONResponse({
+            "root": refreshed,
             "user": refreshed,
+            "transferred": result.get("transferred", {}),
             "token": token,
         }, status_code=201)
 
     @mcp.custom_route("/auth/register", methods=["POST"])
     async def register(request: Request):
         """
-        Open self-registration. Anyone can create a user; there is no
-        admin approval step, and the first registrant gets no special
-        treatment. Each user sees only their own memories.
+        Legacy self-registration. Before root is claimed, this remains
+        available for old personal workflows. After root/admin mode is
+        active, user creation moves behind admin provisioning.
         """
+        if await auth_db.count_admins() > 0 and not getattr(request.state, "is_admin", False):
+            return JSONResponse(
+                {"error": "registration closed; use admin provisioning"},
+                status_code=403,
+            )
+
         ip = rate_limit.client_ip(request)
         allowed, retry = rate_limit.check_register(ip)
         if not allowed:

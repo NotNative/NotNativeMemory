@@ -165,7 +165,7 @@
     <strong>NotNativeMemory</strong>
     {% if username %}
       <span class="sep">|</span>
-      <span>{{ username }}{% if is_admin %} <small style="color:var(--faint-fg);">(admin)</small>{% endif %}</span>
+      <span>{{ username }}{% if is_admin %} <small style="color:var(--faint-fg);">({% if username == "root" %}root{% else %}admin{% endif %})</small>{% endif %}</span>
       <span class="sep">|</span>
       <a href="/memories">Memories</a>
       <span class="sep">|</span>
@@ -197,20 +197,20 @@
     <button type="button" class="theme-toggle" id="theme-toggle"
             aria-label="Toggle color theme"></button>
   </nav>
-  {% if single_user_mode and request.url.path != "/enable-multiuser" %}
+  {% if single_user_mode and request.url.path != "/enable-multiuser" and not root_token %}
   <div style="background: var(--imp-high-bg); color: var(--imp-high-fg);
               padding: 0.6em 0.9em; margin: 0 0 1em 0;
               border: 1px solid var(--border); border-radius: 4px;
               display: flex; align-items: center; gap: 0.75em;
               flex-wrap: wrap;">
-    <strong>Single-user mode.</strong>
+    <strong>Legacy single-user mode.</strong>
     <span style="flex: 1;">No auth required. Anyone reaching this URL
       acts as <code>{{ username }}</code>.</span>
     <a href="/enable-multiuser"
        style="background: var(--btn-bg); color: var(--btn-fg);
               padding: 0.4em 0.9em; border-radius: 3px;
               text-decoration: none; font-weight: bold;">
-      Switch to Multi-User Mode
+      Claim Instance
     </a>
   </div>
   {% endif %}

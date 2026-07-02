@@ -144,6 +144,46 @@ except Exception as exc:
     }
 }
 
+function Stop-ExistingDockerDeployment {
+    $existing = @()
+    foreach ($name in @("MCP-server", "MCP-postgres")) {
+        docker container inspect $name 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { $existing += $name }
+    }
+
+    if ($existing.Count -eq 0) { return }
+
+    Write-Step "Stopping existing Docker deployment..."
+    Write-Info "Found existing container(s): $($existing -join ', ')"
+    Write-Info "Stopping/removing containers only; database, model, and state files are preserved."
+    Invoke-Native docker compose --progress=plain -f docker/docker-compose.yml down --remove-orphans
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "Failed to stop existing Docker deployment (docker compose down exited $LASTEXITCODE)."
+        Write-Info "Check Docker Desktop, then rerun the installer."
+        exit 1
+    }
+}
+
+function Offer-ClaimCode {
+    param([string]$HostName, [int]$Port)
+
+    Write-Host ""
+    Write-Step "Optional Instance Claim"
+    Write-Info "Claiming is optional. Skip it to keep legacy single-user behavior."
+    Write-Info "Claim only when you want root-token auth, NNO-managed users, or multi-user isolation."
+    $claimAns = Read-Host "  Generate a one-time claim code now? [y/N]"
+    if ($claimAns -notmatch '^[Yy]') {
+        Write-Info "Skipping claim setup. You can visit http://${HostName}:${Port}/enable-multiuser later."
+        return
+    }
+
+    Invoke-Native powershell -ExecutionPolicy Bypass -File scripts/claim-code.ps1 -HostName $HostName -Port $Port
+    if ($LASTEXITCODE -ne 0) {
+        Write-Warn "Claim-code generation failed. You can retry later:"
+        Write-Info "powershell -ExecutionPolicy Bypass -File scripts\claim-code.ps1"
+    }
+}
+
 # Detect which supported agent CLIs are on PATH and wire hooks + MCP
 # registration for whichever is present. Returns the list of agents
 # that were configured so the caller can tailor the summary output.
@@ -662,6 +702,8 @@ MEMORY_APP_DB_PASSWORD=$APP_DB_PASSWORD
 Write-Info "Saved to .env"
 
 if ($useDocker) {
+    Stop-ExistingDockerDeployment
+
     # -----------------------------------------------------------------------
     # 5. Build Docker image
     # All Python deps live inside the container - no host pip install needed.
@@ -1087,6 +1129,35 @@ $serverMgmtBlurb
 
 The server auto-starts on boot (``restart: unless-stopped``).
 
+## Optional: Claim This Instance
+
+Claiming is optional. If you keep using NNM as a personal/legacy
+single-user server, no action is required and existing local
+integrations keep working.
+
+Claim the instance only when you want root-token auth, NNO-managed
+users, or multi-user isolation:
+
+``````
+http://${HOSTNAME}:${MCP_PORT}/enable-multiuser
+``````
+
+The claim page creates a one-time code in ``state/admin_bootstrap.txt``.
+After you enter it, NNM shows a root token once for root NNA.
+
+If you skip this now, generate a claim code later from the install
+directory:
+
+``````
+powershell -ExecutionPolicy Bypass -File scripts\claim-code.ps1
+``````
+
+If an old unclaimed code may have been exposed, rotate it:
+
+``````
+powershell -ExecutionPolicy Bypass -File scripts\claim-code.ps1 -Rotate
+``````
+
 ## Claude Code Configuration
 
 ### This machine (already configured by installer)
@@ -1157,6 +1228,35 @@ Starts on http://0.0.0.0:$MCP_PORT. Other machines connect to http://${HOSTNAME}
 **stdio mode (launched automatically by Claude Code / LM Studio on THIS machine):**
 No manual start needed. The MCP client launches the server as a child process.
 
+## Optional: Claim This Instance
+
+Claiming is optional. If you keep using NNM as a personal/legacy
+single-user server, no action is required and existing local
+integrations keep working.
+
+Claim the instance only when you want root-token auth, NNO-managed
+users, or multi-user isolation:
+
+``````
+http://${HOSTNAME}:${MCP_PORT}/enable-multiuser
+``````
+
+The claim page creates a one-time code in ``state/admin_bootstrap.txt``.
+After you enter it, NNM shows a root token once for root NNA.
+
+If you skip this now, generate a claim code later from the install
+directory:
+
+``````
+powershell -ExecutionPolicy Bypass -File scripts\claim-code.ps1
+``````
+
+If an old unclaimed code may have been exposed, rotate it:
+
+``````
+powershell -ExecutionPolicy Bypass -File scripts\claim-code.ps1 -Rotate
+``````
+
 ## Claude Code Configuration
 
 ### This machine (already configured by installer)
@@ -1216,6 +1316,10 @@ You should see the stored memory come back with a similarity score.
 "@ | Set-Content -Path "SETUP_COMPLETE.md" -Encoding UTF8
 }
 
+if ($useDocker) {
+    Offer-ClaimCode -HostName $HOSTNAME -Port $MCP_PORT
+}
+
 Write-Host ""
 Write-Host "+==========================================+"
 Write-Host "|  Setup Complete!                         |"
@@ -1246,5 +1350,7 @@ if ($useDocker) {
 } else {
     Write-Info "Start the server:  python server.py"
 }
+Write-Info "Optional claim:    http://${HOSTNAME}:${MCP_PORT}/enable-multiuser"
+Write-Info "                  Skip this unless you want root-token/NNO multi-user mode."
 Write-Info "Full details:      SETUP_COMPLETE.md"
 Write-Host ""

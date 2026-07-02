@@ -1,28 +1,53 @@
 {% extends "base.html" %}
-{% block title %}Enable multi-user mode - NotNativeMemory{% endblock %}
+{% block title %}Claim instance - NotNativeMemory{% endblock %}
 {% block content %}
-<h1>Switch to multi-user mode</h1>
+<h1>Claim this NNM instance</h1>
 
+{% if root_token %}
+<p class="flash"><strong>Instance claimed.</strong> Save this root token now.
+  It will not be shown again.</p>
+
+<label>
+  Root token{% if root_token_label %} ({{ root_token_label }}){% endif %}
+  <textarea readonly rows="4" spellcheck="false"
+            style="width:100%;font-family:ui-monospace,monospace;">{{ root_token }}</textarea>
+</label>
+
+<p>Configure this token as the Bearer token for root NNA's NNM MCP
+  connection. Future unauthenticated legacy access is disabled.</p>
+
+{% if transferred %}
+<p style="color:var(--muted-fg);font-size:0.9em;">
+  Legacy data adopted by root:
+  {% for table, count in transferred.items() %}
+    <code>{{ table }}={{ count }}</code>{% if not loop.last %} {% endif %}
+  {% endfor %}
+</p>
+{% endif %}
+
+<p><a href="/memories">Continue to memories</a></p>
+{% else %}
 <p>This server is currently in <strong>single-user mode</strong>: every
-  caller is implicitly authenticated as the <code>owner</code> account
-  with no token required. Enable multi-user mode to require Bearer-token
-  auth and add per-user isolation.</p>
+  caller is implicitly authenticated as <code>owner</code> with no token
+  required. Claiming the instance creates the root principal, issues a
+  root Bearer token, adopts legacy memories into root ownership, and
+  requires tokens for future access.</p>
 
 <p>How the transition works:</p>
 <ol>
   <li>A one-time bootstrap token has been written to
       <code>state/admin_bootstrap.txt</code> on the server filesystem.</li>
-  <li>Read it from disk and paste it below along with the username and
-      password you want for the first admin account.</li>
+  <li>Read it from disk and paste it below.</li>
   <li>On submit, all data currently owned by <code>owner</code> moves
-      to your new admin account, the sentinel is removed, and the
-      bootstrap file is deleted. Subsequent requests require auth.</li>
+      to <code>root</code>, the sentinel is removed, and the bootstrap
+      file is deleted.</li>
+  <li>The root token is shown once for root NNA configuration.</li>
 </ol>
 
 <p style="color:var(--muted-fg);font-size:0.9em;">
   The bootstrap file is intentionally not displayed in the browser.
   Reading it requires filesystem access to the server (or its bind
-  mount), which is the trust boundary for granting admin.
+  mount), which is the trust boundary for claiming root.
 </p>
 
 {% if error %}<p class="error">{{ error }}</p>{% endif %}
@@ -40,29 +65,13 @@
     </small>
   </label>
   <label>
-    Admin username
-    <input name="username" required autocomplete="username"
-           pattern="[A-Za-z0-9_.\-]{1,64}"
-           title="Letters, digits, dot, dash, underscore. Up to 64 characters.">
+    Token label
+    <input name="label" autocomplete="off" value="root-nna">
     <small style="color:var(--muted-fg);">
-      Cannot be <code>owner</code> (reserved for the single-user sentinel).
+      Use a label that reminds you where this token will be installed.
     </small>
   </label>
-  <label>
-    Password
-    <input name="password" type="password" required minlength="8"
-           autocomplete="new-password">
-    <small style="color:var(--muted-fg);">
-      Length beats complexity. A memorable passphrase is harder to
-      crack than a short string of punctuation. Breached passwords
-      are rejected.
-    </small>
-  </label>
-  <label>
-    Confirm password
-    <input name="password_confirm" type="password" required minlength="8"
-           autocomplete="new-password">
-  </label>
-  <button type="submit">Enable multi-user mode</button>
+  <button type="submit">Claim instance</button>
 </form>
+{% endif %}
 {% endblock %}

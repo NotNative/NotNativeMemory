@@ -56,11 +56,17 @@ async def count_admins() -> int:
     return int(row["n"] or 0)
 
 
+# Root principal username used once an instance is claimed. The root
+# principal is represented as an admin user internally so the existing
+# auth, RLS, token, and admin-route machinery stays compatible.
+ROOT_PRINCIPAL_USERNAME = "root"
+
+
 # Sentinel username used in single-user mode. Reserved: callers cannot
 # register this name through the web flow (the auth_routes.register
 # handler rejects it). Auto-created on first need by
-# ensure_owner_sentinel and removed by claim_admin_and_transfer_data
-# when the operator goes multi-user.
+# ensure_owner_sentinel and removed by the claim flows when the
+# operator claims the instance.
 OWNER_SENTINEL_USERNAME = "owner"
 
 
@@ -128,9 +134,9 @@ async def transfer_owned_data(from_uid: UUID, to_uid: UUID) -> Dict[str, int]:
     """
     Reassign ownership of every owner_scoped row from one user to
     another. Returns a per-table count of rows touched. Intended for
-    the single-user -> multi-user transition: when the first admin is
-    claimed, the data the owner sentinel accumulated transfers to the
-    new admin so it feels like "their" stuff.
+    the single-user -> claimed-root transition: when root is claimed,
+    the data the owner sentinel accumulated transfers to root so the
+    legacy instance keeps its existing memories.
 
     Runs under admin_conn so the UPDATEs are not filtered by RLS
     (which would otherwise see zero rows for the admin's session).
@@ -210,6 +216,41 @@ async def claim_admin_and_transfer_data(
     admin_bootstrap.delete_bootstrap_file()
 
     return {"admin": admin, "transferred": counts}
+
+
+async def claim_root_and_transfer_data(
+    bootstrap_token: str,
+    token_label: str = "root-claim",
+) -> Dict[str, Any]:
+    """
+    Claim the NNM instance root with a bootstrap token.
+
+    This is the root-token version of the legacy first-admin flow. It
+    creates or reuses the reserved ``root`` principal, marks it admin,
+    transfers any single-user owner-sentinel data to root, deletes the
+    sentinel, removes the bootstrap file, and returns a freshly minted
+    Bearer token. The raw token is shown exactly once by the caller.
+    """
+    from lib import admin_bootstrap
+
+    if not admin_bootstrap.validate_bootstrap_token(bootstrap_token):
+        raise ValueError("invalid bootstrap token")
+
+    sentinel = await get_user_by_username(OWNER_SENTINEL_USERNAME)
+    root = await ensure_user(ROOT_PRINCIPAL_USERNAME)
+    root_uid = UUID(root["id"])
+    await set_admin(root_uid, True)
+    root["is_admin"] = True
+
+    counts: Dict[str, int] = {}
+    if sentinel is not None and UUID(str(sentinel["id"])) != root_uid:
+        counts = await transfer_owned_data(UUID(str(sentinel["id"])), root_uid)
+        await delete_user(UUID(str(sentinel["id"])))
+
+    admin_bootstrap.delete_bootstrap_file()
+    token = await create_token(root_uid, label=token_label or "root-claim")
+
+    return {"root": root, "admin": root, "transferred": counts, "token": token}
 
 
 async def set_admin(user_id: UUID, is_admin: bool) -> None:
@@ -352,8 +393,8 @@ async def create_user(username: str, password: str) -> Dict[str, Any]:
     Create a user. Raises asyncpg.UniqueViolationError if the username
     is taken. Hashes the password with scrypt before writing.
 
-    No admin concept anymore. Every user is equal; each sees only their
-    own memories.
+    Create a human/service principal. Admin/root status is assigned by
+    explicit bootstrap or maintenance flows, never from this payload.
     """
     if not username or not username.strip():
         raise ValueError("username is required")

@@ -2957,10 +2957,10 @@ def _start_foreground(port: int) -> None:
     # them; reusing the pre-uvicorn pool inside uvicorn's loop would
     # raise on first use).
     #
-    # Note: the legacy admin-bootstrap-on-boot has been removed. A
-    # fresh install is single-user mode; the auth middleware handles
-    # that without a token file. The operator opts into multi-user
-    # via the web GUI, which writes the bootstrap on demand. See
+    # Note: bootstrap-on-boot is intentionally lazy. A fresh install
+    # remains in legacy single-user mode until the operator claims
+    # the instance via the web GUI, which writes the claim code on
+    # demand and returns a shown-once root token. See
     # lib/auth_middleware.py and lib/web_routes.py::enable_multiuser.
     import asyncio
     from lib import db as _db_module
@@ -3023,12 +3023,12 @@ async def _cli_create_user(username: str) -> int:
 
 async def _cli_reset_admin() -> int:
     """
-    Clear the admin role on every user currently flagged, bump each of
+    Clear the root/admin role on every user currently flagged, bump each of
     their token_generation counters so outstanding sessions die, and
     remove any stale bootstrap token file so the next server start
     regenerates a fresh one.
 
-    No HTTP path toggles is_admin; this CLI and the claim-admin flow
+    No HTTP path toggles is_admin; this CLI and the root-claim flow
     are the only writers. Running this always succeeds as a no-op
     when no admin exists (still cleans up a stale file if present).
     """
@@ -3046,12 +3046,12 @@ async def _cli_reset_admin() -> int:
 
     await db.close_pool()
 
-    print(f"Demoted {len(admin_ids)} admin user(s).")
+    print(f"Demoted {len(admin_ids)} root/admin user(s).")
     for uid in admin_ids:
         print(f"  - {uid}")
     if file_removed:
-        print("Removed stale admin bootstrap file.")
-    print("On next server start, a fresh bootstrap token will be issued.")
+        print("Removed stale root claim file.")
+    print("Visit /enable-multiuser to generate a fresh root claim code.")
     print("See state/admin_bootstrap.txt after startup.")
     return 0
 

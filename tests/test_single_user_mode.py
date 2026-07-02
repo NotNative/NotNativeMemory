@@ -1,22 +1,22 @@
 """
 Regression test for the implicit single-user mode and the transition
-into multi-user via claim_admin_and_transfer_data.
+into claimed-root mode via claim_root_and_transfer_data.
 
 Single-user mode is the default for fresh installs: zero admins
 exist, the auth middleware authenticates every request as the owner
 sentinel, no Bearer token required. The operator opts into multi-user
-by visiting /enable-multiuser and claiming the first admin; on claim,
-the sentinel's data transfers to the new admin and the middleware
+by visiting /enable-multiuser and claiming root; on claim,
+the sentinel's data transfers to root and the middleware
 flips to Bearer-required.
 
 This test exercises:
 - ensure_owner_sentinel idempotently creates and returns the owner
 - HTTP requests in single-user mode authenticate as owner with no token
 - A memory stored as owner carries owner_user_id = sentinel.id
-- claim_admin_and_transfer_data with a bad token raises ValueError
-- claim_admin_and_transfer_data with a valid token + creds creates
-  the admin, transfers all owner-owned data, deletes the sentinel,
-  and removes the bootstrap file
+- claim_root_and_transfer_data with a bad token raises ValueError
+- claim_root_and_transfer_data with a valid token creates/promotes
+  root, transfers all owner-owned data, deletes the sentinel, removes
+  the bootstrap file, and returns a root Bearer token
 - After invalidate_admin_cache, the middleware now requires a Bearer
   token (single-user bypass no longer fires)
 
@@ -146,15 +146,15 @@ async def run() -> int:
     check("owner-authored memory carries sentinel owner_user_id",
           row is not None and row["owner_user_id"] == owner_uid)
 
-    # -- 5. claim_admin_and_transfer_data validates the token ---------
+    # -- 5. claim_root_and_transfer_data validates the token ----------
     raised = False
     try:
-        await auth_db.claim_admin_and_transfer_data(
-            "wrong-token", "would-be-admin", "password-1234",
+        await auth_db.claim_root_and_transfer_data(
+            "wrong-token", token_label="bad-test",
         )
     except ValueError as exc:
         raised = "invalid bootstrap token" in str(exc)
-    check("claim_admin_and_transfer_data rejects an invalid token",
+    check("claim_root_and_transfer_data rejects an invalid token",
           raised)
 
     # -- 6. With a valid token, the transition succeeds ---------------
@@ -167,18 +167,19 @@ async def run() -> int:
     check("bootstrap token readable from disk",
           isinstance(bootstrap_token, str) and len(bootstrap_token) > 0)
 
-    admin_username = f"admin-{secrets.token_hex(4)}"
-    result = await auth_db.claim_admin_and_transfer_data(
-        bootstrap_token, admin_username, "claim-test-password-1234",
+    result = await auth_db.claim_root_and_transfer_data(
+        bootstrap_token, token_label=f"root-test-{secrets.token_hex(4)}",
     )
-    admin = result["admin"]
+    admin = result["root"]
     transferred = result["transferred"]
     admin_uid = UUID(admin["id"])
 
-    check("admin was created with the requested username",
-          admin["username"] == admin_username)
-    check("admin is_admin = True",
+    check("root principal was created",
+          admin["username"] == auth_db.ROOT_PRINCIPAL_USERNAME)
+    check("root is_admin = True",
           admin["is_admin"] is True)
+    check("root claim returned shown-once token",
+          result.get("token", {}).get("token", "").startswith("nnm_"))
     check("transferred report includes memories table",
           "memories" in transferred and transferred["memories"] >= 1)
 

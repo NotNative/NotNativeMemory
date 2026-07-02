@@ -1,16 +1,41 @@
 {% extends "base.html" %}
-{% block title %}Claim admin — NotNativeMemory{% endblock %}
+{% block title %}Claim root - NotNativeMemory{% endblock %}
 {% block content %}
-<h1>First-run: claim admin</h1>
+<h1>Claim root</h1>
 
-<p>No admin account exists yet. To register the first admin, paste the
+{% if root_token %}
+<p class="flash"><strong>Root claimed.</strong> Save this token now.
+  It will not be shown again.</p>
+
+<label>
+  Root token{% if root_token_label %} ({{ root_token_label }}){% endif %}
+  <textarea readonly rows="4" spellcheck="false"
+            style="width:100%;font-family:ui-monospace,monospace;">{{ root_token }}</textarea>
+</label>
+
+<p>Configure this token as the Bearer token for root NNA's NNM MCP
+  connection.</p>
+
+{% if transferred %}
+<p style="color:var(--muted-fg);font-size:0.9em;">
+  Legacy data adopted by root:
+  {% for table, count in transferred.items() %}
+    <code>{{ table }}={{ count }}</code>{% if not loop.last %} {% endif %}
+  {% endfor %}
+</p>
+{% endif %}
+
+<p><a href="/memories">Continue to memories</a></p>
+{% else %}
+<p>No root principal exists yet. To claim this instance, paste the
   bootstrap token from <code>state/admin_bootstrap.txt</code> on the
-  server filesystem, then pick a username and password.</p>
+  server filesystem. NNM will generate a root Bearer token for root
+  NNA configuration.</p>
 
 <p style="color:var(--muted-fg);font-size:0.9em;">
-  This page is only available until an admin is claimed. After that,
+  This page is only available until root is claimed. After that,
   the bootstrap file is deleted and this flow is no longer reachable.
-  To recover from a lost admin, stop the server and run
+  To recover from a lost root token, stop the server and run
   <code>python server.py --reset-admin</code>.
 </p>
 
@@ -29,26 +54,13 @@
     </small>
   </label>
   <label>
-    Username
-    <input name="username" required autocomplete="username"
-           pattern="[A-Za-z0-9_.\-]{1,64}"
-           title="Letters, digits, dot, dash, underscore. Up to 64 characters.">
-  </label>
-  <label>
-    Password
-    <input name="password" type="password" required minlength="8"
-           autocomplete="new-password">
+    Token label
+    <input name="label" autocomplete="off" value="root-nna">
     <small style="color:var(--muted-fg);">
-      Length beats complexity. A memorable passphrase is harder to
-      crack than a short string of punctuation. Breached passwords
-      are rejected.
+      Use a label that reminds you where this token will be installed.
     </small>
   </label>
-  <label>
-    Confirm password
-    <input name="password_confirm" type="password" required minlength="8"
-           autocomplete="new-password">
-  </label>
-  <button type="submit">Claim admin</button>
+  <button type="submit">Claim root</button>
 </form>
+{% endif %}
 {% endblock %}

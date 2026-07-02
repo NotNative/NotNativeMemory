@@ -162,7 +162,7 @@ is expected to be:
 2. Run `python -m nnm reset-admin` to clear the admin flag on every
    user and regenerate the bootstrap token file.
 3. Restart the server.
-4. Browse to the web GUI, claim admin via the new token.
+4. Browse to the web GUI, claim root via the new token.
 
 This section will be updated when the admin feature ships.
 

@@ -347,13 +347,13 @@ def register_routes(mcp) -> None:
         _set_session_cookie(resp, token["token"])
         return resp
 
-    # -- Claim admin ------------------------------------------------------
+    # -- Claim root -------------------------------------------------------
 
     @mcp.custom_route("/claim-admin", methods=["GET"])
     async def claim_admin_page(request: Request):
-        # Only available while the bootstrap file exists. Once an admin
-        # is claimed the file is deleted and this page 404s so casual
-        # visitors don't get an enticing target.
+        # Only available while the bootstrap file exists. Once root is
+        # claimed the file is deleted and this page redirects away so
+        # casual visitors don't get an enticing target.
         if not admin_bootstrap.bootstrap_file_exists():
             return RedirectResponse("/login", status_code=302)
         return _render_with_csrf(request, "claim_admin.html")
@@ -372,88 +372,68 @@ def register_routes(mcp) -> None:
 
         form = await request.form()
         bootstrap_token = (form.get("bootstrap_token") or "").strip()
-        username = (form.get("username") or "").strip()
-        password = form.get("password") or ""
-        confirm = form.get("password_confirm") or ""
+        label = (form.get("label") or "root-claim").strip() or "root-claim"
 
-        if not bootstrap_token or not username or not password:
+        if not bootstrap_token:
             return _render_with_csrf(
                 request, "claim_admin.html",
                 status_code=400,
-                error="Bootstrap token, username, and password are required.",
-            )
-        if password != confirm:
-            return _render_with_csrf(
-                request, "claim_admin.html",
-                status_code=400,
-                error="Passwords do not match.",
+                error="Bootstrap token is required.",
             )
 
-        if not admin_bootstrap.validate_bootstrap_token(bootstrap_token):
+        try:
+            result = await auth_db.claim_root_and_transfer_data(
+                bootstrap_token, token_label=label,
+            )
+        except ValueError as exc:
             await audit.log_event(
                 "admin.claim_fail",
-                detail=audit.request_detail(request),
+                detail={**audit.request_detail(request), "reason": str(exc)},
             )
             return _render_with_csrf(
                 request, "claim_admin.html",
                 status_code=401,
-                error="Invalid bootstrap token.",
-            )
-
-        policy_err = await password_policy.validate_new_password(password)
-        if policy_err:
-            return _render_with_csrf(
-                request, "claim_admin.html",
-                status_code=400,
-                error=policy_err,
-            )
-
-        try:
-            new_user = await auth_db.create_user(username, password)
-        except asyncpg.UniqueViolationError:
-            return _render_with_csrf(
-                request, "claim_admin.html",
-                status_code=409,
-                error="That username is taken.",
-            )
-        except ValueError as exc:
-            return _render_with_csrf(
-                request, "claim_admin.html",
-                status_code=400,
                 error=str(exc),
             )
 
-        # Promote and delete the file before minting the session token
-        # so a mid-flow crash never leaves us with a non-admin account
-        # and a still-valid bootstrap file.
-        uid = UUID(new_user["id"])
-        await auth_db.set_admin(uid, True)
-        admin_bootstrap.delete_bootstrap_file()
+        from lib import auth_middleware
+        auth_middleware.invalidate_admin_cache()
+
+        root = result["root"]
+        uid = UUID(root["id"])
+        token = result["token"]
 
         await audit.log_event(
             "admin.claimed",
             actor_user_id=uid,
-            detail=audit.request_detail(request),
+            detail={
+                **audit.request_detail(request),
+                "principal": auth_db.ROOT_PRINCIPAL_USERNAME,
+                "transferred": result.get("transferred", {}),
+                "via": "claim-admin",
+            },
         )
         await audit.log_event(
             "user.register",
             actor_user_id=uid,
-            detail={**audit.request_detail(request), "is_admin": True},
+            detail={**audit.request_detail(request), "is_admin": True, "principal": "root"},
         )
 
-        token = await auth_db.create_token(uid, label="web-session")
         await audit.log_event(
             "login.success",
             actor_user_id=uid,
             target_id=UUID(token["id"]),
-            detail={**audit.request_detail(request), "label": "web-session"},
+            detail={**audit.request_detail(request), "label": label},
         )
 
-        resp = RedirectResponse("/memories", status_code=303)
-        _set_session_cookie(resp, token["token"])
-        return resp
+        return _render_with_csrf(
+            request, "claim_admin.html",
+            root_token=token["token"],
+            root_token_label=label,
+            transferred=result.get("transferred", {}),
+        )
 
-    # -- Enable multi-user mode (transition out of single-user) -----------
+    # -- Claim instance (transition out of legacy single-user) ------------
 
     @mcp.custom_route("/enable-multiuser", methods=["GET"])
     async def enable_multiuser_page(request: Request):
@@ -482,44 +462,18 @@ def register_routes(mcp) -> None:
 
         form = await request.form()
         bootstrap_token = (form.get("bootstrap_token") or "").strip()
-        username = (form.get("username") or "").strip()
-        password = form.get("password") or ""
-        confirm = form.get("password_confirm") or ""
+        label = (form.get("label") or "root-claim").strip() or "root-claim"
 
-        if not bootstrap_token or not username or not password:
+        if not bootstrap_token:
             return _render_with_csrf(
                 request, "enable_multiuser.html",
                 status_code=400,
-                error="Bootstrap token, username, and password are required.",
-            )
-        if password != confirm:
-            return _render_with_csrf(
-                request, "enable_multiuser.html",
-                status_code=400,
-                error="Passwords do not match.",
-            )
-        if username == auth_db.OWNER_SENTINEL_USERNAME:
-            return _render_with_csrf(
-                request, "enable_multiuser.html",
-                status_code=400,
-                error=(
-                    f"'{auth_db.OWNER_SENTINEL_USERNAME}' is reserved for "
-                    f"the single-user sentinel. Pick a different admin "
-                    f"username."
-                ),
-            )
-
-        policy_err = await password_policy.validate_new_password(password)
-        if policy_err:
-            return _render_with_csrf(
-                request, "enable_multiuser.html",
-                status_code=400,
-                error=policy_err,
+                error="Bootstrap token is required.",
             )
 
         try:
-            result = await auth_db.claim_admin_and_transfer_data(
-                bootstrap_token, username, password,
+            result = await auth_db.claim_root_and_transfer_data(
+                bootstrap_token, token_label=label,
             )
         except ValueError as exc:
             await audit.log_event(
@@ -531,25 +485,21 @@ def register_routes(mcp) -> None:
                 status_code=401,
                 error=str(exc),
             )
-        except asyncpg.UniqueViolationError:
-            return _render_with_csrf(
-                request, "enable_multiuser.html",
-                status_code=409,
-                error="That username is taken.",
-            )
 
         # Cutover: the next request should see multi-user mode.
         from lib import auth_middleware
         auth_middleware.invalidate_admin_cache()
 
-        admin = result["admin"]
-        uid = UUID(admin["id"])
+        root = result["root"]
+        uid = UUID(root["id"])
+        token = result["token"]
 
         await audit.log_event(
             "admin.claimed",
             actor_user_id=uid,
             detail={
                 **audit.request_detail(request),
+                "principal": auth_db.ROOT_PRINCIPAL_USERNAME,
                 "transferred": result.get("transferred", {}),
                 "via": "enable-multiuser",
             },
@@ -557,20 +507,22 @@ def register_routes(mcp) -> None:
         await audit.log_event(
             "user.register",
             actor_user_id=uid,
-            detail={**audit.request_detail(request), "is_admin": True},
+            detail={**audit.request_detail(request), "is_admin": True, "principal": "root"},
         )
 
-        token = await auth_db.create_token(uid, label="web-session")
         await audit.log_event(
             "login.success",
             actor_user_id=uid,
             target_id=UUID(token["id"]),
-            detail={**audit.request_detail(request), "label": "web-session"},
+            detail={**audit.request_detail(request), "label": label},
         )
 
-        resp = RedirectResponse("/memories", status_code=303)
-        _set_session_cookie(resp, token["token"])
-        return resp
+        return _render_with_csrf(
+            request, "enable_multiuser.html",
+            root_token=token["token"],
+            root_token_label=label,
+            transferred=result.get("transferred", {}),
+        )
 
     # -- Register ---------------------------------------------------------
 
@@ -578,6 +530,8 @@ def register_routes(mcp) -> None:
     async def register_page(request: Request):
         if getattr(request.state, "user_id", None):
             return RedirectResponse("/memories", status_code=302)
+        if await auth_db.count_admins() > 0:
+            return RedirectResponse("/login", status_code=302)
         return _render_with_csrf(request, "register.html")
 
     @mcp.custom_route("/register", methods=["POST"])
@@ -585,6 +539,8 @@ def register_routes(mcp) -> None:
         csrf_err = await check_csrf(request)
         if csrf_err is not None:
             return csrf_err
+        if await auth_db.count_admins() > 0 and not getattr(request.state, "is_admin", False):
+            return RedirectResponse("/login", status_code=303)
 
         ip = rate_limit.client_ip(request)
         allowed, retry = rate_limit.check_register(ip)

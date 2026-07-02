@@ -192,14 +192,14 @@ Implemented in `lib/web_routes.py` over Starlette, sharing the bearer-token mode
 
 **Routes:**
 
-- `/login`, `/register` — auth.
+- `/login`, `/register` - auth. Registration is legacy-only once root/admin mode is active.
 - `/memories` — list/filter/sort/search; inline HTMX edits; bulk delete; rescope between projects/scopes. Filters: project, scope, tag, importance floor, source kind (`user-stated` / `tool-result` / `model-inferred`), free-text content search.
 - `/facts` — temporal browser with an "include superseded" toggle.
 - `/tokens` — mint/label/revoke bearer tokens.
 - `/conflicts` — side-by-side conflict resolution.
 - `/admin/audit`, `/admin/metrics` — admin-only.
 
-**Single- vs multi-user mode.** With no admin user provisioned, the GUI redirects from `/` to `/memories` and shows a banner explaining how to enable multi-user mode. The Dockerfile includes `templates/` so rendering works out of the box.
+**Legacy vs claimed/root mode.** With no root/admin user provisioned, the GUI redirects from `/` to `/memories` and shows a banner explaining how to claim the instance. Claiming creates the reserved `root` principal, adopts legacy `owner` data, and returns a shown-once root token. The Dockerfile includes `templates/` so rendering works out of the box.
 
 ---
 

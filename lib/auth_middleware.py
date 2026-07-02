@@ -181,8 +181,8 @@ class BearerAuthMiddleware(BaseHTTPMiddleware):
 
         # Single-user mode: zero admins means every caller (including
         # LAN clients) authenticates as the owner sentinel. Default
-        # for fresh installs; the operator opts into multi-user via
-        # the web GUI by claiming the first admin.
+        # for fresh installs; the operator opts into token-required
+        # root mode via the web GUI by claiming the instance.
         if await self._try_single_user_bypass(request):
             return await call_next(request)
 
